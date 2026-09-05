@@ -8,5 +8,7 @@ Thumbs.db
 
 # plans/docs — giữ local, không lên git
 BACKEND-PLAN.html
+PROMPT-SPEC.html
+research/
 docs/
 README.md
