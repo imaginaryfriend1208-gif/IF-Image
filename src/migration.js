@@ -34,6 +34,30 @@ export const migrators = [
             };
         }
     },
+
+    // 2 → 3: add the AUTOMATIC1111-compatible API connection section.
+    // The legacy Comfy Cloud Proxy credentials/URL are never read, moved or
+    // overwritten: comfy.* stays exactly as-is, a1111.* starts blank.
+    (s) => {
+        if (!s.backends) s.backends = {};
+        if (!s.backends.a1111) {
+            s.backends.a1111 = {
+                baseUrl: '',
+                auth: '',
+                // Checkpoint is discovered + selected explicitly; never
+                // inferred from the dialect/profile.
+                checkpoint: '',
+            };
+        }
+        // Connection source for the SD-side "comfy" slot: 'legacy_proxy'
+        // keeps the existing proxy config as the active default.
+        if (!s.backends.comfy || typeof s.backends.comfy !== 'object') {
+            s.backends.comfy = {};
+        }
+        if (s.backends.comfy.connection === undefined) {
+            s.backends.comfy.connection = 'legacy_proxy';
+        }
+    },
 ];
 
 /** Current schema version = number of migrators applied from zero. */

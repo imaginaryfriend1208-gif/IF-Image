@@ -16,10 +16,21 @@ export const defaultSettings = {
             model: 'nai-diffusion-4-5-full',
         },
         comfy: {
+            // 'legacy_proxy' = user's own comfy-cloud-forge-proxy (username/
+            // password, /internal/* endpoints); 'a1111' = hosted
+            // AUTOMATIC1111-compatible API (raw Authentication string,
+            // /sdapi/v1/* endpoints). Never mixed.
+            connection: 'legacy_proxy',
             baseUrl: 'http://localhost:7861',
             username: '',
             password: '',
             profile: 'anima',
+        },
+        a1111: {
+            baseUrl: '',
+            auth: '',
+            // Discovered checkpoint title; set explicitly via Refresh Models.
+            checkpoint: '',
         },
     },
     llm: {

@@ -2,6 +2,7 @@
 // Template literals mounted into #extensions_settings2 by index.js.
 
 import { NAI_MODELS } from './backends/nai.js';
+import { resolveCheckpoint } from './backends/a1111.js';
 import { PROFILES, PROFILE_KEYS, applyProfile } from './profiles.js';
 import { getAllCharacters, saveCharacter, removeCharacter, createDefaultCharacter } from './storage/chars.js';
 import { getAllPersonas, savePersona, getAllStyles, saveStyle, createDefaultPersona, createDefaultStyle } from './storage/presets.js';
@@ -13,9 +14,10 @@ import { assemblePrompt } from './prompt/render.js';
  * @param {object} args.settings extension_settings.IF_Image (live reference)
  * @param {() => void} args.save saveSettingsDebounced wrapper
  * @param {NaiClient} args.nai
- * @param {ComfyProxyClient} args.comfy
+ * @param {ComfyProxyClient} args.comfy legacy proxy client (connection 'legacy_proxy')
+ * @param {A1111Client} args.a1111 AUTOMATIC1111-compatible API client (connection 'a1111')
  */
-export function renderDrawer({ settings, save, nai, comfy }) {
+export function renderDrawer({ settings, save, nai, comfy, a1111 }) {
     const html = `
     <div class="if-image-settings">
         <div class="if-image-title">
@@ -51,29 +53,74 @@ export function renderDrawer({ settings, save, nai, comfy }) {
 
             <hr class="if-image-sep"/>
 
-            <h3>Comfy proxy</h3>
+            <h3>Stable Diffusion backend</h3>
             <div class="if-image-row">
-                <label for="if_comfy_url">Proxy URL</label>
-                <input id="if_comfy_url" type="text" class="text_pole textarea_compact" placeholder="http://localhost:7861" value="">
-            </div>
-            <div class="if-image-row">
-                <label for="if_comfy_user">Username</label>
-                <input id="if_comfy_user" type="text" class="text_pole textarea_compact" autocomplete="off" value="">
-            </div>
-            <div class="if-image-row">
-                <label for="if_comfy_pass">Password</label>
-                <input id="if_comfy_pass" type="password" class="text_pole textarea_compact" autocomplete="off" value="">
-            </div>
-            <div class="if-image-row">
-                <label for="if_comfy_profile">Default profile</label>
-                <select id="if_comfy_profile" class="text_pole">
-                    ${PROFILE_KEYS.map(k => `<option value="${k}">${PROFILES[k].label}</option>`).join('')}
+                <label for="if_sd_connection">Connection type</label>
+                <select id="if_sd_connection" class="text_pole">
+                    <option value="legacy_proxy">Comfy Cloud Proxy (Legacy)</option>
+                    <option value="a1111">AUTOMATIC1111-compatible API</option>
                 </select>
             </div>
-            <div class="if-image-row">
-                <button id="if_comfy_test" class="menu_button">Test connection</button>
+
+            <!-- Legacy comfy-cloud-forge-proxy block -->
+            <div data-if-conn="legacy_proxy">
+                <div class="if-image-row">
+                    <label for="if_comfy_url">Proxy URL</label>
+                    <input id="if_comfy_url" type="text" class="text_pole textarea_compact" placeholder="http://localhost:7861" value="">
+                </div>
+                <div class="if-image-row">
+                    <label for="if_comfy_user">Username</label>
+                    <input id="if_comfy_user" type="text" class="text_pole textarea_compact" autocomplete="off" value="">
+                </div>
+                <div class="if-image-row">
+                    <label for="if_comfy_pass">Password</label>
+                    <input id="if_comfy_pass" type="password" class="text_pole textarea_compact" autocomplete="off" value="">
+                </div>
+                <div class="if-image-row">
+                    <label for="if_comfy_profile">Default profile</label>
+                    <select id="if_comfy_profile" class="text_pole">
+                        ${PROFILE_KEYS.map(k => `<option value="${k}">${PROFILES[k].label}</option>`).join('')}
+                    </select>
+                </div>
+                <div class="if-image-row">
+                    <div style="display:flex; gap:6px;">
+                        <button id="if_comfy_test" class="menu_button">Test connection</button>
+                        <button id="if_comfy_models" class="menu_button">Refresh Models</button>
+                    </div>
+                </div>
+                <div class="if-image-row">
+                    <label for="if_comfy_checkpoint">Checkpoint (proxy model)</label>
+                    <select id="if_comfy_checkpoint" class="text_pole">
+                        <option value="">-- Refresh Models to load --</option>
+                    </select>
+                </div>
+                <div class="if-image-result" id="if_comfy_result"></div>
             </div>
-            <div class="if-image-result" id="if_comfy_result"></div>
+
+            <!-- AUTOMATIC1111-compatible hosted API block -->
+            <div data-if-conn="a1111" style="display:none;">
+                <div class="if-image-row">
+                    <label for="if_a1111_url">API base URL</label>
+                    <input id="if_a1111_url" type="text" class="text_pole textarea_compact" placeholder="https://your-host.example" value="">
+                </div>
+                <div class="if-image-row">
+                    <label for="if_a1111_auth">Authentication (as provided by the service)</label>
+                    <input id="if_a1111_auth" type="password" class="text_pole textarea_compact" autocomplete="off" placeholder="user:password or the raw key string" value="">
+                </div>
+                <div class="if-image-row">
+                    <div style="display:flex; gap:6px;">
+                        <button id="if_a1111_test" class="menu_button">Test Connection</button>
+                        <button id="if_a1111_models" class="menu_button">Refresh Models</button>
+                    </div>
+                </div>
+                <div class="if-image-row">
+                    <label for="if_a1111_checkpoint">Checkpoint</label>
+                    <select id="if_a1111_checkpoint" class="text_pole">
+                        <option value="">-- Refresh Models to load --</option>
+                    </select>
+                </div>
+                <div class="if-image-result" id="if_a1111_result"></div>
+            </div>
         </div>
 
         <!-- ============ TEST GEN TAB ============ -->
@@ -81,7 +128,7 @@ export function renderDrawer({ settings, save, nai, comfy }) {
             <div class="if-image-row">
                 <label>Backend</label>
                 <div class="if-image-radios">
-                    <label><input type="radio" name="if_test_backend" value="comfy"> Comfy proxy</label>
+                    <label><input type="radio" name="if_test_backend" value="comfy"> SD backend (connection type from Backends)</label>
                     <label><input type="radio" name="if_test_backend" value="nai"> NovelAI</label>
                 </div>
             </div>
@@ -90,6 +137,13 @@ export function renderDrawer({ settings, save, nai, comfy }) {
                 <label for="if_test_profile">Profile</label>
                 <select id="if_test_profile" class="text_pole">
                     ${PROFILE_KEYS.map(k => `<option value="${k}">${PROFILES[k].label}</option>`).join('')}
+                </select>
+            </div>
+
+            <div class="if-image-row" data-if-sd-checkpoint style="display:none;">
+                <label for="if_test_checkpoint">Checkpoint (from the backend's Refresh Models)</label>
+                <select id="if_test_checkpoint" class="text_pole">
+                    <option value="">-- none discovered --</option>
                 </select>
             </div>
 
@@ -126,7 +180,10 @@ export function renderDrawer({ settings, save, nai, comfy }) {
             </div>
 
             <div class="if-image-row">
-                <button id="if_test_generate" class="menu_button">Generate</button>
+                <div style="display:flex; gap:6px;">
+                    <button id="if_test_generate" class="menu_button">Generate</button>
+                    <button id="if_test_cancel" class="menu_button" style="display:none;">Cancel</button>
+                </div>
             </div>
 
             <div class="if-image-result" id="if_test_error" style="display:none;"></div>
@@ -285,12 +342,23 @@ export function renderDrawer({ settings, save, nai, comfy }) {
     const naiModel = $('if_nai_model');
     const naiTest = $('if_nai_test');
     const naiResult = $('if_nai_result');
+    const sdConnection = $('if_sd_connection');
+    const comfyBlock = el.querySelector('[data-if-conn="legacy_proxy"]');
+    const a1111Block = el.querySelector('[data-if-conn="a1111"]');
     const comfyUrl = $('if_comfy_url');
     const comfyUser = $('if_comfy_user');
     const comfyPass = $('if_comfy_pass');
     const comfyProfile = $('if_comfy_profile');
     const comfyTest = $('if_comfy_test');
+    const comfyModelsBtn = $('if_comfy_models');
+    const comfyCheckpoint = $('if_comfy_checkpoint');
     const comfyResult = $('if_comfy_result');
+    const a1111Url = $('if_a1111_url');
+    const a1111Auth = $('if_a1111_auth');
+    const a1111Test = $('if_a1111_test');
+    const a1111ModelsBtn = $('if_a1111_models');
+    const a1111Checkpoint = $('if_a1111_checkpoint');
+    const a1111Result = $('if_a1111_result');
 
     naiKey.value = settings.backends.nai.apiKey;
     naiModel.value = settings.backends.nai.model;
@@ -298,13 +366,48 @@ export function renderDrawer({ settings, save, nai, comfy }) {
     comfyUser.value = settings.backends.comfy.username;
     comfyPass.value = settings.backends.comfy.password;
     comfyProfile.value = settings.backends.comfy.profile;
+    a1111Url.value = settings.backends.a1111.baseUrl;
+    a1111Auth.value = settings.backends.a1111.auth;
 
     naiKey.addEventListener('change', () => { settings.backends.nai.apiKey = naiKey.value.trim(); save(); });
     naiModel.addEventListener('change', () => { settings.backends.nai.model = naiModel.value; save(); });
-    comfyUrl.addEventListener('change', () => { settings.backends.comfy.baseUrl = comfyUrl.value.trim(); save(); });
-    comfyUser.addEventListener('change', () => { settings.backends.comfy.username = comfyUser.value; save(); });
-    comfyPass.addEventListener('change', () => { settings.backends.comfy.password = comfyPass.value; save(); });
+    comfyUrl.addEventListener('change', () => {
+        settings.backends.comfy.baseUrl = comfyUrl.value.trim();
+        // New endpoint: previously discovered models are no longer known to
+        // belong to this server. Invalidate + abort in-flight discovery.
+        invalidateComfyDiscovery('Base URL changed — model list invalidated. Click Refresh Models.');
+        save();
+        syncTestGenVisibility();
+    });
+    comfyUser.addEventListener('change', () => {
+        settings.backends.comfy.username = comfyUser.value;
+        invalidateComfyDiscovery('Credentials changed — model list invalidated. Click Refresh Models.');
+        save();
+        syncTestGenVisibility();
+    });
+    comfyPass.addEventListener('change', () => {
+        settings.backends.comfy.password = comfyPass.value;
+        invalidateComfyDiscovery('Credentials changed — model list invalidated. Click Refresh Models.');
+        save();
+        syncTestGenVisibility();
+    });
     comfyProfile.addEventListener('change', () => { settings.backends.comfy.profile = comfyProfile.value; save(); });
+    // The Authentication string is kept exactly as typed: no trim, no colon
+    // insertion (ST getBasicAuthHeader encodes the raw string). Any URL or
+    // auth change invalidates the discovered checkpoint list: a stale list
+    // from the old endpoint must never drive generation on the new one.
+    a1111Url.addEventListener('change', () => {
+        settings.backends.a1111.baseUrl = a1111Url.value.trim();
+        invalidateA1111Discovery('Base URL changed — model list invalidated. Click Refresh Models.');
+        save();
+        syncTestGenVisibility();
+    });
+    a1111Auth.addEventListener('change', () => {
+        settings.backends.a1111.auth = a1111Auth.value;
+        invalidateA1111Discovery('Authentication changed — model list invalidated. Click Refresh Models.');
+        save();
+        syncTestGenVisibility();
+    });
 
     function showResult(node, text, isError) {
         node.textContent = text;
@@ -325,6 +428,78 @@ export function renderDrawer({ settings, save, nai, comfy }) {
         }
     });
 
+    // ---- Connection-source switching -------------------------------------
+    // Discovered model lists and in-flight requests are per-source: switching
+    // clears the other source's UI state so stale models/checkpoints can
+    // never leak into the new configuration.
+    let comfyModels = [];
+    let a1111Models = [];
+
+    // Epoch guards: bumping invalidates every in-flight discovery request,
+    // so a late response from an old source/URL/auth can never populate the
+    // UI of the current configuration. The browser request itself is also
+    // aborted where a signal was passed.
+    let comfyDiscoveryEpoch = 0;
+    let a1111DiscoveryEpoch = 0;
+    let comfyDiscoveryController = null;
+    let a1111DiscoveryController = null;
+
+    function invalidateComfyDiscovery(reason) {
+        comfyDiscoveryEpoch += 1;
+        comfyDiscoveryController?.abort();
+        comfyDiscoveryController = null;
+        comfyModels = [];
+        fillCheckpointSelect(comfyCheckpoint, [], '', '-- Refresh Models to load --');
+        if (reason) showResult(comfyResult, reason, false);
+        abortInFlightGeneration('Proxy URL or credentials changed — generation aborted (browser request only; a started proxy job may still finish).');
+    }
+
+    function invalidateA1111Discovery(reason) {
+        a1111DiscoveryEpoch += 1;
+        a1111DiscoveryController?.abort();
+        a1111DiscoveryController = null;
+        a1111Models = [];
+        fillCheckpointSelect(a1111Checkpoint, [], '', '-- Refresh Models to load --');
+        if (reason) showResult(a1111Result, reason, false);
+        abortInFlightGeneration('A1111 base URL or Authentication changed — generation aborted (browser request only; a started server job may still finish).');
+    }
+
+    function fillCheckpointSelect(select, models, selectedTitle, emptyLabel) {
+        select.innerHTML = `<option value="">${emptyLabel}</option>` +
+            models.map(m => `<option value="${m.title}">${m.title}</option>`).join('');
+        select.value = models.some(m => m.title === selectedTitle) ? selectedTitle : '';
+    }
+
+    function syncConnectionBlocks() {
+        const conn = settings.backends.comfy.connection === 'a1111' ? 'a1111' : 'legacy_proxy';
+        comfyBlock.style.display = conn === 'legacy_proxy' ? '' : 'none';
+        a1111Block.style.display = conn === 'a1111' ? '' : 'none';
+    }
+
+    sdConnection.addEventListener('change', () => {
+        settings.backends.comfy.connection = sdConnection.value;
+        // Invalidate the OTHER source's discovered state; its stored
+        // checkpoint stays in settings but must be re-discovered. In-flight
+        // discovery from either source is aborted + epoch-bumped so results
+        // from the old source can never land in the new configuration.
+        if (sdConnection.value === 'a1111') {
+            invalidateComfyDiscovery('');
+        } else {
+            invalidateA1111Discovery('');
+        }
+        // A generation running against the previous source must not land
+        // here either: abort it (browser request only).
+        abortInFlightGeneration('Connection source changed — generation aborted (browser request only; a started server job may still finish).');
+        showResult(comfyResult, '', false);
+        showResult(a1111Result, '', false);
+        save();
+        syncConnectionBlocks();
+        syncTestGenVisibility();
+    });
+    sdConnection.value = settings.backends.comfy.connection === 'a1111' ? 'a1111' : 'legacy_proxy';
+    syncConnectionBlocks();
+
+    // ---- Legacy proxy: test + refresh models + checkpoint ----------------
     comfyTest.addEventListener('click', async () => {
         comfyTest.disabled = true;
         comfyResult.textContent = 'Checking...';
@@ -339,10 +514,136 @@ export function renderDrawer({ settings, save, nai, comfy }) {
         }
     });
 
+    // Abort any in-flight test generation: its result belongs to a
+    // configuration that is about to change (source/URL/auth). Only the
+    // browser request is aborted — the server/proxy may still finish the job.
+    function abortInFlightGeneration(reason) {
+        if (generateController) {
+            generateController.abort();
+            errorBox.textContent = reason;
+            errorBox.style.display = '';
+        }
+    }
+
+    comfyModelsBtn.addEventListener('click', async () => {
+        comfyModelsBtn.disabled = true;
+        comfyResult.textContent = 'Loading models...';
+        comfyResult.classList.remove('error');
+        // New epoch for this click; any older in-flight request is dead.
+        comfyDiscoveryEpoch += 1;
+        const epoch = comfyDiscoveryEpoch;
+        comfyDiscoveryController = new AbortController();
+        try {
+            const list = await comfy.models({ signal: comfyDiscoveryController.signal });
+            if (epoch !== comfyDiscoveryEpoch) return; // stale: source/URL/auth changed meanwhile
+            comfyModels = Array.isArray(list)
+                ? list.map(m => ({ title: m.title ?? m.model_name, model_name: m.model_name }))
+                : [];
+            fillCheckpointSelect(comfyCheckpoint, comfyModels, settings.backends.comfy.proxyModel ?? '', '-- select a model --');
+            comfyCheckpoint.value = comfyModels.some(m => m.title === settings.backends.comfy.proxyModel) ? settings.backends.comfy.proxyModel : '';
+            showResult(comfyResult, `${comfyModels.length} model(s) available.`, false);
+            syncTestGenVisibility();
+        } catch (error) {
+            if (epoch !== comfyDiscoveryEpoch) return; // stale error: swallow
+            comfyModels = [];
+            fillCheckpointSelect(comfyCheckpoint, [], '', '-- Refresh Models to load --');
+            showResult(comfyResult, error.message, true);
+            syncTestGenVisibility();
+        } finally {
+            if (epoch === comfyDiscoveryEpoch) {
+                comfyDiscoveryController = null;
+                comfyModelsBtn.disabled = false;
+            }
+        }
+    });
+
+    comfyCheckpoint.addEventListener('change', () => {
+        settings.backends.comfy.proxyModel = comfyCheckpoint.value;
+        save();
+        syncTestGenVisibility();
+    });
+
+    // ---- A1111: test + refresh models + checkpoint ------------------------
+    a1111Test.addEventListener('click', async () => {
+        a1111Test.disabled = true;
+        a1111Result.textContent = 'Testing (GET options + models; nothing is written)...';
+        a1111Result.classList.remove('error');
+        a1111DiscoveryEpoch += 1;
+        const epoch = a1111DiscoveryEpoch;
+        a1111DiscoveryController = new AbortController();
+        try {
+            const info = await a1111.testConnection({ signal: a1111DiscoveryController.signal });
+            if (epoch !== a1111DiscoveryEpoch) return; // stale: URL/auth/source changed meanwhile
+            a1111Models = info.models;
+            fillCheckpointSelect(a1111Checkpoint, a1111Models, settings.backends.a1111.checkpoint, '-- select a checkpoint --');
+            if (!resolveCheckpoint(a1111Models, settings.backends.a1111.checkpoint)) {
+                settings.backends.a1111.checkpoint = '';
+                a1111Checkpoint.value = '';
+                save();
+            }
+            const parts = [`Connected. ${a1111Models.length} checkpoint(s).`];
+            parts.push(info.currentCheckpoint ? `Server default: ${info.currentCheckpoint}` : 'Server default: (none reported)');
+            if (info.samplers) parts.push(`${info.samplers.length} sampler(s).`);
+            if (info.samplersError) parts.push(`Samplers endpoint unavailable: ${info.samplersError}`);
+            showResult(a1111Result, parts.join(' · '), false);
+            syncTestGenVisibility();
+        } catch (error) {
+            if (epoch !== a1111DiscoveryEpoch) return; // stale error: swallow
+            showResult(a1111Result, error.message, true);
+            syncTestGenVisibility();
+        } finally {
+            if (epoch === a1111DiscoveryEpoch) {
+                a1111DiscoveryController = null;
+                a1111Test.disabled = false;
+            }
+        }
+    });
+
+    a1111ModelsBtn.addEventListener('click', async () => {
+        a1111ModelsBtn.disabled = true;
+        a1111Result.textContent = 'Loading models...';
+        a1111Result.classList.remove('error');
+        a1111DiscoveryEpoch += 1;
+        const epoch = a1111DiscoveryEpoch;
+        a1111DiscoveryController = new AbortController();
+        try {
+            const models = await a1111.models({ signal: a1111DiscoveryController.signal });
+            if (epoch !== a1111DiscoveryEpoch) return; // stale: URL/auth/source changed meanwhile
+            a1111Models = models;
+            fillCheckpointSelect(a1111Checkpoint, a1111Models, settings.backends.a1111.checkpoint, '-- select a checkpoint --');
+            if (!resolveCheckpoint(a1111Models, settings.backends.a1111.checkpoint)) {
+                settings.backends.a1111.checkpoint = '';
+                a1111Checkpoint.value = '';
+                save();
+            }
+            showResult(a1111Result, `${a1111Models.length} checkpoint(s) available.`, false);
+            syncTestGenVisibility();
+        } catch (error) {
+            if (epoch !== a1111DiscoveryEpoch) return; // stale error: swallow
+            a1111Models = [];
+            fillCheckpointSelect(a1111Checkpoint, [], '', '-- Refresh Models to load --');
+            showResult(a1111Result, error.message, true);
+            syncTestGenVisibility();
+        } finally {
+            if (epoch === a1111DiscoveryEpoch) {
+                a1111DiscoveryController = null;
+                a1111ModelsBtn.disabled = false;
+            }
+        }
+    });
+
+    a1111Checkpoint.addEventListener('change', () => {
+        settings.backends.a1111.checkpoint = a1111Checkpoint.value;
+        save();
+        syncTestGenVisibility();
+    });
+
     // ================= Test Gen Tab Wiring =================
     const testProfileRow = el.querySelector('[data-if-comfy-only]');
     const testNegativeRow = el.querySelector('[data-if-nai-only]');
+    const testCheckpointRow = el.querySelector('[data-if-sd-checkpoint]');
     const testProfile = $('if_test_profile');
+    const testCheckpoint = $('if_test_checkpoint');
     const testPrompt = $('if_test_prompt');
     const testNegative = $('if_test_negative');
     const testWidth = $('if_test_width');
@@ -351,6 +652,7 @@ export function renderDrawer({ settings, save, nai, comfy }) {
     const testCfg = $('if_test_cfg');
     const testSeed = $('if_test_seed');
     const generateBtn = $('if_test_generate');
+    const cancelBtn = $('if_test_cancel');
     const errorBox = $('if_test_error');
     const outputBox = $('if_test_output');
     const imageEl = $('if_test_image');
@@ -367,6 +669,29 @@ export function renderDrawer({ settings, save, nai, comfy }) {
     testCfg.value = settings.test.cfg;
     testSeed.value = settings.test.seed;
 
+    function currentSdConnection() {
+        return settings.backends.comfy.connection === 'a1111' ? 'a1111' : 'legacy_proxy';
+    }
+
+    /** Active discovered checkpoint for the active SD connection. */
+    function activeCheckpointOptions() {
+        return currentSdConnection() === 'a1111'
+            ? { models: a1111Models, stored: settings.backends.a1111.checkpoint }
+            : { models: comfyModels, stored: settings.backends.comfy.proxyModel ?? '' };
+    }
+
+    // Pure refresh of the Test-tab checkpoint selector from the active
+    // source's discovered list + stored value. Stale selections from the
+    // other source are never shown.
+    function syncTestCheckpoint() {
+        const { models, stored } = activeCheckpointOptions();
+        const resolved = resolveCheckpoint(models, stored);
+        testCheckpoint.innerHTML = models.length
+            ? models.map(m => `<option value="${m.title}">${m.title}</option>`).join('')
+            : '<option value="">-- none discovered (Backends → Refresh Models) --</option>';
+        testCheckpoint.value = resolved ?? '';
+    }
+
     function syncBackendRadio() {
         el.querySelectorAll('input[name="if_test_backend"]').forEach(r => {
             r.checked = r.value === settings.test.backend;
@@ -375,6 +700,12 @@ export function renderDrawer({ settings, save, nai, comfy }) {
         testProfileRow.style.display = isComfy ? '' : 'none';
         const profile = PROFILES[settings.test.profile ?? settings.backends.comfy.profile];
         testNegativeRow.style.display = (isComfy && profile?.negativeDisabled) ? 'none' : '';
+        testCheckpointRow.style.display = isComfy ? '' : 'none';
+        syncTestCheckpoint();
+    }
+
+    function syncTestGenVisibility() {
+        syncTestCheckpoint();
     }
     syncBackendRadio();
 
@@ -400,6 +731,15 @@ export function renderDrawer({ settings, save, nai, comfy }) {
         save();
     });
 
+    testCheckpoint.addEventListener('change', () => {
+        if (currentSdConnection() === 'a1111') {
+            settings.backends.a1111.checkpoint = testCheckpoint.value;
+        } else {
+            settings.backends.comfy.proxyModel = testCheckpoint.value;
+        }
+        save();
+    });
+
     const bindInput = (input, apply) => {
         input.addEventListener('input', () => { apply(input.value); save(); });
     };
@@ -411,11 +751,42 @@ export function renderDrawer({ settings, save, nai, comfy }) {
     bindInput(testCfg, v => settings.test.cfg = Number(v) || 4);
     bindInput(testSeed, v => settings.test.seed = Number.isFinite(Number(v)) ? Number(v) : -1);
 
+    // Object URL hygiene: revoke the previous URL before showing a new one.
+    let currentObjectUrl = null;
+    function showImage(dataUrl) {
+        if (currentObjectUrl) {
+            URL.revokeObjectURL(currentObjectUrl);
+            currentObjectUrl = null;
+        }
+        if (dataUrl.startsWith('blob:')) currentObjectUrl = dataUrl;
+        imageEl.src = dataUrl;
+        downloadEl.href = dataUrl;
+        outputBox.style.display = '';
+    }
+    function disposeImage() {
+        if (currentObjectUrl) {
+            URL.revokeObjectURL(currentObjectUrl);
+            currentObjectUrl = null;
+        }
+        imageEl.removeAttribute('src');
+    }
+
+    // Cancellation: aborts the browser request only. The server job (if any)
+    // is NOT cancelled — /sdapi/v1/interrupt is never called because a hosted
+    // instance may be shared with other users.
+    let generateController = null;
+    cancelBtn.addEventListener('click', () => {
+        if (generateController) generateController.abort();
+    });
+
     generateBtn.addEventListener('click', async () => {
+        if (generateController) return; // already running
         errorBox.style.display = 'none';
         outputBox.style.display = 'none';
         generateBtn.disabled = true;
         generateBtn.textContent = 'Generating...';
+        cancelBtn.style.display = '';
+        generateController = new AbortController();
         const startedAt = performance.now();
         try {
             if (settings.test.backend === 'nai') {
@@ -428,35 +799,61 @@ export function renderDrawer({ settings, save, nai, comfy }) {
                     steps: settings.test.steps,
                     scale: settings.test.cfg,
                     seed: settings.test.seed,
+                    signal: generateController.signal,
                 });
-                const url = URL.createObjectURL(blob);
-                imageEl.src = url;
-                downloadEl.href = url;
+                showImage(URL.createObjectURL(blob));
                 captionEl.textContent = `NovelAI · ${settings.test.width}x${settings.test.height} · steps ${settings.test.steps}`;
-                outputBox.style.display = '';
             } else {
-                const result = await comfy.txt2img({
-                    prompt: settings.test.prompt,
-                    negative_prompt: settings.test.negative,
-                    model: settings.test.profile ?? settings.backends.comfy.profile,
-                    seed: settings.test.seed,
-                    width: settings.test.width,
-                    height: settings.test.height,
-                    steps: settings.test.steps,
-                    cfg_scale: settings.test.cfg,
-                });
-                imageEl.src = result.dataUrl;
-                downloadEl.href = result.dataUrl;
-                captionEl.textContent = `Comfy proxy · ${settings.test.width}x${settings.test.height}`;
-                outputBox.style.display = '';
+                const conn = currentSdConnection();
+                const { models, stored } = activeCheckpointOptions();
+                // The checkpoint must be a discovered model from the ACTIVE
+                // source; dialect/profile names are never sent as a model.
+                const checkpoint = resolveCheckpoint(models, stored);
+                if (!checkpoint) {
+                    throw new Error(`No valid checkpoint for the "${conn === 'a1111' ? 'AUTOMATIC1111-compatible API' : 'Comfy Cloud Proxy (Legacy)'}" connection. Open Backends, click Refresh Models, and select a checkpoint (profile ≠ model: family names like anima/krea2/illustrious are not checkpoints).`);
+                }
+                if (conn === 'a1111') {
+                    const result = await a1111.txt2img({
+                        prompt: settings.test.prompt,
+                        negative_prompt: settings.test.negative,
+                        checkpoint,
+                        seed: settings.test.seed,
+                        width: settings.test.width,
+                        height: settings.test.height,
+                        steps: settings.test.steps,
+                        cfg_scale: settings.test.cfg,
+                    }, { signal: generateController.signal });
+                    showImage(result.dataUrl);
+                    captionEl.textContent = `A1111 · ${checkpoint} · ${settings.test.width}x${settings.test.height}`;
+                } else {
+                    const result = await comfy.txt2img({
+                        prompt: settings.test.prompt,
+                        negative_prompt: settings.test.negative,
+                        model: checkpoint,
+                        seed: settings.test.seed,
+                        width: settings.test.width,
+                        height: settings.test.height,
+                        steps: settings.test.steps,
+                        cfg_scale: settings.test.cfg,
+                    }, { signal: generateController.signal });
+                    showImage(result.dataUrl);
+                    captionEl.textContent = `Comfy proxy · ${checkpoint} · ${settings.test.width}x${settings.test.height}`;
+                }
             }
             elapsedEl.textContent = `${((performance.now() - startedAt) / 1000).toFixed(1)}s`;
         } catch (err) {
-            errorBox.textContent = err.message;
+            if (err?.name === 'AbortError' || err?.code === 'A1111_ABORTED') {
+                errorBox.textContent = 'Generation cancelled. Only the browser request was aborted — the server (if it received the job) may still be processing it.';
+            } else {
+                errorBox.textContent = err.message;
+            }
             errorBox.style.display = '';
+            disposeImage();
         } finally {
+            generateController = null;
             generateBtn.disabled = false;
             generateBtn.textContent = 'Generate';
+            cancelBtn.style.display = 'none';
         }
     });
 

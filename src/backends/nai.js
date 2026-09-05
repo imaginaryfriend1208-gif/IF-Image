@@ -133,7 +133,7 @@ export class NaiClient {
      * Generate one image. Mirrors ST src/endpoints/novelai.js request body.
      * @param {{model: string, prompt: string, negative: string, width: number, height: number,
      *          steps: number, scale: number, seed: number,
-     *          sampler?: string, scheduler?: string}} opts
+     *          sampler?: string, scheduler?: string, signal?: AbortSignal}} opts
      * @returns {Promise<Blob>} PNG blob
      */
     async generate(opts) {
@@ -197,6 +197,9 @@ export class NaiClient {
             method: 'POST',
             headers: this.authHeaders(),
             body: JSON.stringify(body),
+            // Optional AbortSignal: cancelling aborts the browser request only;
+            // a generation already accepted by NovelAI is not refundable.
+            ...(opts.signal ? { signal: opts.signal } : {}),
         });
 
         if (!response.ok) {

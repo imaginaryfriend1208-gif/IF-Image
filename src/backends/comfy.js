@@ -57,12 +57,14 @@ export class ComfyProxyClient {
 
     /**
      * Liveness check. /internal/ping is exempt from auth in the proxy.
+     * @param {{signal?: AbortSignal}} [options] aborts the browser request only
      */
-    async ping() {
+    async ping({ signal } = {}) {
         let response;
         try {
-            response = await fetch(`${this.baseUrl()}/internal/ping`, { headers: this.headers() });
+            response = await fetch(`${this.baseUrl()}/internal/ping`, { headers: this.headers(), signal });
         } catch (error) {
+            if (error?.name === 'AbortError') throw new Error('Connection test cancelled.');
             throw new Error(`Cannot reach the proxy at ${this.baseUrl()}. Is it running? Start it with "npm start" (or start.bat) in the SillytavernproxyComfyuicloud folder. (${error.message})`);
         }
         if (!response.ok) {
@@ -74,12 +76,14 @@ export class ComfyProxyClient {
     /**
      * Full status: cloud key configured, active jobs, model profiles, character count.
      * Requires valid credentials.
+     * @param {{signal?: AbortSignal}} [options] aborts the browser request only
      */
-    async status() {
+    async status({ signal } = {}) {
         let response;
         try {
-            response = await fetch(`${this.baseUrl()}/internal/status`, { headers: this.headers() });
+            response = await fetch(`${this.baseUrl()}/internal/status`, { headers: this.headers(), signal });
         } catch (error) {
+            if (error?.name === 'AbortError') throw new Error('Status request cancelled.');
             throw new Error(`Cannot reach the proxy at ${this.baseUrl()}. (${error.message})`);
         }
         if (response.status === 401) {
@@ -95,12 +99,16 @@ export class ComfyProxyClient {
      * List enabled model profiles from the proxy (sd-models endpoint).
      * Each entry: { title, model_name, filename }. `title` is accepted as the
      * txt2img `model` field (proxy matches id / title / checkpoint file name).
+     * @param {{signal?: AbortSignal}} [options] aborts the browser request only
      */
-    async models() {
+    async models({ signal } = {}) {
         let response;
         try {
-            response = await fetch(`${this.baseUrl()}/sdapi/v1/sd-models`, { headers: this.headers() });
+            response = await fetch(`${this.baseUrl()}/sdapi/v1/sd-models`, { headers: this.headers(), signal });
         } catch (error) {
+            if (error?.name === 'AbortError') {
+                throw new Error('Model list request cancelled. Only the browser request was aborted; the proxy was not told to stop anything.');
+            }
             throw new Error(`Cannot reach the proxy at ${this.baseUrl()}. (${error.message})`);
         }
         if (response.status === 401) {
@@ -118,9 +126,11 @@ export class ComfyProxyClient {
      * Family names (krea2/anima/illustrious) are NOT matched by the proxy.
      * @param {{prompt: string, negative_prompt: string, model?: string, seed?: number,
      *          width?: number, height?: number, steps?: number, cfg_scale?: number}} body
+     * @param {{signal?: AbortSignal}} [options] aborts the browser request only —
+     *        the cloud job may still run on the proxy; nothing is interrupted server-side
      * @returns {Promise<{image: Blob, dataUrl: string, raw: object, info: object}>}
      */
-    async txt2img(body) {
+    async txt2img(body, { signal } = {}) {
         // Coerce to the proxy's zod bounds: ints for seed/width/height/steps,
         // 64..4096 px, 1..200 steps, 0..100 cfg. Avoids opaque 400/500 on
         // fractional values typed into the UI number inputs.
@@ -148,8 +158,12 @@ export class ComfyProxyClient {
                 method: 'POST',
                 headers: this.headers(),
                 body: JSON.stringify(payload),
+                signal,
             });
         } catch (error) {
+            if (error?.name === 'AbortError') {
+                throw new Error('Generation cancelled. Only the browser request was aborted; the proxy job (if it already started) may still be running on the cloud.');
+            }
             throw new Error(`Cannot reach the proxy at ${this.baseUrl()}. Is it running? (${error.message})`);
         }
 
