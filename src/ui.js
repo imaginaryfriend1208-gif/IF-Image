@@ -16,7 +16,7 @@ export function renderDrawer({ settings, save, nai, comfy }) {
     <div class="if-image-settings">
         <div class="if-image-title">
             <h2>IF Image</h2>
-            <span>Test build 0.1.0</span>
+            <span>Test build 0.2.0</span>
         </div>
 
         <div class="if-image-tabs">

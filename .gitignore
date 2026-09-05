@@ -6,9 +6,11 @@ dist/
 .DS_Store
 Thumbs.db
 
-# plans/docs — giữ local, không lên git
+# plans/docs — local only, never pushed to git
 BACKEND-PLAN.html
 PROMPT-SPEC.html
+PLAN-CHINH.html
 research/
 docs/
 README.md
+st-chatu8/

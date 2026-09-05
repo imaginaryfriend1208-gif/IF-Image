@@ -3,10 +3,12 @@
 
 import { extension_settings } from '../../../../extensions.js';
 import { saveSettingsDebounced } from '../../../../../script.js';
+import { runMigrations, CURRENT_VERSION } from './migration.js';
 
 export const SETTINGS_KEY = 'IF_Image';
 
 export const defaultSettings = {
+    settingsVersion: CURRENT_VERSION,
     enabled: true,
     backends: {
         nai: {
@@ -19,6 +21,18 @@ export const defaultSettings = {
             password: '',
             profile: 'anima',
         },
+    },
+    llm: {
+        apiProfiles: [],
+        contextProfiles: [],
+        requestMapping: {},
+        defaultMethod: 'direct',
+    },
+    generation: {
+        mode: 'direct',       // direct | assist | full
+        startTag: 'image###',
+        endTag: '###',
+        enabled: true,
     },
     test: {
         prompt: '',
@@ -52,12 +66,28 @@ function deepMerge(target, source) {
     return target;
 }
 
+/**
+ * Load settings from extension_settings namespace.
+ * Runs migrations if the stored version is behind, then deep-merges defaults.
+ * @returns {object} live reference to extension_settings.IF_Image
+ */
 export function getSettings() {
     if (!extension_settings[SETTINGS_KEY]) {
         extension_settings[SETTINGS_KEY] = structuredClone(defaultSettings);
     }
-    deepMerge(extension_settings[SETTINGS_KEY], defaultSettings);
-    return extension_settings[SETTINGS_KEY];
+    const s = extension_settings[SETTINGS_KEY];
+
+    // Migrate from older versions (v0.1.0 has no settingsVersion).
+    const migrated = runMigrations(s);
+
+    // Fill any new keys added by the current version's defaults.
+    deepMerge(s, defaultSettings);
+
+    if (migrated) {
+        // Persist immediately so the migration stamp is saved.
+        saveSettingsDebounced();
+    }
+    return s;
 }
 
 export function saveSettings() {
