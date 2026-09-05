@@ -1,0 +1,145 @@
+/* IF Image - compact dark styling, consistent with ST extension drawers.
+   Uses ST CSS vars when available, falls back to own palette. */
+
+.if-image-settings {
+    --ifi-bg: var(--SmartThemeBlurTintColor, #1a1b26);
+    --ifi-border: var(--SmartThemeBorderColor, #3b4261);
+    --ifi-text: var(--SmartThemeBodyColor, #c0caf5);
+    --ifi-dim: var(--SmartThemeQuoteColor, #a9b1d6);
+    --ifi-accent: var(--SmartThemeQuoteColor, #7aa2f7);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px;
+    border-radius: 8px;
+    color: var(--ifi-text);
+    font-size: 0.95em;
+}
+
+.if-image-title {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+}
+
+.if-image-title h2 {
+    margin: 0;
+    font-size: 1.1em;
+}
+
+.if-image-title span {
+    color: var(--ifi-dim);
+    font-size: 0.85em;
+}
+
+.if-image-tabs {
+    display: flex;
+    gap: 4px;
+}
+
+.if-image-tab.active {
+    background: var(--ifi-accent);
+    color: #000;
+}
+
+.if-image-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 6px 0;
+}
+
+.if-image-panel h3 {
+    margin: 4px 0 2px;
+    font-size: 1em;
+    color: var(--ifi-accent);
+}
+
+.if-image-row {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.if-image-row > label {
+    font-size: 0.85em;
+    color: var(--ifi-dim);
+}
+
+.if-image-row input[type="text"],
+.if-image-row input[type="password"],
+.if-image-row input[type="number"],
+.if-image-row select,
+.if-image-row textarea {
+    width: 100%;
+    min-height: 28px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--ifi-bg) 85%, #000);
+    border: 1px solid var(--ifi-border);
+    color: var(--ifi-text);
+}
+
+.if-image-radios {
+    display: flex;
+    gap: 14px;
+    align-items: center;
+    min-height: 28px;
+}
+
+.if-image-radios label {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+    cursor: pointer;
+}
+
+.if-image-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 6px;
+}
+
+.if-image-sep {
+    border: none;
+    border-top: 1px solid var(--ifi-border);
+    margin: 8px 0;
+    width: 100%;
+}
+
+.if-image-result {
+    font-size: 0.85em;
+    color: var(--ifi-dim);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.if-image-output .if-image-caption {
+    color: var(--ifi-dim);
+    font-size: 0.85em;
+}
+
+.if-image-result.error {
+    color: var(--SmartThemeEmColor, #f7768e);
+}
+
+.if-image-output img {
+    max-width: 100%;
+    max-height: 480px;
+    object-fit: contain;
+    border-radius: 6px;
+    border: 1px solid var(--ifi-border);
+    margin: 4px 0;
+}
+
+.if-image-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 0.85em;
+    color: var(--ifi-dim);
+}
+
+.if-image-actions a {
+    text-decoration: none;
+}
