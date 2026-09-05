@@ -100,6 +100,75 @@ test('CURRENT_VERSION matches migrators count', () => {
     assert.equal(CURRENT_VERSION, migrators.length);
 });
 
+// --- Test 7 (v2 → v3): a1111 section added, legacy proxy untouched ---
+test('v2 → v3 adds a1111 backend and comfy.connection without touching legacy credentials', () => {
+    const v2 = {
+        settingsVersion: 2,
+        enabled: true,
+        backends: {
+            nai: { apiKey: 'pst-keep', model: 'nai-diffusion-4-5-full' },
+            comfy: {
+                baseUrl: 'https://my-proxy.example.com/',
+                username: 'proxyuser',
+                password: 'proxypass',
+                profile: 'krea2',
+            },
+        },
+    };
+    const ran = runMigrations(v2);
+    assert.equal(ran, true);
+    assert.equal(v2.settingsVersion, CURRENT_VERSION);
+    // New a1111 section exists and starts blank.
+    assert.deepEqual(v2.backends.a1111, { baseUrl: '', auth: '', checkpoint: '' });
+    // Connection defaults to the legacy proxy.
+    assert.equal(v2.backends.comfy.connection, 'legacy_proxy');
+    // Legacy proxy URL/credentials survive byte-for-byte.
+    assert.equal(v2.backends.comfy.baseUrl, 'https://my-proxy.example.com/');
+    assert.equal(v2.backends.comfy.username, 'proxyuser');
+    assert.equal(v2.backends.comfy.password, 'proxypass');
+    assert.equal(v2.backends.comfy.profile, 'krea2');
+});
+
+// --- Test 8: existing a1111 settings are never overwritten ---
+test('existing a1111 config and connection choice survive migration', () => {
+    const s = {
+        settingsVersion: 2,
+        backends: {
+            nai: {},
+            comfy: { connection: 'a1111', baseUrl: 'http://x', username: 'u', password: 'p' },
+            a1111: { baseUrl: 'https://hosted.example', auth: 'configured-key', checkpoint: 'modelA.safetensors' },
+        },
+    };
+    runMigrations(s);
+    assert.equal(s.backends.comfy.connection, 'a1111');
+    assert.equal(s.backends.a1111.baseUrl, 'https://hosted.example');
+    assert.equal(s.backends.a1111.auth, 'configured-key');
+    assert.equal(s.backends.a1111.checkpoint, 'modelA.safetensors');
+});
+
+// --- Test 9: v0.1.0 (no version) gets the a1111 section too ---
+test('v0.1.0 legacy settings receive the a1111 section through full migration', () => {
+    const legacy = {
+        backends: {
+            nai: { apiKey: 'k', model: 'm' },
+            comfy: { baseUrl: 'http://localhost:7861', username: 'u', password: 'p', profile: 'anima' },
+        },
+    };
+    runMigrations(legacy);
+    assert.deepEqual(legacy.backends.a1111, { baseUrl: '', auth: '', checkpoint: '' });
+    assert.equal(legacy.backends.comfy.connection, 'legacy_proxy');
+    assert.equal(legacy.backends.comfy.username, 'u');
+    assert.equal(legacy.backends.comfy.password, 'p');
+});
+
+// --- Test 10: missing comfy section is created safely ---
+test('missing/corrupt comfy section is created without throwing', () => {
+    const s = { settingsVersion: 2, backends: { nai: {} } };
+    runMigrations(s);
+    assert.equal(s.backends.comfy.connection, 'legacy_proxy');
+    assert.deepEqual(s.backends.a1111, { baseUrl: '', auth: '', checkpoint: '' });
+});
+
 // --- Summary ---
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

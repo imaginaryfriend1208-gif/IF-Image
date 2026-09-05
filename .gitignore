@@ -14,3 +14,6 @@ research/
 docs/
 README.md
 st-chatu8/
+
+# Claude Code agent worktrees — local only
+.claude/
