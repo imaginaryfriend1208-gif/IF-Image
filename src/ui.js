@@ -1,8 +1,12 @@
-// IF Image - drawer UI. English labels only.
-// Template literals; mounted into #extensions_settings2 by index.js.
+// IF Image - Drawer UI with 5 Tabs: Backends, Test Generate, Characters, Persona & Styles, Test Render.
+// Template literals mounted into #extensions_settings2 by index.js.
 
 import { NAI_MODELS } from './backends/nai.js';
 import { PROFILES, PROFILE_KEYS, applyProfile } from './profiles.js';
+import { getAllCharacters, saveCharacter, removeCharacter, createDefaultCharacter } from './storage/chars.js';
+import { getAllPersonas, savePersona, getAllStyles, saveStyle, createDefaultPersona, createDefaultStyle } from './storage/presets.js';
+import { parseTriggers } from './prompt/triggers.js';
+import { assemblePrompt } from './prompt/render.js';
 
 /**
  * @param {object} args
@@ -16,12 +20,15 @@ export function renderDrawer({ settings, save, nai, comfy }) {
     <div class="if-image-settings">
         <div class="if-image-title">
             <h2>IF Image</h2>
-            <span>Test build 0.2.0</span>
+            <span>v0.2.0 (Phase 1)</span>
         </div>
 
         <div class="if-image-tabs">
-            <button class="if-image-tab menu_button" data-if-tab="backends">Backends</button>
-            <button class="if-image-tab menu_button" data-if-tab="test">Test Generate</button>
+            <button class="if-image-tab menu_button active" data-if-tab="backends">Backends</button>
+            <button class="if-image-tab menu_button" data-if-tab="test">Test Gen</button>
+            <button class="if-image-tab menu_button" data-if-tab="chars">Characters</button>
+            <button class="if-image-tab menu_button" data-if-tab="presets">Persona & Style</button>
+            <button class="if-image-tab menu_button" data-if-tab="render">3-Dialect Preview</button>
         </div>
 
         <!-- ============ BACKENDS TAB ============ -->
@@ -29,8 +36,7 @@ export function renderDrawer({ settings, save, nai, comfy }) {
             <h3>NovelAI</h3>
             <div class="if-image-row">
                 <label for="if_nai_key">API token (pst-...)</label>
-                <input id="if_nai_key" type="password" class="text_pole textarea_compact" autocomplete="off"
-                       placeholder="pst-..." value="">
+                <input id="if_nai_key" type="password" class="text_pole textarea_compact" autocomplete="off" placeholder="pst-..." value="">
             </div>
             <div class="if-image-row">
                 <label for="if_nai_model">Model</label>
@@ -48,8 +54,7 @@ export function renderDrawer({ settings, save, nai, comfy }) {
             <h3>Comfy proxy</h3>
             <div class="if-image-row">
                 <label for="if_comfy_url">Proxy URL</label>
-                <input id="if_comfy_url" type="text" class="text_pole textarea_compact"
-                       placeholder="http://localhost:7861" value="">
+                <input id="if_comfy_url" type="text" class="text_pole textarea_compact" placeholder="http://localhost:7861" value="">
             </div>
             <div class="if-image-row">
                 <label for="if_comfy_user">Username</label>
@@ -71,7 +76,7 @@ export function renderDrawer({ settings, save, nai, comfy }) {
             <div class="if-image-result" id="if_comfy_result"></div>
         </div>
 
-        <!-- ============ TEST TAB ============ -->
+        <!-- ============ TEST GEN TAB ============ -->
         <div class="if-image-panel" data-if-panel="test" style="display:none;">
             <div class="if-image-row">
                 <label>Backend</label>
@@ -135,14 +140,147 @@ export function renderDrawer({ settings, save, nai, comfy }) {
                 </div>
             </div>
         </div>
+
+        <!-- ============ CHARACTERS TAB ============ -->
+        <div class="if-image-panel" data-if-panel="chars" style="display:none;">
+            <h3>Character Presets</h3>
+            <div class="if-image-row">
+                <label for="if_char_select">Select Character</label>
+                <div style="display:flex; gap:6px;">
+                    <select id="if_char_select" class="text_pole" style="flex:1;">
+                        <option value="">-- New Character --</option>
+                    </select>
+                    <button id="if_char_new" class="menu_button">+ New</button>
+                </div>
+            </div>
+            <div class="if-image-row">
+                <label for="if_char_name">Name (Trigger: $Name)</label>
+                <input id="if_char_name" type="text" class="text_pole" placeholder="e.g. Lyna">
+            </div>
+            <div class="if-image-row">
+                <label for="if_char_aliases">Aliases (comma separated)</label>
+                <input id="if_char_aliases" type="text" class="text_pole" placeholder="e.g. lyna, dark elf">
+            </div>
+            <div class="if-image-row">
+                <label for="if_char_count">Count Tag</label>
+                <input id="if_char_count" type="text" class="text_pole" value="1girl">
+            </div>
+            <div class="if-image-row">
+                <label for="if_char_booru">Booru Tags (Illus/Anima)</label>
+                <textarea id="if_char_booru" class="text_pole textarea_compact" rows="2" placeholder="silver hair, purple eyes, elf ears"></textarea>
+            </div>
+            <div class="if-image-row">
+                <label for="if_char_natural">Natural Description (Krea)</label>
+                <textarea id="if_char_natural" class="text_pole textarea_compact" rows="2" placeholder="a young elf woman with long silver hair and glowing purple eyes"></textarea>
+            </div>
+            <div class="if-image-row">
+                <label for="if_char_facts">Neutral Facts (Core traits)</label>
+                <textarea id="if_char_facts" class="text_pole textarea_compact" rows="2" placeholder="Age 24, archer, wears leather tunic"></textarea>
+            </div>
+            <div style="display:flex; gap:6px; margin-top:4px;">
+                <button id="if_char_save" class="menu_button" style="flex:1;">Save Character</button>
+                <button id="if_char_del" class="menu_button" style="background:#552222;">Delete</button>
+            </div>
+            <div id="if_char_status" class="if-image-result"></div>
+        </div>
+
+        <!-- ============ PERSONA & STYLES TAB ============ -->
+        <div class="if-image-panel" data-if-panel="presets" style="display:none;">
+            <h3>User Persona ($me)</h3>
+            <div class="if-image-row">
+                <label for="if_per_name">Persona Name</label>
+                <input id="if_per_name" type="text" class="text_pole" value="Default User">
+            </div>
+            <div class="if-image-row">
+                <label for="if_per_pov">Default POV Mode</label>
+                <select id="if_per_pov" class="text_pole">
+                    <option value="auto">Auto (Context)</option>
+                    <option value="hidden">Hidden (Solo girl looking at viewer)</option>
+                    <option value="hands">Hands (POV hands in frame)</option>
+                    <option value="full">Full (Visible in scene)</option>
+                    <option value="third_person">Third Person (No POV)</option>
+                </select>
+            </div>
+            <div class="if-image-row">
+                <label for="if_per_booru">Persona Booru Tags</label>
+                <input id="if_per_booru" type="text" class="text_pole" placeholder="1boy, black hair, casual clothes">
+            </div>
+            <div class="if-image-row">
+                <label for="if_per_natural">Persona Natural (Krea)</label>
+                <input id="if_per_natural" type="text" class="text_pole" placeholder="a young man in casual attire">
+            </div>
+            <div class="if-image-row">
+                <button id="if_per_save" class="menu_button">Save Persona</button>
+            </div>
+
+            <hr class="if-image-sep"/>
+
+            <h3>Style Preset</h3>
+            <div class="if-image-row">
+                <label for="if_style_name">Style Name ({{style: Name}})</label>
+                <input id="if_style_name" type="text" class="text_pole" placeholder="e.g. Cyberpunk">
+            </div>
+            <div class="if-image-row">
+                <label for="if_style_krea">Krea Style Phrase</label>
+                <input id="if_style_krea" type="text" class="text_pole" placeholder="cyberpunk aesthetic, neon lighting, 35mm film">
+            </div>
+            <div class="if-image-row">
+                <label for="if_style_illus">Illustrious Artists / Tags</label>
+                <input id="if_style_illus" type="text" class="text_pole" placeholder="retro anime, 1990s (style), neon city">
+            </div>
+            <div class="if-image-row">
+                <button id="if_style_save" class="menu_button">Save Style</button>
+            </div>
+            <div id="if_presets_status" class="if-image-result"></div>
+        </div>
+
+        <!-- ============ 3-DIALECT PREVIEW TAB ============ -->
+        <div class="if-image-panel" data-if-panel="render" style="display:none;">
+            <h3>Test-Render (Offline Compiler)</h3>
+            <div class="if-image-row">
+                <label for="if_render_input">Input with triggers ($Name, $me, {{style:}}, {{dialect:}})</label>
+                <textarea id="if_render_input" class="text_pole textarea_compact" rows="2" placeholder="e.g. $Lyna:back sitting at a bar, neon lights, {{style: Cyberpunk}}"></textarea>
+            </div>
+            <div class="if-image-row">
+                <button id="if_render_btn" class="menu_button">Compile Preview</button>
+            </div>
+
+            <div id="if_render_results" style="display:flex; flex-direction:column; gap:8px; margin-top:6px;">
+                <div style="background:rgba(0,0,0,0.3); padding:6px; border-radius:4px;">
+                    <strong style="color:#7aa2f7;">1. Krea 2 (Prose):</strong>
+                    <div id="if_render_krea" style="font-size:0.85em; font-family:monospace; margin-top:2px;">(Click Compile)</div>
+                </div>
+                <div style="background:rgba(0,0,0,0.3); padding:6px; border-radius:4px;">
+                    <strong style="color:#bb9af7;">2. rdbt Anima (Hybrid):</strong>
+                    <div id="if_render_anima" style="font-size:0.85em; font-family:monospace; margin-top:2px;">(Click Compile)</div>
+                </div>
+                <div style="background:rgba(0,0,0,0.3); padding:6px; border-radius:4px;">
+                    <strong style="color:#7dcfff;">3. Illustrious (Booru):</strong>
+                    <div id="if_render_illus" style="font-size:0.85em; font-family:monospace; margin-top:2px;">(Click Compile)</div>
+                </div>
+            </div>
+        </div>
     </div>`;
 
     const root = document.createElement('div');
     root.innerHTML = html;
     const el = root.firstElementChild;
 
-    // ---- element refs ----
+    // Element helpers
     const $ = id => el.querySelector('#' + id);
+
+    // ================= Tabs Switching =================
+    el.querySelectorAll('.if-image-tab').forEach(btn => {
+        btn.addEventListener('click', () => {
+            el.querySelectorAll('.if-image-tab').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            el.querySelectorAll('.if-image-panel').forEach(p => {
+                p.style.display = p.dataset.ifPanel === btn.dataset.ifTab ? '' : 'none';
+            });
+        });
+    });
+
+    // ================= Backends Tab Wiring =================
     const naiKey = $('if_nai_key');
     const naiModel = $('if_nai_model');
     const naiTest = $('if_nai_test');
@@ -153,54 +291,14 @@ export function renderDrawer({ settings, save, nai, comfy }) {
     const comfyProfile = $('if_comfy_profile');
     const comfyTest = $('if_comfy_test');
     const comfyResult = $('if_comfy_result');
-    const testProfileRow = el.querySelector('[data-if-comfy-only]');
-    const testNegativeRow = el.querySelector('[data-if-nai-only]');
-    const testProfile = $('if_test_profile');
-    const testPrompt = $('if_test_prompt');
-    const testNegative = $('if_test_negative');
-    const testWidth = $('if_test_width');
-    const testHeight = $('if_test_height');
-    const testSteps = $('if_test_steps');
-    const testCfg = $('if_test_cfg');
-    const testSeed = $('if_test_seed');
-    const generateBtn = $('if_test_generate');
-    const errorBox = $('if_test_error');
-    const outputBox = $('if_test_output');
-    const imageEl = $('if_test_image');
-    const captionEl = $('if_test_caption');
-    const downloadEl = $('if_test_download');
-    const elapsedEl = $('if_test_elapsed');
 
-    // ---- init values from settings ----
     naiKey.value = settings.backends.nai.apiKey;
     naiModel.value = settings.backends.nai.model;
     comfyUrl.value = settings.backends.comfy.baseUrl;
     comfyUser.value = settings.backends.comfy.username;
     comfyPass.value = settings.backends.comfy.password;
     comfyProfile.value = settings.backends.comfy.profile;
-    testProfile.value = settings.test.profile || settings.backends.comfy.profile;
-    testPrompt.value = settings.test.prompt;
-    testNegative.value = settings.test.negative;
-    testWidth.value = settings.test.width;
-    testHeight.value = settings.test.height;
-    testSteps.value = settings.test.steps;
-    testCfg.value = settings.test.cfg;
-    testSeed.value = settings.test.seed;
-    syncBackendRadio();
 
-    // ---- tabs ----
-    el.querySelectorAll('.if-image-tab').forEach(btn => {
-        btn.addEventListener('click', () => {
-            el.querySelectorAll('.if-image-tab').forEach(b => b.classList.remove('active'));
-            btn.classList.add('active');
-            el.querySelectorAll('.if-image-panel').forEach(p => {
-                p.style.display = p.dataset.ifPanel === btn.dataset.ifTab ? '' : 'none';
-            });
-        });
-    });
-    el.querySelector('.if-image-tab').classList.add('active');
-
-    // ---- backends tab handlers ----
     naiKey.addEventListener('change', () => { settings.backends.nai.apiKey = naiKey.value.trim(); save(); });
     naiModel.addEventListener('change', () => { settings.backends.nai.model = naiModel.value; save(); });
     comfyUrl.addEventListener('change', () => { settings.backends.comfy.baseUrl = comfyUrl.value.trim(); save(); });
@@ -219,9 +317,7 @@ export function renderDrawer({ settings, save, nai, comfy }) {
         naiResult.classList.remove('error');
         try {
             const info = await nai.ping();
-            showResult(naiResult,
-                `Tier: ${info.tier} · active: ${info.active ? 'yes' : 'no'} · Anlas: ${info.anlas}` +
-                (info.unlimitedImageGeneration ? ' · unlimited image generation' : ''), false);
+            showResult(naiResult, `Tier: ${info.tier} · active: ${info.active ? 'yes' : 'no'} · Anlas: ${info.anlas}`, false);
         } catch (error) {
             showResult(naiResult, error.message, true);
         } finally {
@@ -229,46 +325,13 @@ export function renderDrawer({ settings, save, nai, comfy }) {
         }
     });
 
-    // Family -> proxy model title map, refreshed from the proxy when possible.
-    // The proxy's txt2img `model` field matches model id / title / checkpoint file
-    // name, NOT the family name, so profiles must resolve to a real model entry.
-    let proxyModelsByFamily = {};
-    async function refreshProxyModels() {
-        try {
-            const models = await comfy.models();
-            proxyModelsByFamily = {};
-            const status = await comfy.status();
-            for (const entry of (status.settings?.models ?? [])) {
-                if (entry.enabled && entry.family) {
-                    // Prefer the sd-models title (matches findModel by title).
-                    const match = models.find(m => m.filename === entry.checkpointFile);
-                    proxyModelsByFamily[entry.family] = match?.title ?? entry.id;
-                }
-            }
-        } catch { /* keep current mapping */ }
-    }
-
     comfyTest.addEventListener('click', async () => {
         comfyTest.disabled = true;
         comfyResult.textContent = 'Checking...';
         comfyResult.classList.remove('error');
         try {
             const ping = await comfy.ping();
-            let line = `Proxy OK (${ping.service ?? 'unknown service'})`;
-            try {
-                const status = await comfy.status();
-                const families = (status.settings?.models ?? [])
-                    .filter(m => m.enabled)
-                    .map(m => m.family);
-                const unique = [...new Set(families)];
-                line += ` · cloud key: ${status.cloudConfigured ? 'configured' : 'MISSING'}` +
-                    ` · profiles: ${unique.join('/') || 'none'}` +
-                    ` · characters: ${status.characterCount ?? 0}`;
-                await refreshProxyModels();
-            } catch (statusError) {
-                line += ` · status failed: ${statusError.message}`;
-            }
-            showResult(comfyResult, line, false);
+            showResult(comfyResult, `Proxy OK (${ping.service ?? 'ready'})`, false);
         } catch (error) {
             showResult(comfyResult, error.message, true);
         } finally {
@@ -276,18 +339,44 @@ export function renderDrawer({ settings, save, nai, comfy }) {
         }
     });
 
-    // ---- test tab handlers ----
+    // ================= Test Gen Tab Wiring =================
+    const testProfileRow = el.querySelector('[data-if-comfy-only]');
+    const testNegativeRow = el.querySelector('[data-if-nai-only]');
+    const testProfile = $('if_test_profile');
+    const testPrompt = $('if_test_prompt');
+    const testNegative = $('if_test_negative');
+    const testWidth = $('if_test_width');
+    const testHeight = $('if_test_height');
+    const testSteps = $('if_test_steps');
+    const testCfg = $('if_test_cfg');
+    const testSeed = $('if_test_seed');
+    const generateBtn = $('if_test_generate');
+    const errorBox = $('if_test_error');
+    const outputBox = $('if_test_output');
+    const imageEl = $('if_test_image');
+    const captionEl = $('if_test_caption');
+    const downloadEl = $('if_test_download');
+    const elapsedEl = $('if_test_elapsed');
+
+    testProfile.value = settings.test.profile || settings.backends.comfy.profile;
+    testPrompt.value = settings.test.prompt;
+    testNegative.value = settings.test.negative;
+    testWidth.value = settings.test.width;
+    testHeight.value = settings.test.height;
+    testSteps.value = settings.test.steps;
+    testCfg.value = settings.test.cfg;
+    testSeed.value = settings.test.seed;
+
     function syncBackendRadio() {
         el.querySelectorAll('input[name="if_test_backend"]').forEach(r => {
             r.checked = r.value === settings.test.backend;
         });
         const isComfy = settings.test.backend === 'comfy';
         testProfileRow.style.display = isComfy ? '' : 'none';
-        // Negative prompt: used by NovelAI and by Comfy families above CFG 1.
         const profile = PROFILES[settings.test.profile ?? settings.backends.comfy.profile];
-        const comfyUsesNegative = !profile || !profile.negativeDisabled;
-        testNegativeRow.style.display = (isComfy && !comfyUsesNegative) ? 'none' : '';
+        testNegativeRow.style.display = (isComfy && profile?.negativeDisabled) ? 'none' : '';
     }
+    syncBackendRadio();
 
     el.querySelectorAll('input[name="if_test_backend"]').forEach(radio => {
         radio.addEventListener('change', () => {
@@ -300,12 +389,6 @@ export function renderDrawer({ settings, save, nai, comfy }) {
     testProfile.addEventListener('change', () => {
         settings.test.profile = testProfile.value;
         applyProfile(settings.test, testProfile.value, true);
-        refreshTestForm();
-        syncBackendRadio();
-        save();
-    });
-
-    function refreshTestForm() {
         testPrompt.value = settings.test.prompt;
         testNegative.value = settings.test.negative;
         testWidth.value = settings.test.width;
@@ -313,7 +396,9 @@ export function renderDrawer({ settings, save, nai, comfy }) {
         testSteps.value = settings.test.steps;
         testCfg.value = settings.test.cfg;
         testSeed.value = settings.test.seed;
-    }
+        syncBackendRadio();
+        save();
+    });
 
     const bindInput = (input, apply) => {
         input.addEventListener('input', () => { apply(input.value); save(); });
@@ -326,31 +411,9 @@ export function renderDrawer({ settings, save, nai, comfy }) {
     bindInput(testCfg, v => settings.test.cfg = Number(v) || 4);
     bindInput(testSeed, v => settings.test.seed = Number.isFinite(Number(v)) ? Number(v) : -1);
 
-    let lastObjectUrl = null;
-    function showImage(url, revoke) {
-        if (lastObjectUrl) {
-            URL.revokeObjectURL(lastObjectUrl);
-            lastObjectUrl = null;
-        }
-        if (revoke) lastObjectUrl = url;
-        imageEl.src = url;
-        downloadEl.href = url;
-        outputBox.style.display = '';
-    }
-
-    function showError(text) {
-        errorBox.textContent = text;
-        errorBox.style.display = '';
-        errorBox.classList.add('error');
-    }
-
-    function hideOutput() {
+    generateBtn.addEventListener('click', async () => {
         errorBox.style.display = 'none';
         outputBox.style.display = 'none';
-    }
-
-    generateBtn.addEventListener('click', async () => {
-        hideOutput();
         generateBtn.disabled = true;
         generateBtn.textContent = 'Generating...';
         const startedAt = performance.now();
@@ -367,45 +430,238 @@ export function renderDrawer({ settings, save, nai, comfy }) {
                     seed: settings.test.seed,
                 });
                 const url = URL.createObjectURL(blob);
-                showImage(url, true);
-                captionEl.textContent =
-                    `NovelAI · ${settings.backends.nai.model} · ` +
-                    `${settings.test.width}x${settings.test.height} · steps ${settings.test.steps} · cfg ${settings.test.cfg}`;
+                imageEl.src = url;
+                downloadEl.href = url;
+                captionEl.textContent = `NovelAI · ${settings.test.width}x${settings.test.height} · steps ${settings.test.steps}`;
+                outputBox.style.display = '';
             } else {
-                const family = settings.test.profile ?? settings.backends.comfy.profile;
-                let modelTitle = proxyModelsByFamily[family];
-                if (!modelTitle) {
-                    // Mapping not loaded yet (or new family): fetch it before generating.
-                    await refreshProxyModels();
-                    modelTitle = proxyModelsByFamily[family];
-                }
-                if (!modelTitle) {
-                    throw new Error(`Could not resolve a proxy model for the "${family}" profile. Check that the proxy has an enabled model of that family (Backends tab -> Test connection).`);
-                }
                 const result = await comfy.txt2img({
                     prompt: settings.test.prompt,
                     negative_prompt: settings.test.negative,
-                    model: modelTitle,
+                    model: settings.test.profile ?? settings.backends.comfy.profile,
                     seed: settings.test.seed,
                     width: settings.test.width,
                     height: settings.test.height,
                     steps: settings.test.steps,
                     cfg_scale: settings.test.cfg,
                 });
-                showImage(result.dataUrl, true);
-                const info = result.info ?? {};
-                captionEl.textContent =
-                    `Comfy proxy · ${info.model ?? family} · ` +
-                    `${info.width ?? settings.test.width}x${info.height ?? settings.test.height} · ` +
-                    `steps ${settings.test.steps} · cfg ${settings.test.cfg}` +
-                    (info.seed !== undefined ? ` · seed ${info.seed}` : '');
+                imageEl.src = result.dataUrl;
+                downloadEl.href = result.dataUrl;
+                captionEl.textContent = `Comfy proxy · ${settings.test.width}x${settings.test.height}`;
+                outputBox.style.display = '';
             }
             elapsedEl.textContent = `${((performance.now() - startedAt) / 1000).toFixed(1)}s`;
-        } catch (error) {
-            showError(error.message);
+        } catch (err) {
+            errorBox.textContent = err.message;
+            errorBox.style.display = '';
         } finally {
             generateBtn.disabled = false;
             generateBtn.textContent = 'Generate';
+        }
+    });
+
+    // ================= Characters Tab Wiring =================
+    const charSelect = $('if_char_select');
+    const charNewBtn = $('if_char_new');
+    const charName = $('if_char_name');
+    const charAliases = $('if_char_aliases');
+    const charCount = $('if_char_count');
+    const charBooru = $('if_char_booru');
+    const charNatural = $('if_char_natural');
+    const charFacts = $('if_char_facts');
+    const charSaveBtn = $('if_char_save');
+    const charDelBtn = $('if_char_del');
+    const charStatus = $('if_char_status');
+
+    let currentChars = [];
+    let activeCharId = null;
+
+    async function loadCharactersList() {
+        try {
+            currentChars = await getAllCharacters();
+            charSelect.innerHTML = '<option value="">-- New Character --</option>' +
+                currentChars.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
+            if (activeCharId) charSelect.value = activeCharId;
+        } catch (e) {
+            console.warn('[IF Image] Load characters failed:', e);
+        }
+    }
+    loadCharactersList();
+
+    function populateCharForm(char) {
+        if (!char) {
+            activeCharId = null;
+            charName.value = '';
+            charAliases.value = '';
+            charCount.value = '1girl';
+            charBooru.value = '';
+            charNatural.value = '';
+            charFacts.value = '';
+            return;
+        }
+        activeCharId = char.id;
+        charName.value = char.name || '';
+        charAliases.value = (char.aliases || []).join(', ');
+        charCount.value = char.countTag || '1girl';
+        charBooru.value = char.booru || '';
+        charNatural.value = char.natural || '';
+        charFacts.value = char.facts || '';
+    }
+
+    charSelect.addEventListener('change', () => {
+        const found = currentChars.find(c => c.id === charSelect.value);
+        populateCharForm(found);
+    });
+
+    charNewBtn.addEventListener('click', () => {
+        charSelect.value = '';
+        populateCharForm(null);
+    });
+
+    charSaveBtn.addEventListener('click', async () => {
+        const name = charName.value.trim();
+        if (!name) {
+            showResult(charStatus, 'Character name cannot be empty', true);
+            return;
+        }
+        let target = currentChars.find(c => c.id === activeCharId);
+        if (!target) {
+            target = createDefaultCharacter(name);
+        }
+        target.name = name;
+        target.aliases = charAliases.value.split(',').map(s => s.trim()).filter(Boolean);
+        target.countTag = charCount.value.trim() || '1girl';
+        target.booru = charBooru.value.trim();
+        target.natural = charNatural.value.trim();
+        target.facts = charFacts.value.trim();
+
+        try {
+            await saveCharacter(target);
+            activeCharId = target.id;
+            await loadCharactersList();
+            showResult(charStatus, `Character "${name}" saved!`, false);
+        } catch (err) {
+            showResult(charStatus, err.message, true);
+        }
+    });
+
+    charDelBtn.addEventListener('click', async () => {
+        if (!activeCharId) return;
+        try {
+            await removeCharacter(activeCharId);
+            activeCharId = null;
+            populateCharForm(null);
+            await loadCharactersList();
+            showResult(charStatus, 'Character deleted.', false);
+        } catch (err) {
+            showResult(charStatus, err.message, true);
+        }
+    });
+
+    // ================= Persona & Style Wiring =================
+    const perName = $('if_per_name');
+    const perPov = $('if_per_pov');
+    const perBooru = $('if_per_booru');
+    const perNatural = $('if_per_natural');
+    const perSaveBtn = $('if_per_save');
+    const styleName = $('if_style_name');
+    const styleKrea = $('if_style_krea');
+    const styleIllus = $('if_style_illus');
+    const styleSaveBtn = $('if_style_save');
+    const presetsStatus = $('if_presets_status');
+
+    let currentPersonas = [];
+    let currentStyles = [];
+
+    async function loadPresets() {
+        try {
+            currentPersonas = await getAllPersonas();
+            currentStyles = await getAllStyles();
+            if (currentPersonas.length) {
+                const p = currentPersonas[0];
+                perName.value = p.name || 'Default User';
+                perPov.value = p.povMode || 'auto';
+                perBooru.value = p.booru || '';
+                perNatural.value = p.natural || '';
+            }
+            if (currentStyles.length) {
+                const s = currentStyles[0];
+                styleName.value = s.name || '';
+                styleKrea.value = s.dialectHints?.krea?.stylePhrase || '';
+                styleIllus.value = s.dialectHints?.illus?.artists || '';
+            }
+        } catch (e) {
+            console.warn('[IF Image] Presets load error:', e);
+        }
+    }
+    loadPresets();
+
+    perSaveBtn.addEventListener('click', async () => {
+        try {
+            let p = currentPersonas[0] || createDefaultPersona(perName.value.trim());
+            p.name = perName.value.trim();
+            p.povMode = perPov.value;
+            p.booru = perBooru.value.trim();
+            p.natural = perNatural.value.trim();
+            await savePersona(p);
+            await loadPresets();
+            showResult(presetsStatus, 'Persona saved!', false);
+        } catch (e) {
+            showResult(presetsStatus, e.message, true);
+        }
+    });
+
+    styleSaveBtn.addEventListener('click', async () => {
+        const name = styleName.value.trim();
+        if (!name) {
+            showResult(presetsStatus, 'Style name is required', true);
+            return;
+        }
+        try {
+            let s = currentStyles.find(x => x.name === name) || createDefaultStyle(name);
+            s.name = name;
+            s.dialectHints.krea.stylePhrase = styleKrea.value.trim();
+            s.dialectHints.illus.artists = styleIllus.value.trim();
+            await saveStyle(s);
+            await loadPresets();
+            showResult(presetsStatus, `Style "${name}" saved!`, false);
+        } catch (e) {
+            showResult(presetsStatus, e.message, true);
+        }
+    });
+
+    // ================= 3-Dialect Preview Wiring =================
+    const renderInput = $('if_render_input');
+    const renderBtn = $('if_render_btn');
+    const renderKrea = $('if_render_krea');
+    const renderAnima = $('if_render_anima');
+    const renderIllus = $('if_render_illus');
+
+    renderBtn.addEventListener('click', async () => {
+        const text = renderInput.value.trim();
+        if (!text) return;
+
+        try {
+            const roster = await getAllCharacters();
+            const styles = await getAllStyles();
+            const personas = await getAllPersonas();
+            const context = {
+                roster,
+                styles,
+                defaultPersona: personas[0] || createDefaultPersona(),
+            };
+
+            const parsed = parseTriggers(text, context);
+
+            const outKrea = assemblePrompt(parsed, 'krea', PROFILES.krea2);
+            const outAnima = assemblePrompt(parsed, 'anima', PROFILES.anima);
+            const outIllus = assemblePrompt(parsed, 'illus', PROFILES.illustrious);
+
+            renderKrea.textContent = outKrea.prompt || '(empty)';
+            renderAnima.textContent = outAnima.prompt || '(empty)';
+            renderIllus.textContent = outIllus.prompt || '(empty)';
+        } catch (err) {
+            renderKrea.textContent = `Error: ${err.message}`;
         }
     });
 
