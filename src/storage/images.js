@@ -2,7 +2,7 @@
 // Uses the existing IMAGES store (created in idb.js v1, by_timestamp index).
 // Does NOT bump DB_VERSION — the store and index already exist.
 
-import { STORES, getAllItems, getItem, putItem, deleteItem } from './idb.js';
+import { STORES, getDB, getAllItems, getItem, putItem, deleteItem } from './idb.js';
 
 /**
  * Save a generation result as an image record.
@@ -23,6 +23,9 @@ export async function saveImageRecord(record) {
         prompt: record.prompt ?? '',
         negative: record.negative ?? '',
         params: record.params ? { ...record.params } : {},
+        // C8: per-character prompt strings (NAI captions); kept on the record
+        // so a Gallery regeneration reproduces the multi-char payload.
+        characters: Array.isArray(record.characters) ? [...record.characters] : [],
         backend: record.backend ?? '',
         profileKey: record.profileKey ?? '',
         seed: record.seed ?? -1,
@@ -57,4 +60,60 @@ export async function getImageRecord(id) {
  */
 export async function deleteImageRecord(id) {
     return deleteItem(STORES.IMAGES, id);
+}
+
+// ------------------------------------------------------------------
+// Phase C10: Gallery tab support. Object URLs are the CALLER's
+// responsibility to create/revoke per page — records here carry the raw
+// Blob only, never an eagerly-created object URL.
+// ------------------------------------------------------------------
+
+/**
+ * List image records for the gallery, newest first, via the by_timestamp
+ * index. Optionally scoped to one chat.
+ * @param {{ chatId?: string, offset?: number, limit?: number }} [opts]
+ * @returns {Promise<Array<object>>}
+ */
+export async function listImages({ chatId, offset = 0, limit = 24 } = {}) {
+    const db = await getDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORES.IMAGES, 'readonly');
+        const index = tx.objectStore(STORES.IMAGES).index('by_timestamp');
+        const results = [];
+        let skipped = 0;
+        const request = index.openCursor(null, 'prev'); // descending timestamp = newest first
+        request.onsuccess = (event) => {
+            const cursor = event.target.result;
+            if (!cursor || results.length >= limit) {
+                resolve(results);
+                return;
+            }
+            const record = cursor.value;
+            if (!chatId || record.chatId === chatId) {
+                if (skipped < offset) skipped += 1;
+                else results.push(record);
+            }
+            cursor.continue();
+        };
+        request.onerror = () => reject(request.error);
+    });
+}
+
+/**
+ * Count image records, optionally scoped to one chat.
+ * @param {{ chatId?: string }} [opts]
+ * @returns {Promise<number>}
+ */
+export async function countImages({ chatId } = {}) {
+    if (!chatId) {
+        const db = await getDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(STORES.IMAGES, 'readonly');
+            const request = tx.objectStore(STORES.IMAGES).count();
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+        });
+    }
+    const all = await getAllItems(STORES.IMAGES);
+    return all.filter(r => r.chatId === chatId).length;
 }

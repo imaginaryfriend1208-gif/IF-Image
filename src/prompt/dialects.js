@@ -24,6 +24,11 @@ export function normalizeBooruTags(tagString) {
 
 /**
  * Deduplicates comma-separated tags while preserving order.
+ * Escaped-paren character groups (`\(...\)`, Phase C8 illus multi-char
+ * grouping) are preserved verbatim: any tag that opens, closes, or sits
+ * inside such a group is never deduplicated or dropped — deduping there
+ * would delete a group boundary (e.g. the second `\(1girl` opener) and
+ * corrupt the prompt.
  * @param {string} prompt
  * @returns {string}
  */
@@ -31,9 +36,18 @@ export function deduplicateTags(prompt) {
     if (!prompt || typeof prompt !== 'string') return '';
     const seen = new Set();
     const result = [];
+    let depth = 0;
     for (const raw of prompt.split(',')) {
         const item = raw.trim();
         if (!item) continue;
+        const opens = (item.match(/\\\(/g) || []).length;
+        const closes = (item.match(/\\\)/g) || []).length;
+        const inGroup = depth > 0 || opens > 0 || closes > 0;
+        depth = Math.max(0, depth + opens - closes);
+        if (inGroup) {
+            result.push(item);
+            continue;
+        }
         const lower = item.toLowerCase();
         if (!seen.has(lower)) {
             seen.add(lower);

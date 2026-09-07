@@ -206,6 +206,7 @@ export function createMarkerPipeline(deps) {
                     prompt: entry.envelope.prompt,
                     negative: entry.envelope.negative,
                     params: entry.envelope.params,
+                    characters: entry.envelope.characters,
                     backend: result.backend,
                     profileKey: result.profileKey,
                     seed: result.seed,

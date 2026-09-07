@@ -5,7 +5,8 @@
 //
 // The taskSnapshot.prompt field carries a compiled envelope:
 //   { prompt: string, negative: string,
-//     params: { width, height, steps, cfg, seed, sampler? } }
+//     params: { width, height, steps, cfg, seed, sampler? },
+//     characters?: string[] }  // C8 per-character strings; NAI-only
 // The taskSnapshot.backend field is { kind: 'comfy' | 'a1111' | 'nai' }.
 // The taskSnapshot.profile field is a profile key string (e.g. 'anima').
 //
@@ -48,6 +49,12 @@ export function createExecutor({ nai, comfy, a1111, getSettings }) {
         const height = Math.trunc(Number(params.height) || 1216);
         const steps = Math.trunc(Number(params.steps) || 16);
         const cfg = Number.isFinite(Number(params.cfg)) ? Number(params.cfg) : 4;
+        // C8: per-character rendered strings from the compiled envelope.
+        // Only NAI consumes them (characterPrompts/char_captions); the SD
+        // clients receive the already-grouped prompt string instead.
+        const characters = Array.isArray(envelope.characters)
+            ? envelope.characters.filter(c => typeof c === 'string' && c)
+            : [];
 
         const backendInfo = task.backend && typeof task.backend === 'object' ? task.backend : {};
         const kind = typeof backendInfo.kind === 'string' ? backendInfo.kind : 'comfy';
@@ -69,6 +76,7 @@ export function createExecutor({ nai, comfy, a1111, getSettings }) {
                 steps,
                 scale: cfg,
                 seed: resolvedSeed,
+                characters,
                 signal,
             });
             result = { blob, seed: resolvedSeed, width, height, backend: 'nai', profileKey, elapsedMs: performance.now() - startedAt };
