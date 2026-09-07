@@ -50,6 +50,9 @@ export function createMarkerPipeline(deps) {
         renderImageFrame, openLightbox, replaceMarkers, rewrite, logEvent,
         getMessage,
         getMessageElement, getSettings, getCurrentChatId, setTimeoutImpl = setTimeout,
+        // C10 (optional): enable the hover-overlay Delete action on in-chat
+        // frames. Without both, frames still render with View/Regen only.
+        deleteImageRecord, renderRegenerateChip,
     } = deps;
 
     // key -> entry. Entry holds the DOM slot (may be detached after a
@@ -135,14 +138,38 @@ export function createMarkerPipeline(deps) {
     }
 
     function bindImageActions(entry) {
-        return {
-            onSingleClick: () => {
-                if (activeLightbox) activeLightbox.close();
-                const close = openLightbox(doc, entry.objectUrl);
-                activeLightbox = { close, entry };
-            },
-            onDoubleClick: () => regenerate(entry),
+        const openView = () => {
+            if (activeLightbox) activeLightbox.close();
+            const close = openLightbox(doc, entry.objectUrl);
+            activeLightbox = { close, entry };
         };
+        const actions = {
+            onSingleClick: openView,
+            onDoubleClick: () => regenerate(entry),
+            // C10 explicit hover-overlay buttons (same handlers; the overlay
+            // stopPropagation()s so they never also fire click/dblclick).
+            onView: openView,
+            onRegen: () => regenerate(entry),
+        };
+        // Delete only when the record id is known and a delete backend was
+        // injected — restored frames and fresh saves both stamp recordId.
+        if (deleteImageRecord && entry.recordId) {
+            actions.onDelete = async () => {
+                const id = entry.recordId;
+                try {
+                    await deleteImageRecord(id);
+                } catch (err) {
+                    notify('error', `Delete failed: ${err?.message ?? err}`);
+                    return;
+                }
+                entry.recordId = null;
+                releaseUrl(entry);
+                if (!entry.slot) return;
+                if (renderRegenerateChip) renderRegenerateChip(entry.slot, doc, () => regenerate(entry));
+                else { entry.slot.dataset.ifimgState = 'idle'; entry.slot.textContent = ''; }
+            };
+        }
+        return actions;
     }
 
     async function regenerate(entry) {
@@ -197,7 +224,7 @@ export function createMarkerPipeline(deps) {
         if (snapshot.status === 'succeeded' && snapshot.result?.blob) {
             const result = snapshot.result;
             try {
-                await saveImageRecord({
+                entry.recordId = await saveImageRecord({
                     chatId: entry.chatId,
                     messageId: entry.messageId,
                     swipeId: entry.swipeId,
@@ -496,7 +523,12 @@ export function createMarkerPipeline(deps) {
                     hash,
                     backend: record.backend || defaultBackendKind(),
                     profileKey: record.profileKey || defaultProfileKey(),
-                    envelope: { prompt: record.prompt, negative: record.negative, params: { ...record.params } },
+                    envelope: {
+                        prompt: record.prompt,
+                        negative: record.negative,
+                        params: { ...record.params },
+                        characters: Array.isArray(record.characters) ? [...record.characters] : [],
+                    },
                     slot: target.slot,
                     taskId: null,
                     objectUrl: null,
@@ -506,6 +538,7 @@ export function createMarkerPipeline(deps) {
             } else {
                 entry.slot = target.slot;
             }
+            entry.recordId = record.id;
             showImage(entry, record.blob);
         }
     }

@@ -11,7 +11,7 @@ import { createMarkerRuntime } from './src/runtime/events.js';
 import { createTaskQueue } from './src/runtime/tasks.js';
 import { createExecutor } from './src/runtime/executor.js';
 import { createMarkerPipeline } from './src/runtime/marker-pipeline.js';
-import { replaceMarkers, createSlotElement, renderSlotState, renderImageFrame, openLightbox, contentHash } from './src/runtime/insert.js';
+import { replaceMarkers, createSlotElement, renderSlotState, renderImageFrame, renderRegenerateChip, openLightbox, contentHash } from './src/runtime/insert.js';
 import { saveImageRecord, getImagesForMessage, getImageRecord, deleteImageRecord } from './src/storage/images.js';
 import { getAllCharacters } from './src/storage/chars.js';
 import { getAllStyles, getAllPersonas, getReplaceRules } from './src/storage/presets.js';
@@ -218,7 +218,9 @@ jQuery(async () => {
         createSlotElement,
         renderSlotState,
         renderImageFrame,
+        renderRegenerateChip,
         openLightbox,
+        deleteImageRecord,
         replaceMarkers,
         rewrite: rewriteWithAbort,
         logEvent,
