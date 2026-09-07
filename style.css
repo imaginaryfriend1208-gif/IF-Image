@@ -143,3 +143,115 @@
 .if-image-actions a {
     text-decoration: none;
 }
+
+.if-image-note {
+    font-size: 0.8em;
+    color: var(--ifi-dim);
+}
+
+.if-image-check {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 28px;
+    cursor: pointer;
+}
+
+.if-image-preview-block {
+    background: rgba(0, 0, 0, 0.3);
+    padding: 6px;
+    border-radius: 4px;
+}
+
+.if-image-preview-block.active {
+    outline: 1px solid var(--ifi-accent);
+}
+
+.if-image-preview-field {
+    font-size: 0.85em;
+    font-family: monospace;
+    margin-top: 2px;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.if-image-preview-field .k {
+    color: var(--ifi-dim);
+}
+
+/* ---- In-chat image slots (src/runtime/insert.js) ---- */
+
+.ifimg-slot {
+    display: inline-block;
+    vertical-align: middle;
+    max-width: 100%;
+    margin: 4px 0;
+}
+
+.ifimg-frame {
+    display: inline-block;
+    max-width: 100%;
+    cursor: zoom-in;
+}
+
+.ifimg-frame img {
+    max-width: 100%;
+    max-height: 70vh;
+    border-radius: 8px;
+    border: 1px solid var(--SmartThemeBorderColor, #3b4261);
+    display: block;
+}
+
+.ifimg-spinner {
+    display: inline-block;
+    width: 18px;
+    height: 18px;
+    border: 2px solid var(--SmartThemeBorderColor, #3b4261);
+    border-top-color: var(--SmartThemeQuoteColor, #7aa2f7);
+    border-radius: 50%;
+    animation: ifimg-spin 0.9s linear infinite;
+    vertical-align: middle;
+}
+
+@keyframes ifimg-spin {
+    to { transform: rotate(360deg); }
+}
+
+.ifimg-chip {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 10px;
+    font-size: 0.8em;
+    border: 1px solid var(--SmartThemeBorderColor, #3b4261);
+    color: var(--SmartThemeQuoteColor, #a9b1d6);
+    vertical-align: middle;
+}
+
+.ifimg-chip-failed {
+    color: var(--SmartThemeEmColor, #f7768e);
+    border-color: var(--SmartThemeEmColor, #f7768e);
+}
+
+.ifimg-retry {
+    margin-left: 6px;
+    font-size: 0.8em;
+    padding: 1px 8px;
+}
+
+.ifimg-lightbox {
+    position: fixed;
+    inset: 0;
+    z-index: 10000;
+    background: rgba(0, 0, 0, 0.85);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: zoom-out;
+}
+
+.ifimg-lightbox img {
+    max-width: 96vw;
+    max-height: 96vh;
+    object-fit: contain;
+    border-radius: 6px;
+}

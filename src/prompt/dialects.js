@@ -1,44 +1,7 @@
-// IF Image - Dialect definitions and rendering rules.
-// Conforms to PROMPT-SPEC §7.
-
-export const DIALECTS = {
-    krea: {
-        id: 'krea',
-        label: 'Krea 2 (Prose)',
-        format: 'prose',
-        defaultParams: {
-            steps: 8,
-            cfg: 1,
-            width: 1344,
-            height: 768,
-        },
-        hasNegative: false,
-    },
-    anima: {
-        id: 'anima',
-        label: 'rdbt Anima (Hybrid)',
-        format: 'hybrid',
-        defaultParams: {
-            steps: 16,
-            cfg: 2,
-            width: 832,
-            height: 1216,
-        },
-        hasNegative: true,
-    },
-    illus: {
-        id: 'illus',
-        label: 'Illustrious / NoobAI (Booru Tags)',
-        format: 'tags',
-        defaultParams: {
-            steps: 20,
-            cfg: 5,
-            width: 832,
-            height: 1216,
-        },
-        hasNegative: true,
-    },
-};
+// IF Image - Dialect helpers.
+// Conforms to PROMPT-SPEC §7. The DIALECTS table was removed: it duplicated
+// PROFILES in src/profiles.js and nothing imported it. Only the two helpers
+// below are used (by render.js and the offline tests).
 
 /**
  * Normalizes booru tags: replace underscores with spaces, trim, drop empty tags.

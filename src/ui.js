@@ -1,4 +1,4 @@
-// IF Image - Drawer UI with 5 Tabs: Backends, Test Generate, Characters, Persona & Styles, Test Render.
+// IF Image - Drawer UI with 6 Tabs: Main, Backends, Test Generate, Characters, Persona & Styles, Test Render.
 // Template literals mounted into #extensions_settings2 by index.js.
 
 import { NAI_MODELS } from './backends/nai.js';
@@ -7,7 +7,13 @@ import { PROFILES, PROFILE_KEYS, applyProfile } from './profiles.js';
 import { getAllCharacters, saveCharacter, removeCharacter, createDefaultCharacter } from './storage/chars.js';
 import { getAllPersonas, savePersona, getAllStyles, saveStyle, createDefaultPersona, createDefaultStyle } from './storage/presets.js';
 import { parseTriggers } from './prompt/triggers.js';
-import { assemblePrompt } from './prompt/render.js';
+import { assemblePrompt, resolveProfileKey } from './prompt/render.js';
+
+// Single source of truth for the displayed version. Keep in sync with
+// manifest.json (which cannot be imported from browser ESM without JSON
+// import attributes — unsupported on older Chromium, would hard-fail the
+// whole extension).
+export const EXTENSION_VERSION = '0.3.0';
 
 /**
  * @param {object} args
@@ -22,19 +28,66 @@ export function renderDrawer({ settings, save, nai, comfy, a1111 }) {
     <div class="if-image-settings">
         <div class="if-image-title">
             <h2>IF Image</h2>
-            <span>v0.2.0 (Phase 1)</span>
+            <span>v${EXTENSION_VERSION}</span>
         </div>
 
         <div class="if-image-tabs">
-            <button class="if-image-tab menu_button active" data-if-tab="backends">Backends</button>
+            <button class="if-image-tab menu_button active" data-if-tab="main">Main</button>
+            <button class="if-image-tab menu_button" data-if-tab="backends">Backends</button>
             <button class="if-image-tab menu_button" data-if-tab="test">Test Gen</button>
             <button class="if-image-tab menu_button" data-if-tab="chars">Characters</button>
             <button class="if-image-tab menu_button" data-if-tab="presets">Persona & Style</button>
             <button class="if-image-tab menu_button" data-if-tab="render">3-Dialect Preview</button>
         </div>
 
+        <!-- ============ MAIN TAB ============ -->
+        <div class="if-image-panel" data-if-panel="main">
+            <h3>Generation</h3>
+            <div class="if-image-row">
+                <label class="if-image-check">
+                    <input type="checkbox" id="if_main_enabled"> Extension enabled
+                </label>
+            </div>
+            <div class="if-image-row">
+                <label class="if-image-check">
+                    <input type="checkbox" id="if_main_gen_enabled"> Marker detection enabled
+                </label>
+            </div>
+            <div class="if-image-row">
+                <label for="if_main_start">Start tag</label>
+                <input id="if_main_start" type="text" class="text_pole textarea_compact" value="image###">
+            </div>
+            <div class="if-image-row">
+                <label for="if_main_end">End tag</label>
+                <input id="if_main_end" type="text" class="text_pole textarea_compact" value="###">
+            </div>
+            <div class="if-image-note">Changing the tags affects marker detection in existing messages. Tags are matched literally (regex special characters are escaped).</div>
+            <div class="if-image-row">
+                <label for="if_main_backend">Default backend</label>
+                <select id="if_main_backend" class="text_pole">
+                    <option value="comfy">SD backend (connection type from Backends)</option>
+                    <option value="nai">NovelAI</option>
+                </select>
+            </div>
+            <div class="if-image-row">
+                <label for="if_main_profile">Default profile</label>
+                <select id="if_main_profile" class="text_pole">
+                    ${PROFILE_KEYS.map(k => `<option value="${k}">${PROFILES[k].label}</option>`).join('')}
+                </select>
+            </div>
+            <div class="if-image-row">
+                <label for="if_main_mode">Mode</label>
+                <select id="if_main_mode" class="text_pole">
+                    <option value="direct">Direct (marker → image)</option>
+                    <option value="assist" disabled>Assist (Phase B)</option>
+                    <option value="full" disabled>Full (Phase B)</option>
+                </select>
+            </div>
+            <div class="if-image-note">Assist and Full modes arrive in Phase B (LLM rewrite). Direct mode is active now.</div>
+        </div>
+
         <!-- ============ BACKENDS TAB ============ -->
-        <div class="if-image-panel" data-if-panel="backends">
+        <div class="if-image-panel" data-if-panel="backends" style="display:none;">
             <h3>NovelAI</h3>
             <div class="if-image-row">
                 <label for="if_nai_key">API token (pst-...)</label>
@@ -303,17 +356,23 @@ export function renderDrawer({ settings, save, nai, comfy, a1111 }) {
             </div>
 
             <div id="if_render_results" style="display:flex; flex-direction:column; gap:8px; margin-top:6px;">
-                <div style="background:rgba(0,0,0,0.3); padding:6px; border-radius:4px;">
+                <div class="if-image-preview-block" data-if-dialect="krea">
                     <strong style="color:#7aa2f7;">1. Krea 2 (Prose):</strong>
-                    <div id="if_render_krea" style="font-size:0.85em; font-family:monospace; margin-top:2px;">(Click Compile)</div>
+                    <div class="if-image-preview-field if-render-prompt" data-dialect="krea"><span class="k">prompt:</span> (Click Compile)</div>
+                    <div class="if-image-preview-field if-render-negative" data-dialect="krea"><span class="k">negative:</span></div>
+                    <div class="if-image-preview-field if-render-params" data-dialect="krea"><span class="k">params:</span></div>
                 </div>
-                <div style="background:rgba(0,0,0,0.3); padding:6px; border-radius:4px;">
+                <div class="if-image-preview-block" data-if-dialect="anima">
                     <strong style="color:#bb9af7;">2. rdbt Anima (Hybrid):</strong>
-                    <div id="if_render_anima" style="font-size:0.85em; font-family:monospace; margin-top:2px;">(Click Compile)</div>
+                    <div class="if-image-preview-field if-render-prompt" data-dialect="anima"><span class="k">prompt:</span> (Click Compile)</div>
+                    <div class="if-image-preview-field if-render-negative" data-dialect="anima"><span class="k">negative:</span></div>
+                    <div class="if-image-preview-field if-render-params" data-dialect="anima"><span class="k">params:</span></div>
                 </div>
-                <div style="background:rgba(0,0,0,0.3); padding:6px; border-radius:4px;">
+                <div class="if-image-preview-block" data-if-dialect="illus">
                     <strong style="color:#7dcfff;">3. Illustrious (Booru):</strong>
-                    <div id="if_render_illus" style="font-size:0.85em; font-family:monospace; margin-top:2px;">(Click Compile)</div>
+                    <div class="if-image-preview-field if-render-prompt" data-dialect="illus"><span class="k">prompt:</span> (Click Compile)</div>
+                    <div class="if-image-preview-field if-render-negative" data-dialect="illus"><span class="k">negative:</span></div>
+                    <div class="if-image-preview-field if-render-params" data-dialect="illus"><span class="k">params:</span></div>
                 </div>
             </div>
         </div>
@@ -336,6 +395,53 @@ export function renderDrawer({ settings, save, nai, comfy, a1111 }) {
             });
         });
     });
+
+    // ================= Main Tab Wiring =================
+    const mainEnabled = $('if_main_enabled');
+    const mainGenEnabled = $('if_main_gen_enabled');
+    const mainStart = $('if_main_start');
+    const mainEnd = $('if_main_end');
+    const mainBackend = $('if_main_backend');
+    const mainProfile = $('if_main_profile');
+    const mainMode = $('if_main_mode');
+
+    mainEnabled.checked = settings.enabled !== false;
+    mainGenEnabled.checked = settings.generation.enabled !== false;
+    mainStart.value = settings.generation.startTag || 'image###';
+    mainEnd.value = settings.generation.endTag || '###';
+    mainBackend.value = settings.generation.backend || 'comfy';
+    mainProfile.value = settings.generation.profile || settings.backends.comfy.profile || 'anima';
+    mainMode.value = settings.generation.mode || 'direct';
+
+    mainEnabled.addEventListener('change', () => { settings.enabled = mainEnabled.checked; save(); });
+    mainGenEnabled.addEventListener('change', () => { settings.generation.enabled = mainGenEnabled.checked; save(); });
+    mainStart.addEventListener('change', () => {
+        const value = mainStart.value.trim();
+        if (!value) {
+            mainStart.value = settings.generation.startTag || 'image###';
+            mainStart.setCustomValidity('Start tag cannot be empty.');
+            mainStart.reportValidity();
+            return;
+        }
+        mainStart.setCustomValidity('');
+        settings.generation.startTag = value;
+        save();
+    });
+    mainEnd.addEventListener('change', () => {
+        const value = mainEnd.value.trim();
+        if (!value) {
+            mainEnd.value = settings.generation.endTag || '###';
+            mainEnd.setCustomValidity('End tag cannot be empty.');
+            mainEnd.reportValidity();
+            return;
+        }
+        mainEnd.setCustomValidity('');
+        settings.generation.endTag = value;
+        save();
+    });
+    mainBackend.addEventListener('change', () => { settings.generation.backend = mainBackend.value; save(); });
+    mainProfile.addEventListener('change', () => { settings.generation.profile = mainProfile.value; save(); });
+    mainMode.addEventListener('change', () => { settings.generation.mode = mainMode.value; save(); });
 
     // ================= Backends Tab Wiring =================
     const naiKey = $('if_nai_key');
@@ -1030,35 +1136,52 @@ export function renderDrawer({ settings, save, nai, comfy, a1111 }) {
     // ================= 3-Dialect Preview Wiring =================
     const renderInput = $('if_render_input');
     const renderBtn = $('if_render_btn');
-    const renderKrea = $('if_render_krea');
-    const renderAnima = $('if_render_anima');
-    const renderIllus = $('if_render_illus');
+
+    function renderPreviewBlock(dialect, output, active) {
+        const block = el.querySelector(`[data-if-dialect="${dialect}"]`);
+        if (!block) return;
+        block.classList.toggle('active', active);
+        const promptEl = block.querySelector('.if-render-prompt');
+        const negEl = block.querySelector('.if-render-negative');
+        const paramsEl = block.querySelector('.if-render-params');
+        if (promptEl) promptEl.innerHTML = `<span class="k">prompt:</span> ${output.prompt || '(empty)'}`;
+        if (negEl) negEl.innerHTML = `<span class="k">negative:</span> ${output.negative || '(none)'}`;
+        if (paramsEl) paramsEl.innerHTML = `<span class="k">params:</span> W=${output.params.width} H=${output.params.height} steps=${output.params.steps} cfg=${output.params.cfg}`;
+    }
 
     renderBtn.addEventListener('click', async () => {
         const text = renderInput.value.trim();
         if (!text) return;
-
         try {
             const roster = await getAllCharacters();
             const styles = await getAllStyles();
             const personas = await getAllPersonas();
-            const context = {
+            const parsed = parseTriggers(text, {
                 roster,
                 styles,
                 defaultPersona: personas[0] || createDefaultPersona(),
-            };
+            });
 
-            const parsed = parseTriggers(text, context);
-
-            const outKrea = assemblePrompt(parsed, 'krea', PROFILES.krea2);
-            const outAnima = assemblePrompt(parsed, 'anima', PROFILES.anima);
-            const outIllus = assemblePrompt(parsed, 'illus', PROFILES.illustrious);
-
-            renderKrea.textContent = outKrea.prompt || '(empty)';
-            renderAnima.textContent = outAnima.prompt || '(empty)';
-            renderIllus.textContent = outIllus.prompt || '(empty)';
+            const dialects = [
+                { key: 'krea', profileKey: 'krea2' },
+                { key: 'anima', profileKey: 'anima' },
+                { key: 'illus', profileKey: 'illustrious' },
+            ];
+            // The pipeline's dialectOverride wins over the configured default
+            // profile; mark the dialect it resolves to as active.
+            const configured = settings.generation.profile || settings.backends.comfy.profile || 'anima';
+            const { profileKey: resolvedKey } = resolveProfileKey(parsed.dialectOverride, configured);
+            const activeDialect = PROFILES[resolvedKey]?.dialect ?? 'anima';
+            for (const d of dialects) {
+                const output = assemblePrompt(parsed, d.key, PROFILES[d.profileKey]);
+                renderPreviewBlock(d.key, output, d.key === activeDialect);
+            }
         } catch (err) {
-            renderKrea.textContent = `Error: ${err.message}`;
+            const kreaBlock = el.querySelector('[data-if-dialect="krea"]');
+            if (kreaBlock) {
+                const promptEl = kreaBlock.querySelector('.if-render-prompt');
+                if (promptEl) promptEl.innerHTML = `<span class="k">error:</span> ${err.message}`;
+            }
         }
     });
 

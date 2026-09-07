@@ -96,7 +96,18 @@ export function parseTriggers(input, context = {}) {
             if (parsed.char) {
                 const char = matchCharacter(parsed.char, roster);
                 if (char) {
-                    foundChars.push({ char, modifiers: parsed });
+                    // Normalize JSON keys to the same string[] modifier shape
+                    // produced by the $Name:mod1|mod2 syntax. render.js checks
+                    // .includes('back') / .includes('nsfw'), so modifiers must
+                    // always be an array of strings. `outfit` is kept as a
+                    // separate field (consumed by Phase C outfit triggers).
+                    const modifiers = [];
+                    if (parsed.view === 'back') modifiers.push('back');
+                    if (parsed.view === 'full') modifiers.push('full');
+                    if (parsed.nsfw === true) modifiers.push('nsfw');
+                    const item = { char, modifiers };
+                    if (typeof parsed.outfit === 'string' && parsed.outfit) item.outfit = parsed.outfit;
+                    foundChars.push(item);
                     return '';
                 }
             }

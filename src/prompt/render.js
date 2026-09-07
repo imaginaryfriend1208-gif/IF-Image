@@ -4,6 +4,26 @@
 import { normalizeBooruTags, deduplicateTags } from './dialects.js';
 
 /**
+ * Map a {{dialect: X}} override value to the corresponding PROFILES key.
+ * The override wins over the configured default profile; unknown values
+ * fall back with a console warning (never echoing raw user text beyond the
+ * directive value itself).
+ * @param {string|null} dialectOverride - from parseTriggers, e.g. 'illus'
+ * @param {string} configuredProfileKey - e.g. 'anima'
+ * @returns {{profileKey: string, usedOverride: boolean}}
+ */
+const DIALECT_TO_PROFILE = { krea: 'krea2', anima: 'anima', illus: 'illustrious' };
+
+export function resolveProfileKey(dialectOverride, configuredProfileKey) {
+    if (dialectOverride) {
+        const mapped = DIALECT_TO_PROFILE[dialectOverride];
+        if (mapped) return { profileKey: mapped, usedOverride: true };
+        console.warn(`[IF Image] Unknown dialect override "${dialectOverride}" — falling back to the configured profile.`);
+    }
+    return { profileKey: configuredProfileKey, usedOverride: false };
+}
+
+/**
  * Render a character entity for a specific dialect.
  * @param {object} item - from parseTriggers ({ char, modifiers, isPersona, persona })
  * @param {string} dialect - 'krea' | 'anima' | 'illus'
