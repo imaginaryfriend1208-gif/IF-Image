@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { renderedSegments, extractMarkers } from '../src/runtime/events.js';
-import { replaceMarkers, createSlotElement, renderSlotState, renderImageFrame, renderRegenerateChip, contentHash } from '../src/runtime/insert.js';
+import { replaceMarkers, createSlotElement, renderSlotState, renderImageFrame, renderRegenerateChip, renderIdleChip, contentHash } from '../src/runtime/insert.js';
 
 // ---- Minimal DOM stub ----------------------------------------------------
 class Node {
@@ -41,6 +41,7 @@ class Element extends Node {
     get firstChild() { return this.childNodes[0] ?? null; }
     setAttribute(k, v) { this.attributes[k] = String(v); }
     getAttribute(k) { return this.attributes[k] ?? null; }
+    removeAttribute(k) { delete this.attributes[k]; }
     appendChild(node) { node.remove(); node.parentNode = this; this.childNodes.push(node); return node; }
     removeChild(node) { node.remove(); return node; }
     insertBefore(node, ref) {
@@ -232,6 +233,45 @@ test('C10 overlay: View fires only onView, never regen, and stops propagation', 
     assert.ok(event.propagationStopped, 'button click stops propagation');
     await new Promise(r => setTimeout(r, 350)); // outlive the 300ms single-click timer
     assert.deepEqual(events, ['view']);
+});
+
+// ---- R3: idle chip + aria-hidden visibility ---------------------------------
+
+test('R3: idle chip renders label + Generate; button fires exactly once per click', () => {
+    const slot = createSlotElement(doc, { occurrence: 0, content: 'a' });
+    let generated = 0;
+    const chip = renderIdleChip(slot, doc, { onGenerate: () => generated++ });
+    assert.equal(slot.dataset.ifimgState, 'idle');
+    assert.equal(chip.className, 'ifimg-chip ifimg-chip-idle');
+    assert.equal(chip.textContent, 'Image not generated');
+    const btn = slot.childNodes[1];
+    assert.equal(btn.textContent, 'Generate');
+    btn.dispatch('click');
+    assert.equal(generated, 1);
+    btn.dispatch('click');
+    assert.equal(generated, 2);
+    // Without onGenerate: chip only, no button; custom label honored.
+    const slot2 = createSlotElement(doc, { occurrence: 1, content: 'b' });
+    renderIdleChip(slot2, doc, { label: 'custom' });
+    assert.equal(slot2.childNodes.length, 1);
+    assert.equal(slot2.childNodes[0].textContent, 'custom');
+});
+
+test('R3: aria-hidden removed for visible content, restored for spinner states', () => {
+    const slot = createSlotElement(doc, { occurrence: 0, content: 'a' });
+    assert.equal(slot.getAttribute('aria-hidden'), 'true', 'slots start hidden');
+    renderSlotState(slot, { status: 'queued' }, doc);
+    assert.equal(slot.getAttribute('aria-hidden'), 'true', 'spinner stays hidden');
+    renderSlotState(slot, { status: 'failed', error: { message: 'x' } }, doc);
+    assert.equal(slot.getAttribute('aria-hidden'), null, 'failed chip is visible');
+    renderSlotState(slot, { status: 'running' }, doc);
+    assert.equal(slot.getAttribute('aria-hidden'), 'true', 'retry spinner hides again');
+    renderIdleChip(slot, doc, {});
+    assert.equal(slot.getAttribute('aria-hidden'), null, 'idle chip is visible');
+    renderImageFrame(slot, doc, 'blob:x');
+    assert.equal(slot.getAttribute('aria-hidden'), null, 'image frame is visible');
+    renderRegenerateChip(slot, doc, () => {});
+    assert.equal(slot.getAttribute('aria-hidden'), null, 'regenerate chip is visible');
 });
 
 test('C10 overlay: Delete fires onDelete; caller collapses slot to a regenerate chip', () => {

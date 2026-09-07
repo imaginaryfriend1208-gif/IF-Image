@@ -53,6 +53,10 @@ export function createMarkerPipeline(deps) {
         // C10 (optional): enable the hover-overlay Delete action on in-chat
         // frames. Without both, frames still render with View/Regen only.
         deleteImageRecord, renderRegenerateChip,
+        // R3 (optional): visible "Image not generated" chip with a Generate
+        // button for slots with nothing persisted and no live task. Without
+        // it, such slots fall back to the old invisible idle placeholder.
+        renderIdleChip,
     } = deps;
 
     // key -> entry. Entry holds the DOM slot (may be detached after a
@@ -247,9 +251,51 @@ export function createMarkerPipeline(deps) {
             } catch (err) {
                 console.warn('[IF Image] Image record save failed:', err?.message ?? err);
             }
+            // R3: a success supersedes any persisted failure marker for this
+            // slot — remove it so revisits restore the image, not the error.
+            if (entry.failedRecordId && deleteImageRecord) {
+                const staleId = entry.failedRecordId;
+                entry.failedRecordId = null;
+                try {
+                    await deleteImageRecord(staleId);
+                } catch (err) {
+                    console.warn('[IF Image] Failed-record cleanup failed:', err?.message ?? err);
+                }
+            }
             if (entry.taskId !== snapshot.id) return; // superseded during the await
             showImage(entry, result.blob);
             return;
+        }
+        // R3: persist terminal failures (NOT cancellations) as light blob-less
+        // records so the failed chip + its sanitized error survive chat
+        // revisits. Reusing failedRecordId overwrites the previous failure for
+        // this slot instead of accumulating one record per retry.
+        if (snapshot.status === 'failed') {
+            try {
+                const savedId = await saveImageRecord({
+                    ...(entry.failedRecordId ? { id: entry.failedRecordId } : {}),
+                    chatId: entry.chatId,
+                    messageId: entry.messageId,
+                    swipeId: entry.swipeId,
+                    occurrence: entry.occurrence,
+                    content: entry.content,
+                    prompt: entry.envelope?.prompt ?? '',
+                    negative: entry.envelope?.negative ?? '',
+                    params: entry.envelope?.params ?? {},
+                    backend: entry.backend,
+                    profileKey: entry.profileKey,
+                    checkpoint: entry.envelope?.params?.checkpoint,
+                    seed: entry.envelope?.params?.seed ?? -1,
+                    status: 'failed',
+                    // snapshot.error.message is already sanitized upstream
+                    // (backend clients redact secrets before throwing).
+                    error: String(snapshot.error?.message ?? 'Generation failed').slice(0, 300),
+                });
+                entry.failedRecordId = savedId;
+            } catch (err) {
+                console.warn('[IF Image] Failure record save failed:', err?.message ?? err);
+            }
+            if (entry.taskId !== snapshot.id) return; // superseded during the await
         }
         if (entry.slot) renderSlotState(entry.slot, snapshot, doc, { onRetry: () => retry(entry) });
     }
@@ -341,6 +387,7 @@ export function createMarkerPipeline(deps) {
             objectUrl: null,
             pendingError: null,
             rewriting: false,
+            failedRecordId: null,
         };
         // Registered synchronously (before the IDB await below) so a
         // concurrent DOM pass or click has something to find immediately.
@@ -363,9 +410,13 @@ export function createMarkerPipeline(deps) {
         }
 
         if (existingRecord) {
-            // Restore path: a persisted image already matches this exact
+            // Restore path: a persisted record already matches this exact
             // marker content. Do NOT generate (or call the LLM) again — the
-            // DOM pass's restoreImages() will attach it from IDB.
+            // DOM pass's restoreImages() attaches the image from IDB, or (R3)
+            // renders the persisted failure as a failed chip with Retry.
+            if (existingRecord.status === 'failed' && !existingRecord.blob) {
+                entry.failedRecordId = existingRecord.id;
+            }
             scheduleDomPass(marker.chatId, marker.messageId);
             return;
         }
@@ -406,10 +457,64 @@ export function createMarkerPipeline(deps) {
             if (slots.get(key) !== entry) { scheduleDomPass(marker.chatId, marker.messageId); return; }
         }
 
+        startGeneration(entry);
+    }
+
+    /**
+     * R3: shared tail of the generation flow — dry-run check → enqueue →
+     * scheduleDomPass — used by onMarker AND by the visible idle/failed chips'
+     * Generate/Retry buttons (the explicit user action for a marker the
+     * runtime already deduplicated, so events.js is never involved again).
+     *
+     * `entryInfo` is either a live entry (has .envelope; onMarker path) or a
+     * chip descriptor `{ chatId, messageId, swipeId, occurrence, content,
+     * slot?, failedRecordId? }` — the chip path compiles fresh (compile →
+     * overrides) and registers a new entry, replacing any stale one.
+     * @returns {object|null} the live entry, or null if compile failed.
+     */
+    function startGeneration(entryInfo) {
+        const settings = getSettings();
+        let entry = entryInfo;
+        if (!entry.envelope) {
+            let compiled;
+            try {
+                compiled = compile(entryInfo.content);
+            } catch (err) {
+                console.error('[IF Image] compile failed:', err?.message ?? err);
+                notify('error', 'Prompt compile failed; see console.');
+                return null;
+            }
+            compiled = { ...compiled, envelope: applyOverrides(compiled.envelope, entryInfo.overrides) };
+            const key = slotKey(entryInfo.chatId, entryInfo.messageId, entryInfo.swipeId, entryInfo.occurrence);
+            const previous = slots.get(key);
+            if (previous) releaseUrl(previous);
+            entry = {
+                key,
+                chatId: entryInfo.chatId,
+                messageId: entryInfo.messageId,
+                swipeId: entryInfo.swipeId,
+                occurrence: entryInfo.occurrence,
+                content: entryInfo.content,
+                hash: contentHash(entryInfo.content),
+                backend: defaultBackendKind(),
+                profileKey: compiled.profileKey,
+                envelope: compiled.envelope,
+                slot: entryInfo.slot ?? previous?.slot ?? null,
+                taskId: null,
+                objectUrl: null,
+                pendingError: null,
+                rewriting: false,
+                // Keep the persisted failure record's id so the NEXT outcome
+                // overwrites it (fail) or deletes it (success).
+                failedRecordId: entryInfo.failedRecordId ?? previous?.failedRecordId ?? null,
+            };
+            slots.set(key, entry);
+        }
+
         // Dry-run: log the final envelope, never enqueue.
         if (settings.generation.dryRun === true) {
             logEvent?.('dry_run', {
-                key,
+                key: entry.key,
                 prompt: entry.envelope.prompt,
                 negative: entry.envelope.negative,
                 params: entry.envelope.params,
@@ -417,12 +522,17 @@ export function createMarkerPipeline(deps) {
                 backend: entry.backend,
             });
             notify('info', 'Dry-run: envelope logged, generation skipped.');
-            scheduleDomPass(marker.chatId, marker.messageId);
-            return;
+            scheduleDomPass(entry.chatId, entry.messageId);
+            return entry;
         }
 
-        enqueue(entry, entry.envelope);
-        scheduleDomPass(marker.chatId, marker.messageId);
+        const id = enqueue(entry, entry.envelope);
+        // Chip path: the slot already exists in the DOM (marker text is long
+        // gone), so the deferred DOM pass cannot re-render it — paint the
+        // queued state directly, like retry() does.
+        if (id && entry.slot) renderSlotState(entry.slot, { status: 'queued' }, doc);
+        scheduleDomPass(entry.chatId, entry.messageId);
+        return entry;
     }
 
     // ------------------------------------------------------------------
@@ -510,10 +620,45 @@ export function createMarkerPipeline(deps) {
                     renderSlotState(target.slot, { status: 'failed', error: live.pendingError }, doc, { onRetry: () => retry(live) });
                     continue;
                 }
-                // Nothing persisted and no live task owns it: quiet invisible
-                // placeholder (slot is aria-hidden already).
-                target.slot.dataset.ifimgState = 'idle';
-                target.slot.textContent = '';
+                // R3: a chip's Generate/Retry re-enters the shared generation
+                // path. A live entry compiled by onMarker (envelope present)
+                // is reused so marker overrides survive; otherwise a chip
+                // descriptor makes startGeneration compile fresh.
+                const generate = (failedRecordId) => {
+                    const current = slots.get(target.key);
+                    if (current?.envelope) {
+                        current.slot = target.slot;
+                        if (failedRecordId && !current.failedRecordId) current.failedRecordId = failedRecordId;
+                        startGeneration(current);
+                        return;
+                    }
+                    startGeneration({
+                        chatId, messageId, swipeId,
+                        occurrence: target.occurrence,
+                        content: target.content,
+                        slot: target.slot,
+                        failedRecordId: failedRecordId ?? null,
+                    });
+                };
+                if (record?.status === 'failed') {
+                    // Persisted failure: visible failed chip with the stored
+                    // sanitized error and a Retry that reuses this record id.
+                    if (live) { live.slot = target.slot; live.failedRecordId = record.id; }
+                    renderSlotState(target.slot, { status: 'failed', error: { message: record.error || 'Generation failed' } }, doc, {
+                        onRetry: () => generate(record.id),
+                    });
+                    continue;
+                }
+                // Nothing persisted and no live task owns it. R3: visible
+                // "Image not generated" chip with an explicit Generate button,
+                // so a marker never silently vanishes. Fallback (no injected
+                // renderIdleChip): old invisible idle placeholder.
+                if (renderIdleChip) {
+                    renderIdleChip(target.slot, doc, { onGenerate: () => generate(null) });
+                } else {
+                    target.slot.dataset.ifimgState = 'idle';
+                    target.slot.textContent = '';
+                }
                 continue;
             }
             let entry = slots.get(target.key);

@@ -7,8 +7,15 @@ import { STORES, getDB, getAllItems, getItem, putItem, deleteItem } from './idb.
 /**
  * Save a generation result as an image record.
  * The Blob is stored natively in IndexedDB.
+ *
+ * R3: a record may instead be a LIGHT failure marker — status: 'failed',
+ * a bounded sanitized `error` string, and NO blob — persisted so a failed
+ * marker slot stays visible (failed chip + Retry) across chat revisits.
+ * Gallery listing/counting skips blob-less records; getImagesForMessage
+ * returns everything and callers filter.
  * @param {{ chatId, messageId, swipeId, occurrence, prompt, negative, params,
- *           backend, profileKey, checkpoint?, seed, blob, width, height, content }} record
+ *           backend, profileKey, checkpoint?, seed, blob?, width, height,
+ *           content, status?, error? }} record
  * @returns {Promise<string>} the new record id
  */
 export async function saveImageRecord(record) {
@@ -32,10 +39,16 @@ export async function saveImageRecord(record) {
         // undefined for backends without a checkpoint concept.
         checkpoint: typeof record.checkpoint === 'string' && record.checkpoint ? record.checkpoint : undefined,
         seed: record.seed ?? -1,
-        blob: record.blob,               // Blob stored directly
+        blob: record.blob,               // Blob stored directly (absent on failure records)
         width: record.width ?? 0,
         height: record.height ?? 0,
     };
+    // R3 failure-record fields (bounded, sanitized upstream).
+    if (record.status === 'failed') {
+        entry.status = 'failed';
+        entry.error = typeof record.error === 'string' ? record.error.slice(0, 300) : '';
+    }
+    if (typeof record.id === 'string' && record.id) entry.id = record.id;
     await putItem(STORES.IMAGES, entry);
     return entry.id;
 }
@@ -92,7 +105,8 @@ export async function listImages({ chatId, offset = 0, limit = 24 } = {}) {
                 return;
             }
             const record = cursor.value;
-            if (!chatId || record.chatId === chatId) {
+            // R3: blob-less failure records never appear in the gallery.
+            if (record.blob && (!chatId || record.chatId === chatId)) {
                 if (skipped < offset) skipped += 1;
                 else results.push(record);
             }
@@ -108,15 +122,8 @@ export async function listImages({ chatId, offset = 0, limit = 24 } = {}) {
  * @returns {Promise<number>}
  */
 export async function countImages({ chatId } = {}) {
-    if (!chatId) {
-        const db = await getDB();
-        return new Promise((resolve, reject) => {
-            const tx = db.transaction(STORES.IMAGES, 'readonly');
-            const request = tx.objectStore(STORES.IMAGES).count();
-            request.onsuccess = () => resolve(request.result);
-            request.onerror = () => reject(request.error);
-        });
-    }
+    // R3: count only records with a blob — failure markers are invisible to
+    // the gallery, so a plain store count() would overcount.
     const all = await getAllItems(STORES.IMAGES);
-    return all.filter(r => r.chatId === chatId).length;
+    return all.filter(r => r.blob && (!chatId || r.chatId === chatId)).length;
 }

@@ -297,6 +297,13 @@
     border-color: var(--SmartThemeEmColor, #f7768e);
 }
 
+/* R3: "Image not generated" chip — a marker slot with nothing persisted and
+   no live task stays visible instead of silently vanishing. */
+.ifimg-chip-idle {
+    opacity: 0.75;
+    font-style: italic;
+}
+
 .ifimg-retry {
     margin-left: 6px;
     font-size: 0.8em;

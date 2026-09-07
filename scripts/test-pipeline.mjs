@@ -430,6 +430,148 @@ test('R2: restore rehydrates the record checkpoint; regenerate reuses it', async
     assert.equal(regen.prompt.params.seed, -1, 'regen uses a fresh seed');
 });
 
+// ---- R3: idle/failed chips + failure persistence ----------------------------
+
+/** Pipeline with renderIdleChip/deleteImageRecord injected and IDB writes captured. */
+function makeR3Pipeline({ records = [] } = {}) {
+    const queue = makeQueue();
+    const saved = [];
+    const deleted = [];
+    const idleChips = []; // { slot, onGenerate }
+    const failedRenders = []; // { slot, snapshot, onRetry }
+    let recSeq = 0;
+    const pipeline = createMarkerPipeline({
+        getQueue: () => queue,
+        setTimeoutImpl: (fn) => { fn(); return 0; },
+        compile: c => ({ profileKey: 'anima', envelope: { prompt: c, negative: '', params: { seed: -1, checkpoint: 'ck' } } }),
+        getImagesForMessage: async () => records,
+        saveImageRecord: async (record) => { saved.push(record); return record.id ?? `rec-${++recSeq}`; },
+        deleteImageRecord: async (id) => { deleted.push(id); },
+        contentHash,
+        defaultBackendKind: () => 'a1111', defaultProfileKey: () => 'anima',
+        notify: () => {}, doc,
+        createSlotElement: (d, info) => {
+            const s = d.createElement('span');
+            s.dataset.ifimgOcc = String(info.occurrence);
+            return s;
+        },
+        renderSlotState: (slot, snapshot, d, actions = {}) => {
+            slot.dataset.ifimgState = snapshot?.status || 'queued';
+            if (snapshot?.status === 'failed') failedRenders.push({ slot, snapshot, onRetry: actions.onRetry });
+        },
+        renderImageFrame: () => {},
+        renderIdleChip: (slot, d, { onGenerate } = {}) => {
+            slot.dataset.ifimgState = 'idle';
+            idleChips.push({ slot, onGenerate });
+        },
+        openLightbox: () => () => {},
+        replaceMarkers: (root, tags, onFound) => {
+            const slot = onFound({ occurrence: 0, content: 'scene' });
+            root.childNodes = [slot];
+            return 1;
+        },
+        getMessage: () => ({ swipe_id: 0 }),
+        getMessageElement: () => el('DIV', 'image### scene ###'),
+        getSettings: () => ({ enabled: true, generation: { enabled: true, mode: 'direct', startTag: 'image###', endTag: '###' } }),
+        getCurrentChatId: () => 'A',
+    });
+    return { pipeline, queue, saved, deleted, idleChips, failedRenders };
+}
+
+test('R3: no record and no live task renders the idle chip; Generate enqueues exactly once', async () => {
+    const { pipeline, queue, idleChips } = makeR3Pipeline();
+    // No onMarker at all (e.g. images disabled at emit time): DOM pass only.
+    pipeline.attachSlots('A', 0);
+    await new Promise(r => setTimeout(r, 10));
+    assert.equal(idleChips.length, 1, 'idle chip rendered');
+    assert.equal(queue._tasks.size, 0, 'chip alone enqueues nothing');
+    idleChips[0].onGenerate();
+    assert.equal(queue._tasks.size, 1, 'Generate enqueues exactly one task');
+    const task = [...queue._tasks.values()][0];
+    assert.equal(task.prompt.prompt, 'scene', 'chip path compiles the marker content');
+    assert.equal(idleChips[0].slot.dataset.ifimgState, 'queued', 'slot repainted to queued');
+});
+
+test('R3: task failure persists a light blob-less record with the sanitized error', async () => {
+    const { pipeline, queue, saved } = makeR3Pipeline();
+    await pipeline.onMarker(marker);
+    const taskId = [...queue._tasks.keys()][0];
+    await pipeline.onTaskStateChange({ id: taskId, status: 'failed', error: { message: 'Server workflow references missing files: ckpt' } });
+    assert.equal(saved.length, 1, 'failure persisted');
+    assert.equal(saved[0].status, 'failed');
+    assert.equal(saved[0].blob, undefined, 'failure record carries no blob');
+    assert.match(saved[0].error, /missing files/);
+    assert.equal(saved[0].checkpoint, 'ck', 'envelope checkpoint recorded');
+    assert.equal(saved[0].content, 'scene', 'marker content kept for identity matching');
+});
+
+test('R3: retry after failure overwrites the same failure record id', async () => {
+    const { pipeline, queue, saved, failedRenders } = makeR3Pipeline();
+    await pipeline.onMarker(marker);
+    const taskId = [...queue._tasks.keys()][0];
+    await pipeline.onTaskStateChange({ id: taskId, status: 'failed', error: { message: 'first' } });
+    assert.equal(saved.length, 1);
+    // Retry via the rendered failed chip, then fail again:
+    assert.equal(failedRenders.length, 1, 'failed chip rendered with a Retry action');
+    failedRenders[0].onRetry();
+    const retryTaskId = [...queue._tasks.keys()].at(-1);
+    assert.notEqual(retryTaskId, taskId, 'retry enqueued a new task');
+    await pipeline.onTaskStateChange({ id: retryTaskId, status: 'failed', error: { message: 'second' } });
+    const failureSaves = saved.filter(s => s.status === 'failed');
+    assert.equal(failureSaves.length, 2);
+    assert.equal(failureSaves[1].id, 'rec-1', 'second failure reuses the first record id');
+});
+
+test('R3: success after failure deletes the stale failure record', async () => {
+    const { pipeline, queue, saved, deleted, failedRenders } = makeR3Pipeline();
+    await pipeline.onMarker(marker);
+    const taskId = [...queue._tasks.keys()][0];
+    await pipeline.onTaskStateChange({ id: taskId, status: 'failed', error: { message: 'boom' } });
+    assert.equal(saved.filter(s => s.status === 'failed').length, 1);
+    // Retry via the failed chip's action so the entry binds the new task.
+    failedRenders[0].onRetry();
+    const retryTaskId = [...queue._tasks.keys()].at(-1);
+    assert.notEqual(retryTaskId, taskId, 'retry enqueued a new task');
+    await pipeline.onTaskStateChange({
+        id: retryTaskId, status: 'succeeded',
+        result: { blob: new Blob(['img']), backend: 'a1111', profileKey: 'anima', checkpoint: 'ck', seed: 5, width: 832, height: 1216 },
+    });
+    assert.deepEqual(deleted, ['rec-1'], 'stale failure record removed on success');
+    assert.ok(saved.some(s => s.blob), 'image record saved');
+});
+
+test('R3: persisted failure record restores as a failed chip with the stored error; Retry regenerates', async () => {
+    const failedRecord = {
+        id: 'fail-7', chatId: 'A', messageId: 0, swipeId: 0, occurrence: 0,
+        content: 'scene', status: 'failed', error: 'Server workflow references missing files: ckpt_name',
+        prompt: 'p', negative: '', params: {}, backend: 'a1111', profileKey: 'anima',
+    };
+    const { pipeline, queue, saved, failedRenders, idleChips } = makeR3Pipeline({ records: [failedRecord] });
+    await pipeline.onMarker(marker); // restore hit (failed record) -> no enqueue
+    assert.equal(queue._tasks.size, 0, 'failed record prevents auto-regeneration');
+    // onMarker's inline DOM pass already ran attachSlots (sync timeout stub);
+    // wait for its async restoreImages to settle.
+    await new Promise(r => setTimeout(r, 10));
+    assert.equal(idleChips.length, 0, 'failed record renders a failed chip, not idle');
+    assert.equal(failedRenders.length, 1);
+    assert.match(failedRenders[0].snapshot.error.message, /missing files/);
+    failedRenders[0].onRetry();
+    assert.equal(queue._tasks.size, 1, 'Retry enqueues one task');
+    // A subsequent failure overwrites fail-7 rather than adding a record.
+    const retryTaskId = [...queue._tasks.keys()][0];
+    await pipeline.onTaskStateChange({ id: retryTaskId, status: 'failed', error: { message: 'again' } });
+    assert.equal(saved.length, 1);
+    assert.equal(saved[0].id, 'fail-7', 'failure overwrite reuses the persisted record id');
+});
+
+test('R3: cancellation is NOT persisted', async () => {
+    const { pipeline, queue, saved } = makeR3Pipeline();
+    await pipeline.onMarker(marker);
+    const taskId = [...queue._tasks.keys()][0];
+    await pipeline.onTaskStateChange({ id: taskId, status: 'cancelled' });
+    assert.equal(saved.length, 0, 'cancelled tasks leave no record');
+});
+
 // ---- Snapshot never contains credentials -----------------------------------
 test('task snapshot never contains API keys or auth strings', async () => {
     const { pipeline, queue } = makePipeline({});

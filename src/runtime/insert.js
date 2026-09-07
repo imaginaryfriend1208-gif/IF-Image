@@ -181,6 +181,18 @@ function clearChildren(node) {
     while (node.firstChild) node.removeChild(node.firstChild);
 }
 
+/**
+ * R3: a slot with VISIBLE content (chips, buttons, images) must not stay
+ * aria-hidden. Spinner-only and empty slots keep aria-hidden="true" so their
+ * transient status never enters the runtime's rendered segments; chip text
+ * is static and contains no marker tags, so exposing it cannot re-trigger
+ * detection (the original marker text was removed from the DOM).
+ */
+function setSlotVisible(slot, visible) {
+    if (visible) slot.removeAttribute('aria-hidden');
+    else slot.setAttribute('aria-hidden', 'true');
+}
+
 /** Build a marker slot element with stable identity datasets. */
 export function createSlotElement(doc, info) {
     const span = doc.createElement('span');
@@ -204,12 +216,14 @@ export function renderSlotState(slot, snapshot, doc, actions = {}) {
     slot.dataset.ifimgState = status;
     clearChildren(slot);
     if (status === 'queued' || status === 'running') {
+        setSlotVisible(slot, false);
         const spinner = doc.createElement('div');
         spinner.className = 'ifimg-spinner';
         slot.appendChild(spinner);
         return;
     }
     if (status === 'failed' || status === 'cancelled') {
+        setSlotVisible(slot, true);
         const chip = doc.createElement('span');
         chip.className = `ifimg-chip ifimg-chip-${status}`;
         chip.textContent = status === 'failed'
@@ -260,6 +274,7 @@ function attachClickBehavior(el, { onSingleClick, onDoubleClick } = {}) {
  */
 export function renderImageFrame(slot, doc, objectUrl, actions = {}) {
     slot.dataset.ifimgState = 'succeeded';
+    setSlotVisible(slot, true);
     clearChildren(slot);
     const frame = doc.createElement('div');
     frame.className = 'ifimg-frame';
@@ -307,6 +322,7 @@ export function renderImageFrame(slot, doc, objectUrl, actions = {}) {
  */
 export function renderRegenerateChip(slot, doc, onRegenerate) {
     slot.dataset.ifimgState = 'idle';
+    setSlotVisible(slot, true);
     clearChildren(slot);
     const chip = doc.createElement('span');
     chip.className = 'ifimg-chip ifimg-chip-regenerate';
@@ -318,6 +334,35 @@ export function renderRegenerateChip(slot, doc, onRegenerate) {
         btn.className = 'ifimg-retry menu_button';
         btn.textContent = 'Regenerate';
         btn.addEventListener('click', onRegenerate);
+        slot.appendChild(btn);
+    }
+    return chip;
+}
+
+/**
+ * R3: visible idle chip for a marker slot with nothing persisted and no
+ * live task — "Image not generated" (or a caller-supplied label) plus an
+ * explicit Generate button, so a marker can never silently vanish. All text
+ * goes through textContent, never innerHTML.
+ * @param {Node} slot
+ * @param {Document} doc
+ * @param {{onGenerate?: () => void, label?: string}} [options]
+ * @returns {Node} the chip element
+ */
+export function renderIdleChip(slot, doc, { onGenerate, label } = {}) {
+    slot.dataset.ifimgState = 'idle';
+    setSlotVisible(slot, true);
+    clearChildren(slot);
+    const chip = doc.createElement('span');
+    chip.className = 'ifimg-chip ifimg-chip-idle';
+    chip.textContent = label || 'Image not generated';
+    slot.appendChild(chip);
+    if (typeof onGenerate === 'function') {
+        const btn = doc.createElement('button');
+        btn.type = 'button';
+        btn.className = 'ifimg-retry menu_button';
+        btn.textContent = 'Generate';
+        btn.addEventListener('click', onGenerate);
         slot.appendChild(btn);
     }
     return chip;

@@ -174,5 +174,39 @@ await test('deleteImageRecord removes a record from subsequent listImages calls'
     assert.equal(await getImageRecord(ids[0]), null);
 });
 
+// ---- R3: blob-less failure records are invisible to the gallery ------------
+
+await test('R3: failed record (no blob) is skipped by listImages and countImages', async () => {
+    const before = await countImages({});
+    const failedId = await saveImageRecord(makeRecord({
+        blob: undefined, status: 'failed', error: 'Server workflow references missing files: ckpt_name x.safetensors',
+    }));
+    store.get(failedId).timestamp = 99999; // newest — would lead listImages if visible
+    const results = await listImages({ limit: 10 });
+    assert.ok(!results.some(r => r.id === failedId), 'failure record never appears in the gallery');
+    assert.equal(await countImages({}), before, 'countImages ignores blob-less records');
+    // But it IS retrievable directly (restore path reads it via full scan).
+    const record = await getImageRecord(failedId);
+    assert.equal(record.status, 'failed');
+    assert.match(record.error, /missing files/);
+    await deleteImageRecord(failedId);
+});
+
+await test('R3: saveImageRecord reuses a caller-supplied id (failure overwrite)', async () => {
+    const id1 = await saveImageRecord(makeRecord({ blob: undefined, status: 'failed', error: 'first' }));
+    const id2 = await saveImageRecord(makeRecord({ id: id1, blob: undefined, status: 'failed', error: 'second' }));
+    assert.equal(id2, id1, 'same id returned');
+    const record = await getImageRecord(id1);
+    assert.equal(record.error, 'second', 'record overwritten, not duplicated');
+    await deleteImageRecord(id1);
+});
+
+await test('R3: failure error string is bounded to 300 chars', async () => {
+    const id = await saveImageRecord(makeRecord({ blob: undefined, status: 'failed', error: 'x'.repeat(1000) }));
+    const record = await getImageRecord(id);
+    assert.equal(record.error.length, 300);
+    await deleteImageRecord(id);
+});
+
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
