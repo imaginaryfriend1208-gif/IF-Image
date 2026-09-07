@@ -3,7 +3,7 @@
 
 import { NAI_MODELS } from './backends/nai.js';
 import { resolveCheckpoint } from './backends/a1111.js';
-import { resolveCheckpointProfile, mergeParams } from './backends/checkpoint-profiles.js';
+import { resolveCheckpointProfile, mergeParams, seedCheckpointProfiles } from './backends/checkpoint-profiles.js';
 import { PROFILES, PROFILE_KEYS, applyProfile } from './profiles.js';
 import { getAllCharacters, saveCharacter, removeCharacter, createDefaultCharacter, emptyBooruDetail } from './storage/chars.js';
 import { getAllPersonas, savePersona, removePersona, getAllStyles, saveStyle, removeStyle, createDefaultPersona, createDefaultStyle, getReplaceRules, saveReplaceRules } from './storage/presets.js';
@@ -81,7 +81,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             <div class="if-image-row">
                 <label for="if_main_backend">Default backend</label>
                 <select id="if_main_backend" class="text_pole">
-                    <option value="comfy">SD backend (connection type from Backends)</option>
+                    <option value="comfy">SD (A1111-compatible / Comfy proxy)</option>
                     <option value="nai">NovelAI</option>
                 </select>
             </div>
@@ -91,6 +91,13 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                     ${PROFILE_KEYS.map(k => `<option value="${k}">${PROFILES[k].label}</option>`).join('')}
                 </select>
             </div>
+            <div class="if-image-row">
+                <label for="if_main_checkpoint">Checkpoint (A1111-compatible SD)</label>
+                <select id="if_main_checkpoint" class="text_pole">
+                    <option value="">-- none selected --</option>
+                </select>
+            </div>
+            <div class="if-image-note">Options come from the last Backends → Test connection / Refresh Models discovery. The checkpoint is re-validated against fresh discovery at generation time.</div>
             <div class="if-image-row">
                 <label for="if_main_mode">Mode</label>
                 <select id="if_main_mode" class="text_pole">
@@ -339,6 +346,11 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                     </select>
                 </div>
                 <div class="if-image-result" id="if_a1111_result"></div>
+
+                <hr class="if-image-sep"/>
+                <h3>Checkpoint profiles</h3>
+                <div class="if-image-note">Per-checkpoint prompt profile and generation defaults. Blank numeric fields inherit the profile / Generation Params values. Edits are kept across re-discovery; "Reset" re-infers the row from discovery.</div>
+                <div id="if_a1111_cp_table"></div>
             </div>
         </div>
 
@@ -347,7 +359,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             <div class="if-image-row">
                 <label>Backend</label>
                 <div class="if-image-radios">
-                    <label><input type="radio" name="if_test_backend" value="comfy"> SD backend (connection type from Backends)</label>
+                    <label><input type="radio" name="if_test_backend" value="comfy"> SD (A1111-compatible / Comfy proxy)</label>
                     <label><input type="radio" name="if_test_backend" value="nai"> NovelAI</label>
                 </div>
             </div>
@@ -778,6 +790,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     const mainEnd = $('if_main_end');
     const mainBackend = $('if_main_backend');
     const mainProfile = $('if_main_profile');
+    const mainCheckpoint = $('if_main_checkpoint');
     const mainMode = $('if_main_mode');
 
     mainEnabled.checked = settings.enabled !== false;
@@ -816,6 +829,9 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     });
     mainBackend.addEventListener('change', () => { settings.generation.backend = mainBackend.value; save(); });
     mainProfile.addEventListener('change', () => { settings.generation.profile = mainProfile.value; save(); });
+    // R4: default checkpoint for marker generation (generation.checkpoint).
+    // Options are (re)built by syncMainCheckpoint() from persisted discovery.
+    mainCheckpoint.addEventListener('change', () => { settings.generation.checkpoint = mainCheckpoint.value; save(); });
     mainMode.addEventListener('change', () => { settings.generation.mode = mainMode.value; save(); });
 
     // ================= Backends Tab Wiring =================
@@ -914,7 +930,13 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     // clears the other source's UI state so stale models/checkpoints can
     // never leak into the new configuration.
     let comfyModels = [];
-    let a1111Models = [];
+    // R4: seed the A1111 model list from the last persisted discovery
+    // (settings.backends.a1111.discovery, migrator v6) so selects are usable
+    // right after a reload without hitting the server. Generation still
+    // re-validates against fresh /sdapi/v1/sd-models in the executor.
+    let a1111Models = Array.isArray(settings.backends.a1111.discovery?.models)
+        ? settings.backends.a1111.discovery.models.map(m => ({ title: m.title, model_name: m.modelName ?? m.title, filename: null }))
+        : [];
 
     // Epoch guards: bumping invalidates every in-flight discovery request,
     // so a late response from an old source/URL/auth can never populate the
@@ -935,19 +957,34 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         abortInFlightGeneration('Proxy URL or credentials changed — generation aborted (browser request only; a started proxy job may still finish).');
     }
 
-    function invalidateA1111Discovery(reason) {
+    /**
+     * @param {string} reason
+     * @param {{clearPersisted?: boolean}} [opts] clearPersisted=true (URL/auth
+     *   change): the stored discovery belongs to the old endpoint — wipe it.
+     *   false (connection-source switch): keep it; only in-flight requests and
+     *   the in-memory list are invalidated. checkpointProfiles are user data
+     *   keyed by title and are NEVER cleared here; re-discovery only ADDs
+     *   missing titles (seed semantics).
+     */
+    function invalidateA1111Discovery(reason, { clearPersisted = true } = {}) {
         a1111DiscoveryEpoch += 1;
         a1111DiscoveryController?.abort();
         a1111DiscoveryController = null;
         a1111Models = [];
+        if (clearPersisted) {
+            settings.backends.a1111.discovery = { at: 0, models: [], samplers: [], schedulers: [] };
+            syncMainCheckpoint();
+            renderCheckpointProfilesTable();
+        }
         fillCheckpointSelect(a1111Checkpoint, [], '', '-- Refresh Models to load --');
         if (reason) showResult(a1111Result, reason, false);
         abortInFlightGeneration('A1111 base URL or Authentication changed — generation aborted (browser request only; a started server job may still finish).');
     }
 
     function fillCheckpointSelect(select, models, selectedTitle, emptyLabel) {
-        select.innerHTML = `<option value="">${emptyLabel}</option>` +
-            models.map(m => `<option value="${m.title}">${m.title}</option>`).join('');
+        // R4: titles come from a remote server — escape before innerHTML.
+        select.innerHTML = `<option value="">${escapeHtml(emptyLabel)}</option>` +
+            models.map(m => `<option value="${escapeHtml(m.title)}">${escapeHtml(m.title)}</option>`).join('');
         select.value = models.some(m => m.title === selectedTitle) ? selectedTitle : '';
     }
 
@@ -966,7 +1003,9 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         if (sdConnection.value === 'a1111') {
             invalidateComfyDiscovery('');
         } else {
-            invalidateA1111Discovery('');
+            // Source switch only: URL/auth unchanged, so the persisted
+            // discovery stays valid for when the user switches back.
+            invalidateA1111Discovery('', { clearPersisted: false });
         }
         // A generation running against the previous source must not land
         // here either: abort it (browser request only).
@@ -1045,29 +1084,52 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     });
 
     // ---- A1111: test + refresh models + checkpoint ------------------------
+    // R4: both buttons run the composite discover() (models required;
+    // samplers/schedulers/-/internal/models optional) and persist the result
+    // in settings.backends.a1111.discovery with a timestamp, then seed
+    // checkpointProfiles (ADD-only: user edits always survive).
+    function persistA1111Discovery(discovery) {
+        settings.backends.a1111.discovery = {
+            at: Date.now(),
+            models: discovery.models,
+            samplers: discovery.samplers,
+            schedulers: discovery.schedulers,
+        };
+        const fallbackKey = settings.generation.profile || settings.backends.comfy.profile || 'anima';
+        settings.backends.a1111.checkpointProfiles = seedCheckpointProfiles(
+            settings.backends.a1111.checkpointProfiles, discovery.models, fallbackKey);
+        a1111Models = discovery.models.map(m => ({ title: m.title, model_name: m.modelName ?? m.title, filename: null }));
+        fillCheckpointSelect(a1111Checkpoint, a1111Models, settings.backends.a1111.checkpoint, '-- select a checkpoint --');
+        if (!resolveCheckpoint(a1111Models, settings.backends.a1111.checkpoint)) {
+            settings.backends.a1111.checkpoint = '';
+            a1111Checkpoint.value = '';
+        }
+        save();
+        syncMainCheckpoint();
+        renderCheckpointProfilesTable();
+        syncTestGenVisibility();
+    }
+
     a1111Test.addEventListener('click', async () => {
         a1111Test.disabled = true;
-        a1111Result.textContent = 'Testing (GET options + models; nothing is written)...';
+        a1111Result.textContent = 'Testing (GET options + discovery; nothing is written to the server)...';
         a1111Result.classList.remove('error');
         a1111DiscoveryEpoch += 1;
         const epoch = a1111DiscoveryEpoch;
         a1111DiscoveryController = new AbortController();
         try {
-            const info = await a1111.testConnection({ signal: a1111DiscoveryController.signal });
+            const signal = a1111DiscoveryController.signal;
+            const options = await a1111.options({ signal }); // auth/connectivity check
+            const discovery = await a1111.discover({ signal });
             if (epoch !== a1111DiscoveryEpoch) return; // stale: URL/auth/source changed meanwhile
-            a1111Models = info.models;
-            fillCheckpointSelect(a1111Checkpoint, a1111Models, settings.backends.a1111.checkpoint, '-- select a checkpoint --');
-            if (!resolveCheckpoint(a1111Models, settings.backends.a1111.checkpoint)) {
-                settings.backends.a1111.checkpoint = '';
-                a1111Checkpoint.value = '';
-                save();
-            }
-            const parts = [`Connected. ${a1111Models.length} checkpoint(s).`];
-            parts.push(info.currentCheckpoint ? `Server default: ${info.currentCheckpoint}` : 'Server default: (none reported)');
-            if (info.samplers) parts.push(`${info.samplers.length} sampler(s).`);
-            if (info.samplersError) parts.push(`Samplers endpoint unavailable: ${info.samplersError}`);
+            persistA1111Discovery(discovery);
+            const current = typeof options.sd_model_checkpoint === 'string' && options.sd_model_checkpoint
+                ? options.sd_model_checkpoint : '(none reported)';
+            const parts = [`Connected. ${discovery.models.length} checkpoint(s).`];
+            parts.push(`Server default: ${current}`);
+            parts.push(`${discovery.samplers.length} sampler(s), ${discovery.schedulers.length} scheduler(s).`);
+            if (discovery.enrichment === 'internal') parts.push('Enriched via /internal/models.');
             showResult(a1111Result, parts.join(' · '), false);
-            syncTestGenVisibility();
         } catch (error) {
             if (epoch !== a1111DiscoveryEpoch) return; // stale error: swallow
             showResult(a1111Result, error.message, true);
@@ -1088,17 +1150,10 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         const epoch = a1111DiscoveryEpoch;
         a1111DiscoveryController = new AbortController();
         try {
-            const models = await a1111.models({ signal: a1111DiscoveryController.signal });
+            const discovery = await a1111.discover({ signal: a1111DiscoveryController.signal });
             if (epoch !== a1111DiscoveryEpoch) return; // stale: URL/auth/source changed meanwhile
-            a1111Models = models;
-            fillCheckpointSelect(a1111Checkpoint, a1111Models, settings.backends.a1111.checkpoint, '-- select a checkpoint --');
-            if (!resolveCheckpoint(a1111Models, settings.backends.a1111.checkpoint)) {
-                settings.backends.a1111.checkpoint = '';
-                a1111Checkpoint.value = '';
-                save();
-            }
-            showResult(a1111Result, `${a1111Models.length} checkpoint(s) available.`, false);
-            syncTestGenVisibility();
+            persistA1111Discovery(discovery);
+            showResult(a1111Result, `${discovery.models.length} checkpoint(s), ${discovery.samplers.length} sampler(s), ${discovery.schedulers.length} scheduler(s).`, false);
         } catch (error) {
             if (epoch !== a1111DiscoveryEpoch) return; // stale error: swallow
             a1111Models = [];
@@ -1118,6 +1173,102 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         save();
         syncTestGenVisibility();
     });
+
+    // ---- R4: Main-tab checkpoint select (generation.checkpoint) -----------
+    // Options come from the PERSISTED discovery so they survive reloads. A
+    // stored title missing from the list stays selectable but is labeled
+    // "(not discovered)" — the executor re-validates at generation time.
+    function syncMainCheckpoint() {
+        const models = settings.backends.a1111.discovery?.models ?? [];
+        const stored = settings.generation.checkpoint || '';
+        const missing = stored && !models.some(m => m.title === stored);
+        mainCheckpoint.innerHTML = '<option value="">-- none selected --</option>'
+            + models.map(m => `<option value="${escapeHtml(m.title)}">${escapeHtml(m.title)}</option>`).join('')
+            + (missing ? `<option value="${escapeHtml(stored)}">${escapeHtml(stored)} (not discovered)</option>` : '');
+        mainCheckpoint.value = stored;
+    }
+    syncMainCheckpoint();
+    // Seed the Backends checkpoint select from the persisted discovery too.
+    if (a1111Models.length) {
+        fillCheckpointSelect(a1111Checkpoint, a1111Models, settings.backends.a1111.checkpoint, '-- select a checkpoint --');
+    }
+
+    // ---- R4: per-checkpoint profile table ----------------------------------
+    // One row per checkpointProfiles entry (user data keyed by title; kept
+    // even when a title is missing from the current discovery). Blank numeric
+    // fields = inherit; every edit saves immediately. "Reset" re-seeds the
+    // row from the discovered model (inferred profile + discovery defaults).
+    const cpTableBox = $('if_a1111_cp_table');
+
+    function cpOptionList(values, selected) {
+        const list = Array.isArray(values) ? values : [];
+        const missing = selected && !list.includes(selected);
+        return '<option value="">(inherit)</option>'
+            + list.map(v => `<option value="${escapeHtml(v)}"${v === selected ? ' selected' : ''}>${escapeHtml(v)}</option>`).join('')
+            + (missing ? `<option value="${escapeHtml(selected)}" selected>${escapeHtml(selected)} (not discovered)</option>` : '');
+    }
+
+    function renderCheckpointProfilesTable() {
+        if (!cpTableBox) return;
+        const profiles = settings.backends.a1111.checkpointProfiles ?? {};
+        const titles = Object.keys(profiles);
+        if (!titles.length) {
+            cpTableBox.textContent = 'No checkpoints discovered yet — click Test connection or Refresh Models.';
+            return;
+        }
+        const discovery = settings.backends.a1111.discovery ?? {};
+        cpTableBox.innerHTML = `<table class="if-image-cp-table"><thead><tr>
+            <th>Checkpoint</th><th>Profile</th><th>W</th><th>H</th><th>Steps</th><th>CFG</th>
+            <th>Sampler</th><th>Scheduler</th><th></th>
+        </tr></thead><tbody>` + titles.map((title, i) => {
+            const entry = profiles[title];
+            const profileOpts = PROFILE_KEYS.map(k =>
+                `<option value="${k}"${k === entry.profile ? ' selected' : ''}>${escapeHtml(PROFILES[k].label)}</option>`).join('');
+            return `<tr data-cp-row="${i}">
+                <td title="${escapeHtml(title)}">${escapeHtml(title)}</td>
+                <td><select data-cp-field="profile" class="text_pole">${profileOpts}</select></td>
+                <td><input data-cp-field="width" type="number" min="256" max="2048" step="64" class="text_pole" value="${entry.width ?? ''}"></td>
+                <td><input data-cp-field="height" type="number" min="256" max="2048" step="64" class="text_pole" value="${entry.height ?? ''}"></td>
+                <td><input data-cp-field="steps" type="number" min="1" max="150" class="text_pole" value="${entry.steps ?? ''}"></td>
+                <td><input data-cp-field="cfg" type="number" min="0" max="30" step="0.5" class="text_pole" value="${entry.cfg ?? ''}"></td>
+                <td><select data-cp-field="sampler" class="text_pole">${cpOptionList(discovery.samplers, entry.sampler ?? '')}</select></td>
+                <td><select data-cp-field="scheduler" class="text_pole">${cpOptionList(discovery.schedulers, entry.scheduler ?? '')}</select></td>
+                <td><button data-cp-reset class="menu_button" title="Re-infer profile and defaults from discovery">Reset</button></td>
+            </tr>`;
+        }).join('') + '</tbody></table>';
+
+        cpTableBox.querySelectorAll('[data-cp-row]').forEach(row => {
+            const title = titles[Number(row.dataset.cpRow)];
+            row.querySelectorAll('[data-cp-field]').forEach(input => {
+                input.addEventListener('change', () => {
+                    const entry = settings.backends.a1111.checkpointProfiles[title];
+                    if (!entry) return;
+                    const field = input.dataset.cpField;
+                    if (field === 'profile') {
+                        entry.profile = PROFILES[input.value] ? input.value : entry.profile;
+                    } else if (input.type === 'number') {
+                        const num = Number(input.value);
+                        if (input.value === '' || !Number.isFinite(num)) delete entry[field];
+                        else entry[field] = num;
+                    } else {
+                        if (input.value) entry[field] = input.value;
+                        else delete entry[field];
+                    }
+                    save();
+                });
+            });
+            row.querySelector('[data-cp-reset]')?.addEventListener('click', () => {
+                const fallbackKey = settings.generation.profile || settings.backends.comfy.profile || 'anima';
+                const model = (settings.backends.a1111.discovery?.models ?? []).find(m => m.title === title) ?? { title };
+                delete settings.backends.a1111.checkpointProfiles[title];
+                settings.backends.a1111.checkpointProfiles = seedCheckpointProfiles(
+                    settings.backends.a1111.checkpointProfiles, [model], fallbackKey);
+                save();
+                renderCheckpointProfilesTable();
+            });
+        });
+    }
+    renderCheckpointProfilesTable();
 
     // ================= Test Gen Tab Wiring =================
     const testProfileRow = el.querySelector('[data-if-comfy-only]');
@@ -1168,7 +1319,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         const { models, stored } = activeCheckpointOptions();
         const resolved = resolveCheckpoint(models, stored);
         testCheckpoint.innerHTML = models.length
-            ? models.map(m => `<option value="${m.title}">${m.title}</option>`).join('')
+            ? models.map(m => `<option value="${escapeHtml(m.title)}">${escapeHtml(m.title)}</option>`).join('')
             : '<option value="">-- none discovered (Backends → Refresh Models) --</option>';
         testCheckpoint.value = resolved ?? '';
     }
@@ -2109,9 +2260,10 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         const promptEl = block.querySelector('.if-render-prompt');
         const negEl = block.querySelector('.if-render-negative');
         const paramsEl = block.querySelector('.if-render-params');
-        if (promptEl) promptEl.innerHTML = `<span class="k">prompt:</span> ${output.prompt || '(empty)'}`;
-        if (negEl) negEl.innerHTML = `<span class="k">negative:</span> ${output.negative || '(none)'}`;
-        if (paramsEl) paramsEl.innerHTML = `<span class="k">params:</span> W=${output.params.width} H=${output.params.height} steps=${output.params.steps} cfg=${output.params.cfg}`;
+        // R4: prompt/negative are user-typed trigger text — escape them.
+        if (promptEl) promptEl.innerHTML = `<span class="k">prompt:</span> ${escapeHtml(output.prompt || '(empty)')}`;
+        if (negEl) negEl.innerHTML = `<span class="k">negative:</span> ${escapeHtml(output.negative || '(none)')}`;
+        if (paramsEl) paramsEl.innerHTML = `<span class="k">params:</span> W=${escapeHtml(output.params.width)} H=${escapeHtml(output.params.height)} steps=${escapeHtml(output.params.steps)} cfg=${escapeHtml(output.params.cfg)}`;
     }
 
     renderBtn.addEventListener('click', async () => {
@@ -2145,7 +2297,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             const kreaBlock = el.querySelector('[data-if-dialect="krea"]');
             if (kreaBlock) {
                 const promptEl = kreaBlock.querySelector('.if-render-prompt');
-                if (promptEl) promptEl.innerHTML = `<span class="k">error:</span> ${err.message}`;
+                if (promptEl) promptEl.innerHTML = `<span class="k">error:</span> ${escapeHtml(err.message)}`;
             }
         }
     });

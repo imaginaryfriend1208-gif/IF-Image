@@ -34,7 +34,29 @@
 
 .if-image-tabs {
     display: flex;
+    flex-wrap: wrap;
     gap: 4px;
+}
+
+/* R4: per-checkpoint profile table (Backends tab, A1111 block). */
+.if-image-cp-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85em;
+}
+
+.if-image-cp-table th,
+.if-image-cp-table td {
+    padding: 2px 4px;
+    text-align: left;
+    border-bottom: 1px solid var(--SmartThemeBorderColor, #3b4261);
+}
+
+.if-image-cp-table input,
+.if-image-cp-table select {
+    width: 100%;
+    min-width: 52px;
+    box-sizing: border-box;
 }
 
 .if-image-tab.active {
