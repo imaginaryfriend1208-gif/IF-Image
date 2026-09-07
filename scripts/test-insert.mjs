@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { renderedSegments, extractMarkers } from '../src/runtime/events.js';
-import { replaceMarkers, createSlotElement, renderSlotState, renderImageFrame, contentHash } from '../src/runtime/insert.js';
+import { replaceMarkers, createSlotElement, renderSlotState, renderImageFrame, renderRegenerateChip, contentHash } from '../src/runtime/insert.js';
 
 // ---- Minimal DOM stub ----------------------------------------------------
 class Node {
@@ -51,7 +51,14 @@ class Element extends Node {
         return node;
     }
     addEventListener(type, fn) { (this.listeners[type] ??= []).push(fn); }
-    dispatch(type) { for (const fn of this.listeners[type] || []) fn({}); }
+    // Handlers may call stopPropagation() (C10 overlay buttons); the stub has
+    // no bubbling, so it records the call instead. Returns the event for
+    // assertions.
+    dispatch(type) {
+        const event = { propagationStopped: false, stopPropagation() { this.propagationStopped = true; } };
+        for (const fn of this.listeners[type] || []) fn(event);
+        return event;
+    }
     set textContent(v) { this.childNodes = []; if (v) this.appendChild(new Text(v)); }
     get textContent() { return this.childNodes.map(c => c.nodeType === 3 ? c.nodeValue : c.textContent).join(''); }
 }
@@ -190,4 +197,53 @@ test('failed slot error message never leaks credentials passed through snapshot 
     const slot = createSlotElement(doc, { occurrence: 0, content: 'a' });
     renderSlotState(slot, { status: 'failed', error: { message: 'HTTP 401 from proxy' }, backend: { kind: 'comfy' } }, doc);
     assert.ok(!slot.textContent.includes('Basic '));
+});
+
+// ---- C10: hover overlay + regenerate chip ---------------------------------
+
+const overlayOf = frame => frame.childNodes.find(c => c.className === 'if-image-frame-overlay') ?? null;
+const overlayBtn = (frame, label) => overlayOf(frame)?.childNodes.find(b => b.textContent === label) ?? null;
+
+test('C10 overlay: View/Regen/Delete buttons render only for supplied actions', () => {
+    const slot = createSlotElement(doc, { occurrence: 0, content: 'a' });
+    const frame = renderImageFrame(slot, doc, 'blob:x', {
+        onView: () => {}, onRegen: () => {}, onDelete: () => {},
+    });
+    const overlay = overlayOf(frame);
+    assert.ok(overlay, 'overlay div present');
+    assert.deepEqual(overlay.childNodes.map(b => b.textContent), ['View', 'Regen', 'Delete']);
+    // No overlay actions supplied -> no overlay at all (pre-C10 shape preserved).
+    const slot2 = createSlotElement(doc, { occurrence: 1, content: 'b' });
+    const frame2 = renderImageFrame(slot2, doc, 'blob:y', { onSingleClick: () => {} });
+    assert.equal(overlayOf(frame2), null);
+});
+
+test('C10 overlay: View fires only onView, never regen, and stops propagation', async () => {
+    const slot = createSlotElement(doc, { occurrence: 0, content: 'a' });
+    const events = [];
+    const frame = renderImageFrame(slot, doc, 'blob:x', {
+        onSingleClick: () => events.push('lightbox'),
+        onDoubleClick: () => events.push('dblclick-regen'),
+        onView: () => events.push('view'),
+        onRegen: () => events.push('regen'),
+        onDelete: () => events.push('delete'),
+    });
+    const event = overlayBtn(frame, 'View').dispatch('click');
+    assert.ok(event.propagationStopped, 'button click stops propagation');
+    await new Promise(r => setTimeout(r, 350)); // outlive the 300ms single-click timer
+    assert.deepEqual(events, ['view']);
+});
+
+test('C10 overlay: Delete fires onDelete; caller collapses slot to a regenerate chip', () => {
+    const slot = createSlotElement(doc, { occurrence: 0, content: 'a' });
+    let regenerated = 0;
+    const frame = renderImageFrame(slot, doc, 'blob:x', {
+        onDelete: () => renderRegenerateChip(slot, doc, () => regenerated++),
+    });
+    overlayBtn(frame, 'Delete').dispatch('click');
+    assert.equal(slot.dataset.ifimgState, 'idle');
+    assert.equal(slot.childNodes[0].className, 'ifimg-chip ifimg-chip-regenerate');
+    assert.equal(slot.childNodes[0].textContent, 'Image deleted');
+    slot.childNodes[1].dispatch('click');
+    assert.equal(regenerated, 1);
 });

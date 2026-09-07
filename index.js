@@ -12,11 +12,15 @@ import { createTaskQueue } from './src/runtime/tasks.js';
 import { createExecutor } from './src/runtime/executor.js';
 import { createMarkerPipeline } from './src/runtime/marker-pipeline.js';
 import { replaceMarkers, createSlotElement, renderSlotState, renderImageFrame, openLightbox, contentHash } from './src/runtime/insert.js';
-import { saveImageRecord, getImagesForMessage } from './src/storage/images.js';
+import { saveImageRecord, getImagesForMessage, getImageRecord, deleteImageRecord } from './src/storage/images.js';
 import { getAllCharacters } from './src/storage/chars.js';
-import { getAllStyles, getAllPersonas } from './src/storage/presets.js';
+import { getAllStyles, getAllPersonas, getReplaceRules } from './src/storage/presets.js';
+import { getAllOutfits } from './src/storage/outfits.js';
+import { resolveActiveCharacters } from './src/prompt/binding.js';
 import { parseTriggers } from './src/prompt/triggers.js';
-import { assemblePrompt, resolveProfileKey } from './src/prompt/render.js';
+import { assemblePrompt, resolveProfileKey, mergeProfileParams, applyMarkerParamOverrides } from './src/prompt/render.js';
+import { cleanupEnvelope } from './src/prompt/cleanup.js';
+import { applyReplaceRules } from './src/prompt/replace.js';
 import { PROFILES } from './src/profiles.js';
 import { createEngine } from './src/llm/engine.js';
 import { parseLlmReply } from './src/llm/parser.js';
@@ -69,19 +73,22 @@ function messageElement(id) {
 
 jQuery(async () => {
     // ------------------------------------------------------------------
-    // Roster cache (characters/styles/persona) — refreshed on chat change.
-    // Async loads are epoch-guarded so a stale load never overwrites the
-    // cache after a newer refresh has started.
+    // Roster cache (characters/styles/persona/outfits) — refreshed on chat
+    // change. Async loads are epoch-guarded so a stale load never overwrites
+    // the cache after a newer refresh has started.
     // ------------------------------------------------------------------
-    let roster = { characters: [], styles: [], persona: null };
+    let roster = { characters: [], styles: [], persona: null, outfits: [], replaceRules: [] };
     let rosterEpoch = 0;
     async function refreshRoster() {
         rosterEpoch += 1;
         const epoch = rosterEpoch;
         try {
-            const [characters, styles, personas] = await Promise.all([getAllCharacters(), getAllStyles(), getAllPersonas()]);
+            const [characters, styles, personas, outfits, replaceRules] = await Promise.all([
+                getAllCharacters(), getAllStyles(), getAllPersonas(), getAllOutfits(), getReplaceRules(),
+            ]);
             if (epoch !== rosterEpoch) return;
-            roster = { characters, styles, persona: personas[0] ?? null };
+            const persona = personas.find(p => p.isDefault) ?? personas[0] ?? null;
+            roster = { characters, styles, persona, outfits, replaceRules };
         } catch (err) {
             if (epoch !== rosterEpoch) return;
             console.warn('[IF Image] Roster load failed:', err?.message ?? err);
@@ -90,25 +97,67 @@ jQuery(async () => {
     refreshRoster();
 
     // ------------------------------------------------------------------
+    // C4: active character resolution. The current card id (avatar
+    // filename) and chat id gate which characters resolveActiveCharacters()
+    // returns as the "active" subset fed to parseTriggers; characters bound
+    // elsewhere remain resolvable through the fallback tiers (with a
+    // toastr warning) inside parseTriggers itself.
+    // ------------------------------------------------------------------
+    function currentCardId() {
+        try {
+            const ctx = getContext();
+            return ctx.characters?.[ctx.characterId]?.avatar ?? null;
+        } catch {
+            return null;
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Queue + pipeline
     // ------------------------------------------------------------------
     const execute = createExecutor({ nai, comfy, a1111, getSettings: () => settings });
 
     function compile(content) {
+        const activeRoster = resolveActiveCharacters(roster.characters, currentCardId(), getContext().getCurrentChatId?.());
         const parsed = parseTriggers(content, {
-            roster: roster.characters,
+            roster: activeRoster,
+            fullRoster: roster.characters,
             styles: roster.styles,
             defaultPersona: roster.persona,
+            outfits: roster.outfits,
+            onFallback: (tier, token) => notify('warning', `Character trigger "$${token}" resolved via ${tier} fallback (not active for this chat/card).`),
         });
         const { profileKey } = resolveProfileKey(parsed.dialectOverride, defaultProfileKey());
-        const profile = PROFILES[profileKey] ?? PROFILES.anima;
-        const assembled = assemblePrompt(parsed, profile.dialect, profile);
+        const baseProfile = PROFILES[profileKey] ?? PROFILES.anima;
+        const effectiveProfile = mergeProfileParams(baseProfile, settings.generation?.params?.[profileKey]);
+        const assembled = assemblePrompt(parsed, baseProfile.dialect, effectiveProfile);
+
+        // Pipeline order (C6/C7): compile -> non-final replace rules ->
+        // cleanup -> final replace rules -> marker JSON param overrides.
+        const isNsfw = parsed.characters.some(c => (c.modifiers || []).includes('nsfw'));
+        const isBack = parsed.characters.some(c => (c.modifiers || []).includes('back'));
+        const isFull = parsed.characters.some(c => (c.modifiers || []).includes('full'));
+        const ruleCtx = { dialect: baseProfile.dialect, nsfw: isNsfw, back: isBack, full: isFull };
+        const rules = roster.replaceRules || [];
+        let envelope = applyReplaceRules(assembled, rules, 'pre', ruleCtx);
+        envelope = cleanupEnvelope(envelope, baseProfile.dialect, {
+            avoidTags: roster.persona?.avoidTags,
+            rating: isNsfw ? 'nsfw' : 'sfw',
+        });
+        envelope = applyReplaceRules(envelope, rules, 'final', ruleCtx);
+
+        const params = { ...envelope.params, seed: -1 };
+        applyMarkerParamOverrides(params, parsed.paramOverrides);
         return {
             profileKey,
             envelope: {
-                prompt: assembled.prompt,
-                negative: assembled.negative,
-                params: { ...assembled.params, seed: -1 },
+                prompt: envelope.prompt,
+                negative: envelope.negative,
+                params,
+                // C8: per-character rendered strings; NaiClient uses them as
+                // characterPrompts/char_captions when there are 2+ entries.
+                // SD backends ignore this field (already merged into prompt).
+                characters: Array.isArray(envelope.characters) ? envelope.characters : [],
             },
         };
     }
@@ -179,6 +228,13 @@ jQuery(async () => {
         getCurrentChatId: () => getContext().getCurrentChatId(),
     });
 
+    // C10: Gallery-tab regeneration waits on a specific task id's terminal
+    // state. This map is separate from the marker-pipeline's own bookkeeping
+    // (which owns in-chat slots) — the queue's single onStateChange fans out
+    // to both so Gallery regen and marker generation share the SAME queue,
+    // never a parallel execution path.
+    const regenWaiters = new Map(); // taskId -> { resolve, reject }
+
     // The queue's onStateChange must call the pipeline's handler; the
     // pipeline in turn resolves the queue lazily via getQueue() above, so
     // construction order here (pipeline first, queue second) is safe.
@@ -187,8 +243,63 @@ jQuery(async () => {
         concurrency: 1,
         maxQueued: 20,
         timeoutMs: 300000,
-        onStateChange: pipeline.onTaskStateChange,
+        onStateChange: (snapshot) => {
+            pipeline.onTaskStateChange(snapshot);
+            const waiter = regenWaiters.get(snapshot.id);
+            if (!waiter) return;
+            if (snapshot.status === 'succeeded') {
+                regenWaiters.delete(snapshot.id);
+                waiter.resolve(snapshot.result);
+            } else if (snapshot.status === 'failed' || snapshot.status === 'cancelled') {
+                regenWaiters.delete(snapshot.id);
+                waiter.reject(new Error(snapshot.error?.message || `Image generation ${snapshot.status}.`));
+            }
+        },
     });
+
+    // ------------------------------------------------------------------
+    // C10: Gallery-tab regeneration. Reuses the SAME queue/executor as
+    // marker generation (no parallel execution path) with seed -1, then
+    // saves a NEW record carrying the same chat/message/swipe/occurrence/
+    // content lineage as the source record — so it restores in-chat like any
+    // other generation for that marker.
+    // ------------------------------------------------------------------
+    async function regenerateImageRecord(record) {
+        if (!record) throw new Error('regenerateImageRecord: record is required.');
+        const backendKind = record.backend || defaultBackendKind();
+        const profileKey = record.profileKey || defaultProfileKey();
+        const params = { ...(record.params || {}), seed: -1 };
+        const characters = Array.isArray(record.characters) ? record.characters : [];
+        const taskId = queue.addTask({
+            chatId: record.chatId,
+            messageId: record.messageId,
+            swipeId: record.swipeId,
+            occurrence: record.occurrence,
+            prompt: { prompt: record.prompt, negative: record.negative, params, characters },
+            backend: { kind: backendKind },
+            profile: profileKey,
+        });
+        const result = await new Promise((resolve, reject) => {
+            regenWaiters.set(taskId, { resolve, reject });
+        });
+        return saveImageRecord({
+            chatId: record.chatId,
+            messageId: record.messageId,
+            swipeId: record.swipeId,
+            occurrence: record.occurrence,
+            content: record.content,
+            prompt: record.prompt,
+            negative: record.negative,
+            params,
+            characters,
+            backend: result.backend,
+            profileKey: result.profileKey,
+            seed: result.seed,
+            blob: result.blob,
+            width: result.width,
+            height: result.height,
+        });
+    }
 
     // ------------------------------------------------------------------
     // Full mode: transform <ifimage> blocks in LLM replies into standard
@@ -252,7 +363,11 @@ jQuery(async () => {
     // ------------------------------------------------------------------
     // Drawer UI (mounted after queue/genLog/engine exist)
     // ------------------------------------------------------------------
-    const drawer = renderDrawer({ settings, save: saveSettings, nai, comfy, a1111, genLog, getQueue: () => queue });
+    const drawer = renderDrawer({
+        settings, save: saveSettings, nai, comfy, a1111, genLog, getQueue: () => queue,
+        regenerateImage: regenerateImageRecord,
+        getCurrentChatId: () => getContext().getCurrentChatId(),
+    });
     $('#extensions_settings2').append(drawer);
     notify('info', 'IF Image loaded. Configure backends in the extensions drawer.');
 

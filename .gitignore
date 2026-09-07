@@ -11,10 +11,12 @@ BACKEND-PLAN.html
 PROMPT-SPEC.html
 PLAN-CHINH.html
 GAP-PLAN.html
+UI-RESEARCH.html
 research/
 docs/
 README.md
 st-chatu8/
+st_chatu8_*.json
 
 # Claude Code agent worktrees — local only
 .claude/

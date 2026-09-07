@@ -4,10 +4,14 @@
 import { NAI_MODELS } from './backends/nai.js';
 import { resolveCheckpoint } from './backends/a1111.js';
 import { PROFILES, PROFILE_KEYS, applyProfile } from './profiles.js';
-import { getAllCharacters, saveCharacter, removeCharacter, createDefaultCharacter } from './storage/chars.js';
-import { getAllPersonas, savePersona, getAllStyles, saveStyle, createDefaultPersona, createDefaultStyle } from './storage/presets.js';
+import { getAllCharacters, saveCharacter, removeCharacter, createDefaultCharacter, emptyBooruDetail } from './storage/chars.js';
+import { getAllPersonas, savePersona, removePersona, getAllStyles, saveStyle, removeStyle, createDefaultPersona, createDefaultStyle, getReplaceRules, saveReplaceRules } from './storage/presets.js';
+import { getOutfitsForCharacter, saveOutfit, removeOutfit, createDefaultOutfit } from './storage/outfits.js';
+import { listImages, countImages, deleteImageRecord } from './storage/images.js';
 import { parseTriggers } from './prompt/triggers.js';
 import { assemblePrompt, resolveProfileKey } from './prompt/render.js';
+import { cleanupEnvelope } from './prompt/cleanup.js';
+import { applyReplaceRules, parseCompactRule } from './prompt/replace.js';
 
 // Single source of truth for the displayed version. Keep in sync with
 // manifest.json (which cannot be imported from browser ESM without JSON
@@ -24,8 +28,13 @@ export const EXTENSION_VERSION = '0.3.0';
  * @param {A1111Client} args.a1111 AUTOMATIC1111-compatible API client (connection 'a1111')
  * @param {Array} [args.genLog] - B7: ring buffer of pipeline/LLM events
  * @param {() => object} [args.getQueue] - B7: live queue instance for task list
+ * @param {(record: object) => Promise<string>} [args.regenerateImage] - C10:
+ *   re-enqueue a gallery record through the existing queue/executor (seed -1)
+ *   and save the result as a new record.
+ * @param {() => string} [args.getCurrentChatId] - C10: current chat id, for
+ *   the Gallery tab's "current chat" filter.
  */
-export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQueue }) {
+export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQueue, regenerateImage, getCurrentChatId }) {
     const html = `
     <div class="if-image-settings">
         <div class="if-image-title">
@@ -41,6 +50,8 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             <button class="if-image-tab menu_button" data-if-tab="log">Log</button>
             <button class="if-image-tab menu_button" data-if-tab="chars">Characters</button>
             <button class="if-image-tab menu_button" data-if-tab="presets">Persona & Style</button>
+            <button class="if-image-tab menu_button" data-if-tab="replace">Replace</button>
+            <button class="if-image-tab menu_button" data-if-tab="gallery">Gallery</button>
             <button class="if-image-tab menu_button" data-if-tab="render">3-Dialect Preview</button>
         </div>
 
@@ -92,6 +103,34 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 <label class="if-image-check">
                     <input type="checkbox" id="if_main_dryrun"> Dry-run (log envelope, no generation)
                 </label>
+            </div>
+
+            <hr class="if-image-sep"/>
+            <h3>Generation Params</h3>
+            <div class="if-image-note">Overrides the profile default for markers using this profile. Blank = inherit the profile default; a marker's own "size"/"steps"/"cfg" JSON trigger wins over this.</div>
+            <div class="if-image-row">
+                <label for="if_params_profile">Profile</label>
+                <select id="if_params_profile" class="text_pole">
+                    ${PROFILE_KEYS.map(k => `<option value="${k}">${PROFILES[k].label}</option>`).join('')}
+                </select>
+            </div>
+            <div class="if-image-grid">
+                <div class="if-image-row">
+                    <label for="if_params_width">Width</label>
+                    <input id="if_params_width" type="number" min="256" max="2048" step="64" class="text_pole">
+                </div>
+                <div class="if-image-row">
+                    <label for="if_params_height">Height</label>
+                    <input id="if_params_height" type="number" min="256" max="2048" step="64" class="text_pole">
+                </div>
+                <div class="if-image-row">
+                    <label for="if_params_steps">Steps</label>
+                    <input id="if_params_steps" type="number" min="1" max="150" class="text_pole">
+                </div>
+                <div class="if-image-row">
+                    <label for="if_params_cfg">CFG</label>
+                    <input id="if_params_cfg" type="number" min="0" max="30" step="0.5" class="text_pole">
+                </div>
             </div>
         </div>
 
@@ -413,6 +452,59 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 <label for="if_char_facts">Neutral Facts (Core traits)</label>
                 <textarea id="if_char_facts" class="text_pole textarea_compact" rows="2" placeholder="Age 24, archer, wears leather tunic"></textarea>
             </div>
+            <div class="if-image-row">
+                <label for="if_char_views_back">View: Back (flat fallback, used when the matrix cell below is empty)</label>
+                <input id="if_char_views_back" type="text" class="text_pole" placeholder="e.g. long hair over back, viewed from behind">
+            </div>
+            <div class="if-image-row">
+                <label for="if_char_nsfw_extra">NSFW Extra (flat fallback)</label>
+                <textarea id="if_char_nsfw_extra" class="text_pole textarea_compact" rows="2"></textarea>
+            </div>
+            <div class="if-image-row">
+                <label for="if_char_negative">Character Negative</label>
+                <textarea id="if_char_negative" class="text_pole textarea_compact" rows="2" placeholder="tags to always exclude for this character"></textarea>
+            </div>
+            <div class="if-image-row">
+                <label class="if-image-check">
+                    <input type="checkbox" id="if_char_lock_seed"> Lock seed
+                </label>
+                <input id="if_char_lock_seed_value" type="number" class="text_pole" style="max-width:140px;" placeholder="-1">
+            </div>
+
+            <hr class="if-image-sep"/>
+            <h4>Booru Detail Matrix</h4>
+            <div class="if-image-note">Per region/rating/view detail tags. An empty cell falls back to the flat fields above (back/nsfw) or is simply omitted (front/lower have no legacy equivalent).</div>
+            <table class="if-image-matrix" id="if_char_matrix">
+                <thead><tr><th>Region</th><th>SFW front</th><th>SFW back</th><th>NSFW front</th><th>NSFW back</th></tr></thead>
+                <tbody>
+                    ${['face', 'upper', 'lower'].map(region => `
+                    <tr data-region="${region}">
+                        <td>${region}</td>
+                        <td><input type="text" class="text_pole" data-cell="sfw.front"></td>
+                        <td><input type="text" class="text_pole" data-cell="sfw.back"></td>
+                        <td><input type="text" class="text_pole" data-cell="nsfw.front"></td>
+                        <td><input type="text" class="text_pole" data-cell="nsfw.back"></td>
+                    </tr>`).join('')}
+                </tbody>
+            </table>
+
+            <hr class="if-image-sep"/>
+            <h4>Outfits</h4>
+            <div class="if-image-note">Outfits with no character assigned ("Common") are usable by every character via the same trigger token.</div>
+            <div id="if_char_outfits_list" class="if-image-log"></div>
+            <div class="if-image-row">
+                <input id="if_char_outfit_name" type="text" class="text_pole" placeholder="Outfit name (trigger: $Name:outfitName)">
+            </div>
+            <div class="if-image-row">
+                <input id="if_char_outfit_tags" type="text" class="text_pole" placeholder="tags appended when this outfit is triggered">
+            </div>
+            <div class="if-image-row">
+                <label class="if-image-check">
+                    <input type="checkbox" id="if_char_outfit_common"> Common (usable by any character)
+                </label>
+                <button id="if_char_outfit_add" class="menu_button">+ Add / Update Outfit</button>
+            </div>
+
             <div style="display:flex; gap:6px; margin-top:4px;">
                 <button id="if_char_save" class="menu_button" style="flex:1;">Save Character</button>
                 <button id="if_char_del" class="menu_button" style="background:#552222;">Delete</button>
@@ -424,8 +516,23 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         <div class="if-image-panel" data-if-panel="presets" style="display:none;">
             <h3>User Persona ($me)</h3>
             <div class="if-image-row">
+                <label for="if_per_select">Select Persona</label>
+                <div style="display:flex; gap:6px;">
+                    <select id="if_per_select" class="text_pole" style="flex:1;">
+                        <option value="">-- New Persona --</option>
+                    </select>
+                    <button id="if_per_new" class="menu_button">+ New</button>
+                    <button id="if_per_del" class="menu_button" style="background:#552222;">Delete</button>
+                </div>
+            </div>
+            <div class="if-image-row">
                 <label for="if_per_name">Persona Name</label>
                 <input id="if_per_name" type="text" class="text_pole" value="Default User">
+            </div>
+            <div class="if-image-row">
+                <label class="if-image-check">
+                    <input type="checkbox" id="if_per_default"> Default persona ($me resolves to this one)
+                </label>
             </div>
             <div class="if-image-row">
                 <label for="if_per_pov">Default POV Mode</label>
@@ -446,6 +553,14 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 <input id="if_per_natural" type="text" class="text_pole" placeholder="a young man in casual attire">
             </div>
             <div class="if-image-row">
+                <label for="if_per_facts">Persona Facts</label>
+                <input id="if_per_facts" type="text" class="text_pole" placeholder="core traits, dialect-free text">
+            </div>
+            <div class="if-image-row">
+                <label for="if_per_avoid">Avoid Tags (comma separated, stripped by cleanup)</label>
+                <input id="if_per_avoid" type="text" class="text_pole" placeholder="e.g. beard, glasses">
+            </div>
+            <div class="if-image-row">
                 <button id="if_per_save" class="menu_button">Save Persona</button>
             </div>
 
@@ -453,16 +568,50 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
 
             <h3>Style Preset</h3>
             <div class="if-image-row">
+                <label for="if_style_select">Select Style</label>
+                <div style="display:flex; gap:6px;">
+                    <select id="if_style_select" class="text_pole" style="flex:1;">
+                        <option value="">-- New Style --</option>
+                    </select>
+                    <button id="if_style_new" class="menu_button">+ New</button>
+                    <button id="if_style_del" class="menu_button" style="background:#552222;">Delete</button>
+                </div>
+            </div>
+            <div class="if-image-row">
                 <label for="if_style_name">Style Name ({{style: Name}})</label>
                 <input id="if_style_name" type="text" class="text_pole" placeholder="e.g. Cyberpunk">
             </div>
             <div class="if-image-row">
-                <label for="if_style_krea">Krea Style Phrase</label>
+                <label for="if_style_krea">Krea: Style Phrase</label>
                 <input id="if_style_krea" type="text" class="text_pole" placeholder="cyberpunk aesthetic, neon lighting, 35mm film">
             </div>
             <div class="if-image-row">
-                <label for="if_style_illus">Illustrious Artists / Tags</label>
+                <label for="if_style_krea_light">Krea: Lighting</label>
+                <input id="if_style_krea_light" type="text" class="text_pole">
+            </div>
+            <div class="if-image-row">
+                <label for="if_style_krea_cam">Krea: Camera</label>
+                <input id="if_style_krea_cam" type="text" class="text_pole">
+            </div>
+            <div class="if-image-row">
+                <label for="if_style_anima_tags">Anima: Booru Tags</label>
+                <input id="if_style_anima_tags" type="text" class="text_pole">
+            </div>
+            <div class="if-image-row">
+                <label for="if_style_anima_artists">Anima: Artists</label>
+                <input id="if_style_anima_artists" type="text" class="text_pole">
+            </div>
+            <div class="if-image-row">
+                <label for="if_style_illus">Illustrious: Artists / Tags</label>
                 <input id="if_style_illus" type="text" class="text_pole" placeholder="retro anime, 1990s (style), neon city">
+            </div>
+            <div class="if-image-row">
+                <label for="if_style_illus_quality">Illustrious: Quality Prefix</label>
+                <input id="if_style_illus_quality" type="text" class="text_pole">
+            </div>
+            <div class="if-image-row">
+                <label for="if_style_illus_neg">Illustrious: Negative Tags</label>
+                <input id="if_style_illus_neg" type="text" class="text_pole">
             </div>
             <div class="if-image-row">
                 <button id="if_style_save" class="menu_button">Save Style</button>
@@ -470,9 +619,102 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             <div id="if_presets_status" class="if-image-result"></div>
         </div>
 
+        <!-- ============ REPLACE TAB ============ -->
+        <div class="if-image-panel" data-if-panel="replace" style="display:none;">
+            <h3>Replace Rules</h3>
+            <div class="if-image-note">Trigger on a tag, then prefix/suffix/replace/delete it. Multi-trigger: "a|b". Condition: "@if dialect==illus", "@if nsfw", "@if !nsfw" (safe evaluator — no code execution). Pipeline order: compile &rarr; non-final rules &rarr; cleanup &rarr; final rules.</div>
+            <div id="if_replace_list" class="if-image-log"></div>
+
+            <div class="if-image-row">
+                <label for="if_replace_trigger">Trigger (a|b for multiple)</label>
+                <input id="if_replace_trigger" type="text" class="text_pole" placeholder="e.g. bad hands|bad fingers">
+            </div>
+            <div class="if-image-row">
+                <label for="if_replace_mode">Mode</label>
+                <select id="if_replace_mode" class="text_pole">
+                    <option value="replace">replace</option>
+                    <option value="prefix-head">prefix-head</option>
+                    <option value="prefix-tail">prefix-tail</option>
+                    <option value="suffix-head">suffix-head</option>
+                    <option value="suffix-tail">suffix-tail</option>
+                    <option value="delete">delete</option>
+                    <option value="final">final (runs after cleanup)</option>
+                </select>
+            </div>
+            <div class="if-image-row">
+                <label for="if_replace_replacement">Replacement</label>
+                <input id="if_replace_replacement" type="text" class="text_pole" placeholder="new tag text (ignored for delete)">
+            </div>
+            <div class="if-image-row">
+                <label for="if_replace_condition">Condition (optional)</label>
+                <input id="if_replace_condition" type="text" class="text_pole" placeholder="@if dialect==illus">
+            </div>
+            <div class="if-image-row">
+                <button id="if_replace_add" class="menu_button">+ Add Rule</button>
+            </div>
+
+            <div class="if-image-row">
+                <label for="if_replace_compact">Quick add (compact syntax: "a|b=replacement", mode=replace)</label>
+                <input id="if_replace_compact" type="text" class="text_pole" placeholder="bad hands|bad fingers=good hands">
+            </div>
+            <div class="if-image-row">
+                <button id="if_replace_compact_add" class="menu_button">+ Add from compact line</button>
+            </div>
+
+            <hr class="if-image-sep"/>
+            <h3>Dry-run Preview</h3>
+            <div class="if-image-note">Runs the current Test Gen prompt (Test Gen tab) through compile() including these rules.</div>
+            <div class="if-image-row">
+                <button id="if_replace_preview" class="menu_button">Preview against Test Gen prompt</button>
+            </div>
+            <div id="if_replace_preview_out" class="if-image-result"></div>
+        </div>
+
+        <!-- ============ GALLERY TAB ============ -->
+        <div class="if-image-panel" data-if-panel="gallery" style="display:none;">
+            <h3>Gallery</h3>
+            <div class="if-image-row">
+                <label class="if-image-check">
+                    <input type="radio" name="if_gallery_scope" id="if_gallery_scope_chat" value="chat" checked> Current chat
+                </label>
+                <label class="if-image-check">
+                    <input type="radio" name="if_gallery_scope" id="if_gallery_scope_all" value="all"> All chats
+                </label>
+            </div>
+            <div class="if-image-gallery-grid" id="if_gallery_grid"></div>
+            <div class="if-image-row" style="justify-content:center; gap:8px;">
+                <button id="if_gallery_prev" class="menu_button">&larr; Prev</button>
+                <span id="if_gallery_page_label"></span>
+                <button id="if_gallery_next" class="menu_button">Next &rarr;</button>
+            </div>
+
+            <hr class="if-image-sep"/>
+            <div id="if_gallery_detail" style="display:none;">
+                <h4>Image Detail</h4>
+                <img id="if_gallery_detail_img" style="max-width:100%; max-height:50vh; display:block; border-radius:8px;" alt="Selected generated image"/>
+                <div class="if-image-preview-field" id="if_gallery_detail_meta"></div>
+                <div class="if-image-row" style="gap:6px;">
+                    <a id="if_gallery_detail_download" class="menu_button" download="if-image.png">Download</a>
+                    <button id="if_gallery_detail_regen" class="menu_button">Regenerate</button>
+                    <button id="if_gallery_detail_delete" class="menu_button" style="background:#552222;">Delete</button>
+                    <button id="if_gallery_detail_close" class="menu_button">Close</button>
+                </div>
+                <div id="if_gallery_detail_status" class="if-image-result"></div>
+            </div>
+        </div>
+
         <!-- ============ 3-DIALECT PREVIEW TAB ============ -->
         <div class="if-image-panel" data-if-panel="render" style="display:none;">
             <h3>Test-Render (Offline Compiler)</h3>
+
+            <h4>Character Picker (C9)</h4>
+            <div class="if-image-note">Pick characters/persona and modifier toggles, then "Insert Tokens" to prepend the matching trigger syntax to the input below.</div>
+            <div id="if_render_picker" class="if-image-log"></div>
+            <div class="if-image-row">
+                <button id="if_render_insert" class="menu_button">Insert Selected as Tokens</button>
+                <button id="if_render_clear" class="menu_button">Clear Input</button>
+            </div>
+
             <div class="if-image-row">
                 <label for="if_render_input">Input with triggers ($Name, $me, {{style:}}, {{dialect:}})</label>
                 <textarea id="if_render_input" class="text_pole textarea_compact" rows="2" placeholder="e.g. $Lyna:back sitting at a bar, neon lights, {{style: Cyberpunk}}"></textarea>
@@ -510,6 +752,12 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
 
     // Element helpers
     const $ = id => el.querySelector('#' + id);
+
+    // Log/prompt/name text is user- or LLM-controlled: always escape before
+    // interpolating into innerHTML.
+    function escapeHtml(value) {
+        return String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
 
     // ================= Tabs Switching =================
     el.querySelectorAll('.if-image-tab').forEach(btn => {
@@ -1098,24 +1346,131 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     const charBooru = $('if_char_booru');
     const charNatural = $('if_char_natural');
     const charFacts = $('if_char_facts');
+    const charViewsBack = $('if_char_views_back');
+    const charNsfwExtra = $('if_char_nsfw_extra');
+    const charNegative = $('if_char_negative');
+    const charLockSeed = $('if_char_lock_seed');
+    const charLockSeedValue = $('if_char_lock_seed_value');
+    const charMatrix = $('if_char_matrix');
+    const charOutfitsList = $('if_char_outfits_list');
+    const charOutfitName = $('if_char_outfit_name');
+    const charOutfitTags = $('if_char_outfit_tags');
+    const charOutfitCommon = $('if_char_outfit_common');
+    const charOutfitAdd = $('if_char_outfit_add');
     const charSaveBtn = $('if_char_save');
     const charDelBtn = $('if_char_del');
     const charStatus = $('if_char_status');
 
     let currentChars = [];
     let activeCharId = null;
+    let currentOutfits = []; // outfits for the active character (own + common)
+    let activeOutfitId = null;
 
     async function loadCharactersList() {
         try {
             currentChars = await getAllCharacters();
             charSelect.innerHTML = '<option value="">-- New Character --</option>' +
-                currentChars.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
+                currentChars.map(c => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name)}</option>`).join('');
             if (activeCharId) charSelect.value = activeCharId;
         } catch (e) {
             console.warn('[IF Image] Load characters failed:', e);
         }
     }
     loadCharactersList();
+
+    function matrixCells() {
+        return Array.from(charMatrix.querySelectorAll('tr[data-region]')).flatMap(row => {
+            const region = row.dataset.region;
+            return Array.from(row.querySelectorAll('input[data-cell]')).map(input => ({ region, path: input.dataset.cell, input }));
+        });
+    }
+
+    function populateMatrix(detail) {
+        const source = detail || emptyBooruDetail();
+        for (const { region, path, input } of matrixCells()) {
+            const [rating, view] = path.split('.');
+            input.value = source[region]?.[rating]?.[view] ?? '';
+        }
+    }
+
+    function readMatrix() {
+        const detail = emptyBooruDetail();
+        for (const { region, path, input } of matrixCells()) {
+            const [rating, view] = path.split('.');
+            detail[region][rating][view] = input.value.trim();
+        }
+        return detail;
+    }
+
+    async function loadOutfitsForActiveChar() {
+        activeOutfitId = null;
+        if (!activeCharId) { currentOutfits = []; renderOutfitsList(); return; }
+        try {
+            currentOutfits = await getOutfitsForCharacter(activeCharId);
+        } catch (e) {
+            console.warn('[IF Image] Load outfits failed:', e);
+            currentOutfits = [];
+        }
+        renderOutfitsList();
+    }
+
+    function renderOutfitsList() {
+        if (!currentOutfits.length) { charOutfitsList.textContent = 'No outfits yet.'; return; }
+        charOutfitsList.innerHTML = currentOutfits.map(o => `
+            <div class="if-image-log-entry" data-outfit-id="${escapeHtml(o.id)}">
+                <span class="if-image-log-type">${o.charId ? 'own' : 'common'}</span>
+                ${escapeHtml(o.name)}: ${escapeHtml(o.tags)}
+                <button class="ifimg-outfit-edit menu_button" data-outfit-id="${escapeHtml(o.id)}">Edit</button>
+                <button class="ifimg-outfit-del menu_button" data-outfit-id="${escapeHtml(o.id)}" style="background:#552222;">Delete</button>
+            </div>`).join('');
+        charOutfitsList.querySelectorAll('.ifimg-outfit-edit').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const outfit = currentOutfits.find(o => o.id === btn.dataset.outfitId);
+                if (!outfit) return;
+                activeOutfitId = outfit.id;
+                charOutfitName.value = outfit.name;
+                charOutfitTags.value = outfit.tags;
+                charOutfitCommon.checked = !outfit.charId;
+            });
+        });
+        charOutfitsList.querySelectorAll('.ifimg-outfit-del').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                try {
+                    await removeOutfit(btn.dataset.outfitId);
+                    await loadOutfitsForActiveChar();
+                    showResult(charStatus, 'Outfit deleted.', false);
+                } catch (e) {
+                    showResult(charStatus, e.message, true);
+                }
+            });
+        });
+    }
+
+    charOutfitAdd.addEventListener('click', async () => {
+        if (!activeCharId) {
+            showResult(charStatus, 'Save the character before adding outfits.', true);
+            return;
+        }
+        const name = charOutfitName.value.trim();
+        if (!name) { showResult(charStatus, 'Outfit name is required.', true); return; }
+        const outfit = activeOutfitId
+            ? currentOutfits.find(o => o.id === activeOutfitId) || createDefaultOutfit(name)
+            : createDefaultOutfit(name);
+        outfit.name = name;
+        outfit.tags = charOutfitTags.value.trim();
+        outfit.charId = charOutfitCommon.checked ? null : activeCharId;
+        try {
+            await saveOutfit(outfit);
+            activeOutfitId = null;
+            charOutfitName.value = '';
+            charOutfitTags.value = '';
+            charOutfitCommon.checked = false;
+            await loadOutfitsForActiveChar();
+            showResult(charStatus, `Outfit "${name}" saved.`, false);
+        } catch (e) {
+            showResult(charStatus, e.message, true);
+        }
+    });
 
     function populateCharForm(char) {
         if (!char) {
@@ -1126,6 +1481,13 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             charBooru.value = '';
             charNatural.value = '';
             charFacts.value = '';
+            charViewsBack.value = '';
+            charNsfwExtra.value = '';
+            charNegative.value = '';
+            charLockSeed.checked = false;
+            charLockSeedValue.value = '-1';
+            populateMatrix(null);
+            loadOutfitsForActiveChar();
             return;
         }
         activeCharId = char.id;
@@ -1135,6 +1497,13 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         charBooru.value = char.booru || '';
         charNatural.value = char.natural || '';
         charFacts.value = char.facts || '';
+        charViewsBack.value = char.views?.back || '';
+        charNsfwExtra.value = char.nsfwExtra || '';
+        charNegative.value = char.negative || '';
+        charLockSeed.checked = Number.isInteger(char.lock?.seed) && char.lock.seed >= 0;
+        charLockSeedValue.value = String(char.lock?.seed ?? -1);
+        populateMatrix(char.booruDetail);
+        loadOutfitsForActiveChar();
     }
 
     charSelect.addEventListener('change', () => {
@@ -1163,11 +1532,18 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         target.booru = charBooru.value.trim();
         target.natural = charNatural.value.trim();
         target.facts = charFacts.value.trim();
+        target.views = { ...(target.views || {}), back: charViewsBack.value.trim() };
+        target.nsfwExtra = charNsfwExtra.value.trim();
+        target.negative = charNegative.value.trim();
+        const seedValue = Number(charLockSeedValue.value);
+        target.lock = { seed: charLockSeed.checked && Number.isFinite(seedValue) ? seedValue : -1, params: target.lock?.params ?? null };
+        target.booruDetail = readMatrix();
 
         try {
             await saveCharacter(target);
             activeCharId = target.id;
             await loadCharactersList();
+            await loadOutfitsForActiveChar();
             showResult(charStatus, `Character "${name}" saved!`, false);
         } catch (err) {
             showResult(charStatus, err.message, true);
@@ -1188,53 +1564,158 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     });
 
     // ================= Persona & Style Wiring =================
+    const perSelect = $('if_per_select');
+    const perNewBtn = $('if_per_new');
+    const perDelBtn = $('if_per_del');
     const perName = $('if_per_name');
+    const perDefault = $('if_per_default');
     const perPov = $('if_per_pov');
     const perBooru = $('if_per_booru');
     const perNatural = $('if_per_natural');
+    const perFacts = $('if_per_facts');
+    const perAvoid = $('if_per_avoid');
     const perSaveBtn = $('if_per_save');
+
+    const styleSelect = $('if_style_select');
+    const styleNewBtn = $('if_style_new');
+    const styleDelBtn = $('if_style_del');
     const styleName = $('if_style_name');
     const styleKrea = $('if_style_krea');
+    const styleKreaLight = $('if_style_krea_light');
+    const styleKreaCam = $('if_style_krea_cam');
+    const styleAnimaTags = $('if_style_anima_tags');
+    const styleAnimaArtists = $('if_style_anima_artists');
     const styleIllus = $('if_style_illus');
+    const styleIllusQuality = $('if_style_illus_quality');
+    const styleIllusNeg = $('if_style_illus_neg');
     const styleSaveBtn = $('if_style_save');
     const presetsStatus = $('if_presets_status');
 
     let currentPersonas = [];
     let currentStyles = [];
+    let activePersonaId = null;
+    let activeStyleId = null;
+
+    function populatePersonaForm(p) {
+        activePersonaId = p?.id ?? null;
+        perName.value = p?.name ?? 'Default User';
+        perDefault.checked = Boolean(p?.isDefault);
+        perPov.value = p?.povMode ?? 'auto';
+        perBooru.value = p?.booru ?? '';
+        perNatural.value = p?.natural ?? '';
+        perFacts.value = p?.facts ?? '';
+        perAvoid.value = (p?.avoidTags || []).join(', ');
+    }
+
+    function populateStyleForm(s) {
+        activeStyleId = s?.id ?? null;
+        styleName.value = s?.name ?? '';
+        styleKrea.value = s?.dialectHints?.krea?.stylePhrase ?? '';
+        styleKreaLight.value = s?.dialectHints?.krea?.lighting ?? '';
+        styleKreaCam.value = s?.dialectHints?.krea?.camera ?? '';
+        styleAnimaTags.value = s?.dialectHints?.anima?.booruTags ?? '';
+        styleAnimaArtists.value = s?.dialectHints?.anima?.artists ?? '';
+        styleIllus.value = s?.dialectHints?.illus?.artists ?? '';
+        styleIllusQuality.value = s?.dialectHints?.illus?.qualityPrefix ?? '';
+        styleIllusNeg.value = s?.dialectHints?.illus?.negativeTags ?? '';
+    }
+
+    function refreshPersonaSelect() {
+        perSelect.innerHTML = '<option value="">-- New Persona --</option>' +
+            currentPersonas.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}${p.isDefault ? ' (default)' : ''}</option>`).join('');
+        if (activePersonaId) perSelect.value = activePersonaId;
+    }
+
+    function refreshStyleSelect() {
+        styleSelect.innerHTML = '<option value="">-- New Style --</option>' +
+            currentStyles.map(s => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.name)}</option>`).join('');
+        if (activeStyleId) styleSelect.value = activeStyleId;
+    }
 
     async function loadPresets() {
         try {
             currentPersonas = await getAllPersonas();
             currentStyles = await getAllStyles();
-            if (currentPersonas.length) {
-                const p = currentPersonas[0];
-                perName.value = p.name || 'Default User';
-                perPov.value = p.povMode || 'auto';
-                perBooru.value = p.booru || '';
-                perNatural.value = p.natural || '';
-            }
-            if (currentStyles.length) {
-                const s = currentStyles[0];
-                styleName.value = s.name || '';
-                styleKrea.value = s.dialectHints?.krea?.stylePhrase || '';
-                styleIllus.value = s.dialectHints?.illus?.artists || '';
-            }
+            refreshPersonaSelect();
+            refreshStyleSelect();
+            const activePersona = currentPersonas.find(p => p.id === activePersonaId)
+                ?? currentPersonas.find(p => p.isDefault)
+                ?? currentPersonas[0]
+                ?? null;
+            populatePersonaForm(activePersona);
+            refreshPersonaSelect();
+            const activeStyle = currentStyles.find(s => s.id === activeStyleId) ?? null;
+            populateStyleForm(activeStyle);
         } catch (e) {
             console.warn('[IF Image] Presets load error:', e);
         }
     }
     loadPresets();
 
-    perSaveBtn.addEventListener('click', async () => {
+    perSelect.addEventListener('change', () => {
+        populatePersonaForm(currentPersonas.find(p => p.id === perSelect.value) ?? null);
+    });
+    perNewBtn.addEventListener('click', () => {
+        perSelect.value = '';
+        populatePersonaForm(null);
+    });
+    perDelBtn.addEventListener('click', async () => {
+        if (!activePersonaId) return;
         try {
-            let p = currentPersonas[0] || createDefaultPersona(perName.value.trim());
-            p.name = perName.value.trim();
+            await removePersona(activePersonaId);
+            activePersonaId = null;
+            await loadPresets();
+            showResult(presetsStatus, 'Persona deleted.', false);
+        } catch (e) {
+            showResult(presetsStatus, e.message, true);
+        }
+    });
+
+    perSaveBtn.addEventListener('click', async () => {
+        const name = perName.value.trim();
+        if (!name) { showResult(presetsStatus, 'Persona name is required', true); return; }
+        try {
+            const existing = currentPersonas.find(p => p.id === activePersonaId);
+            const p = existing || createDefaultPersona(name);
+            p.name = name;
             p.povMode = perPov.value;
             p.booru = perBooru.value.trim();
             p.natural = perNatural.value.trim();
+            p.facts = perFacts.value.trim();
+            p.avoidTags = perAvoid.value.split(',').map(s => s.trim()).filter(Boolean);
+            p.isDefault = perDefault.checked;
             await savePersona(p);
+            // Only one persona may be default at a time.
+            if (p.isDefault) {
+                for (const other of currentPersonas) {
+                    if (other.id !== p.id && other.isDefault) {
+                        other.isDefault = false;
+                        await savePersona(other);
+                    }
+                }
+            }
+            activePersonaId = p.id;
             await loadPresets();
             showResult(presetsStatus, 'Persona saved!', false);
+        } catch (e) {
+            showResult(presetsStatus, e.message, true);
+        }
+    });
+
+    styleSelect.addEventListener('change', () => {
+        populateStyleForm(currentStyles.find(s => s.id === styleSelect.value) ?? null);
+    });
+    styleNewBtn.addEventListener('click', () => {
+        styleSelect.value = '';
+        populateStyleForm(null);
+    });
+    styleDelBtn.addEventListener('click', async () => {
+        if (!activeStyleId) return;
+        try {
+            await removeStyle(activeStyleId);
+            activeStyleId = null;
+            await loadPresets();
+            showResult(presetsStatus, 'Style deleted.', false);
         } catch (e) {
             showResult(presetsStatus, e.message, true);
         }
@@ -1247,17 +1728,356 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             return;
         }
         try {
-            let s = currentStyles.find(x => x.name === name) || createDefaultStyle(name);
+            const existing = currentStyles.find(s => s.id === activeStyleId);
+            const s = existing || createDefaultStyle(name);
             s.name = name;
             s.dialectHints.krea.stylePhrase = styleKrea.value.trim();
+            s.dialectHints.krea.lighting = styleKreaLight.value.trim();
+            s.dialectHints.krea.camera = styleKreaCam.value.trim();
+            s.dialectHints.anima.booruTags = styleAnimaTags.value.trim();
+            s.dialectHints.anima.artists = styleAnimaArtists.value.trim();
             s.dialectHints.illus.artists = styleIllus.value.trim();
+            s.dialectHints.illus.qualityPrefix = styleIllusQuality.value.trim();
+            s.dialectHints.illus.negativeTags = styleIllusNeg.value.trim();
             await saveStyle(s);
+            activeStyleId = s.id;
             await loadPresets();
             showResult(presetsStatus, `Style "${name}" saved!`, false);
         } catch (e) {
             showResult(presetsStatus, e.message, true);
         }
     });
+
+
+    // ================= Replace Rules Wiring =================
+    const replaceList = $('if_replace_list');
+    const replaceTrigger = $('if_replace_trigger');
+    const replaceMode = $('if_replace_mode');
+    const replaceReplacement = $('if_replace_replacement');
+    const replaceCondition = $('if_replace_condition');
+    const replaceAdd = $('if_replace_add');
+    const replaceCompact = $('if_replace_compact');
+    const replaceCompactAdd = $('if_replace_compact_add');
+    const replacePreviewBtn = $('if_replace_preview');
+    const replacePreviewOut = $('if_replace_preview_out');
+
+    let currentRules = [];
+
+    async function loadReplaceRules() {
+        try {
+            currentRules = await getReplaceRules();
+        } catch (e) {
+            console.warn('[IF Image] Load replace rules failed:', e);
+            currentRules = [];
+        }
+        renderReplaceList();
+    }
+
+    function renderReplaceList() {
+        if (!currentRules.length) { replaceList.textContent = 'No rules yet.'; return; }
+        replaceList.innerHTML = currentRules.map((r, i) => `
+            <div class="if-image-log-entry">
+                <span class="if-image-log-type">${escapeHtml(r.mode)}</span>
+                "${escapeHtml(r.trigger)}" &rarr; "${escapeHtml(r.replacement ?? '')}"
+                ${r.condition ? ` [${escapeHtml(r.condition)}]` : ''}
+                <button class="ifimg-rule-del menu_button" data-idx="${i}" style="background:#552222;">Delete</button>
+            </div>`).join('');
+        replaceList.querySelectorAll('.ifimg-rule-del').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                currentRules.splice(Number(btn.dataset.idx), 1);
+                await saveReplaceRules(currentRules);
+                renderReplaceList();
+            });
+        });
+    }
+    loadReplaceRules();
+
+    replaceAdd.addEventListener('click', async () => {
+        const trigger = replaceTrigger.value.trim();
+        if (!trigger) return;
+        currentRules.push({
+            trigger,
+            mode: replaceMode.value,
+            replacement: replaceReplacement.value.trim(),
+            condition: replaceCondition.value.trim() || undefined,
+        });
+        await saveReplaceRules(currentRules);
+        replaceTrigger.value = '';
+        replaceReplacement.value = '';
+        replaceCondition.value = '';
+        renderReplaceList();
+    });
+
+    replaceCompactAdd.addEventListener('click', async () => {
+        const rule = parseCompactRule(replaceCompact.value);
+        if (!rule) return;
+        currentRules.push(rule);
+        await saveReplaceRules(currentRules);
+        replaceCompact.value = '';
+        renderReplaceList();
+    });
+
+    replacePreviewBtn.addEventListener('click', () => {
+        try {
+            const text = testPrompt.value.trim();
+            if (!text) { replacePreviewOut.textContent = 'Test Gen prompt is empty.'; return; }
+            const profileKey = testProfile.value || settings.generation.profile || 'anima';
+            const profile = PROFILES[profileKey] ?? PROFILES.anima;
+            const parsed = parseTriggers(text, {});
+            const assembled = assemblePrompt(parsed, profile.dialect, profile);
+            const ctx = { dialect: profile.dialect, nsfw: false, back: false, full: false };
+            let envelope = applyReplaceRules(assembled, currentRules, 'pre', ctx);
+            envelope = cleanupEnvelope(envelope, profile.dialect, { avoidTags: [], rating: 'nsfw' });
+            envelope = applyReplaceRules(envelope, currentRules, 'final', ctx);
+            replacePreviewOut.innerHTML = `<div><span class="k">before:</span> ${escapeHtml(assembled.prompt)}</div><div><span class="k">after:</span> ${escapeHtml(envelope.prompt)}</div>`;
+            replacePreviewOut.classList.remove('error');
+        } catch (e) {
+            showResult(replacePreviewOut, e.message, true);
+        }
+    });
+
+    // ================= Gallery Tab Wiring (C10) =================
+    const galleryGrid = $('if_gallery_grid');
+    const galleryPrevBtn = $('if_gallery_prev');
+    const galleryNextBtn = $('if_gallery_next');
+    const galleryPageLabel = $('if_gallery_page_label');
+    const galleryDetail = $('if_gallery_detail');
+    const galleryDetailImg = $('if_gallery_detail_img');
+    const galleryDetailMeta = $('if_gallery_detail_meta');
+    const galleryDetailDownload = $('if_gallery_detail_download');
+    const galleryDetailRegen = $('if_gallery_detail_regen');
+    const galleryDetailDelete = $('if_gallery_detail_delete');
+    const galleryDetailClose = $('if_gallery_detail_close');
+    const galleryDetailStatus = $('if_gallery_detail_status');
+
+    const GALLERY_PAGE_SIZE = 24;
+    let galleryPage = 0;
+    let galleryTotal = 0;
+    let galleryItems = [];
+    // Object URLs are created here for display only (listImages() itself
+    // never attaches one) and revoked on every reload/page change so a
+    // closed gallery tab never leaks blob URLs.
+    let galleryUrls = new Map(); // record id -> object URL
+    let galleryDetailId = null;
+
+    function galleryScope() {
+        return $('if_gallery_scope_all')?.checked ? 'all' : 'chat';
+    }
+
+    function revokeGalleryUrls() {
+        for (const url of galleryUrls.values()) URL.revokeObjectURL(url);
+        galleryUrls.clear();
+    }
+
+    function closeGalleryDetail() {
+        galleryDetailId = null;
+        galleryDetail.style.display = 'none';
+    }
+
+    async function loadGalleryPage() {
+        revokeGalleryUrls();
+        closeGalleryDetail();
+        const scope = galleryScope();
+        const chatId = scope === 'chat' && typeof getCurrentChatId === 'function' ? getCurrentChatId() : undefined;
+        try {
+            const [items, total] = await Promise.all([
+                listImages({ chatId, offset: galleryPage * GALLERY_PAGE_SIZE, limit: GALLERY_PAGE_SIZE }),
+                countImages({ chatId }),
+            ]);
+            galleryItems = items;
+            galleryTotal = total;
+            renderGalleryGrid();
+        } catch (e) {
+            galleryGrid.textContent = '';
+            console.warn('[IF Image] Gallery load failed:', e);
+        }
+    }
+
+    function renderGalleryGrid() {
+        for (const record of galleryItems) {
+            galleryUrls.set(record.id, URL.createObjectURL(record.blob));
+        }
+        // Blob URLs are browser-generated (opaque, no user-controlled
+        // characters) and safe to interpolate directly; every other field
+        // still goes through escapeHtml via data-record-id lookups below.
+        galleryGrid.innerHTML = galleryItems.map(record => `
+            <div class="if-image-gallery-thumb" data-record-id="${escapeHtml(record.id)}">
+                <img src="${galleryUrls.get(record.id)}" alt="Generated image">
+            </div>`).join('');
+        galleryGrid.querySelectorAll('[data-record-id]').forEach(node => {
+            node.addEventListener('click', () => {
+                const record = galleryItems.find(r => r.id === node.dataset.recordId);
+                if (record) openGalleryDetail(record);
+            });
+        });
+        const totalPages = Math.max(1, Math.ceil(galleryTotal / GALLERY_PAGE_SIZE));
+        galleryPageLabel.textContent = `Page ${galleryPage + 1} / ${totalPages} (${galleryTotal} image${galleryTotal === 1 ? '' : 's'})`;
+        galleryPrevBtn.disabled = galleryPage <= 0;
+        galleryNextBtn.disabled = (galleryPage + 1) * GALLERY_PAGE_SIZE >= galleryTotal;
+        if (!galleryItems.length) galleryGrid.textContent = 'No images yet.';
+    }
+
+    function openGalleryDetail(record) {
+        galleryDetailId = record.id;
+        const url = galleryUrls.get(record.id);
+        galleryDetailImg.src = url;
+        galleryDetailDownload.href = url;
+        const when = record.timestamp ? new Date(record.timestamp).toLocaleString() : '(unknown time)';
+        galleryDetailMeta.innerHTML = [
+            `<span class="k">when:</span> ${escapeHtml(when)}`,
+            `<span class="k">backend:</span> ${escapeHtml(record.backend || '(unknown)')}`,
+            `<span class="k">profile:</span> ${escapeHtml(record.profileKey || '(unknown)')}`,
+            `<span class="k">size:</span> ${record.width || '?'}x${record.height || '?'} · seed ${record.seed ?? '?'}`,
+            `<span class="k">prompt:</span> ${escapeHtml(record.prompt || '')}`,
+        ].join('<br>');
+        showResult(galleryDetailStatus, '', false);
+        galleryDetail.style.display = '';
+    }
+
+    galleryPrevBtn.addEventListener('click', () => {
+        if (galleryPage <= 0) return;
+        galleryPage -= 1;
+        loadGalleryPage();
+    });
+    galleryNextBtn.addEventListener('click', () => {
+        if ((galleryPage + 1) * GALLERY_PAGE_SIZE >= galleryTotal) return;
+        galleryPage += 1;
+        loadGalleryPage();
+    });
+    el.querySelectorAll('input[name="if_gallery_scope"]').forEach(radio => {
+        radio.addEventListener('change', () => {
+            galleryPage = 0;
+            loadGalleryPage();
+        });
+    });
+    galleryDetailClose.addEventListener('click', closeGalleryDetail);
+
+    galleryDetailDelete.addEventListener('click', async () => {
+        if (!galleryDetailId) return;
+        try {
+            await deleteImageRecord(galleryDetailId);
+            showResult(galleryDetailStatus, 'Deleted.', false);
+            await loadGalleryPage();
+        } catch (e) {
+            showResult(galleryDetailStatus, e.message, true);
+        }
+    });
+
+    galleryDetailRegen.addEventListener('click', async () => {
+        if (!galleryDetailId) return;
+        const record = galleryItems.find(r => r.id === galleryDetailId);
+        if (!record) return;
+        if (typeof regenerateImage !== 'function') {
+            showResult(galleryDetailStatus, 'Regenerate is unavailable in this context.', true);
+            return;
+        }
+        galleryDetailRegen.disabled = true;
+        showResult(galleryDetailStatus, 'Regenerating...', false);
+        try {
+            await regenerateImage(record);
+            showResult(galleryDetailStatus, 'Regenerated — a new image was added to the gallery.', false);
+            galleryPage = 0;
+            await loadGalleryPage();
+        } catch (e) {
+            showResult(galleryDetailStatus, e.message, true);
+        } finally {
+            galleryDetailRegen.disabled = false;
+        }
+    });
+
+    // Loaded lazily on first activation, not on drawer mount, so opening the
+    // extensions panel never triggers an IndexedDB round-trip for a tab the
+    // user hasn't looked at.
+    let galleryLoaded = false;
+    el.querySelector('[data-if-tab="gallery"]')?.addEventListener('click', () => {
+        if (galleryLoaded) return;
+        galleryLoaded = true;
+        loadGalleryPage();
+    });
+
+    // ================= 3-Dialect Preview: Character Picker (C9) =================
+    const renderPicker = $('if_render_picker');
+    const renderInsertBtn = $('if_render_insert');
+    const renderClearBtn = $('if_render_clear');
+
+    let pickerRoster = [];
+    let pickerOutfits = [];
+    let pickerHasPersona = false;
+
+    function pickerRowHtml(id, label, outfits) {
+        const outfitOptions = outfits.length
+            ? outfits.map(o => `<option value="${escapeHtml(o.name)}">${escapeHtml(o.name)}${o.charId ? '' : ' (common)'}</option>`).join('')
+            : '';
+        return `
+            <div class="if-image-log-entry" data-picker-id="${escapeHtml(id)}">
+                <label class="if-image-check"><input type="checkbox" class="if-picker-select"> ${escapeHtml(label)}</label>
+                <label class="if-image-check"><input type="checkbox" class="if-picker-back"> back</label>
+                <label class="if-image-check"><input type="checkbox" class="if-picker-full"> full</label>
+                <label class="if-image-check"><input type="checkbox" class="if-picker-nsfw"> nsfw</label>
+                ${outfits.length ? `<select class="if-picker-outfit text_pole"><option value="">-- outfit: none --</option>${outfitOptions}</select>` : ''}
+            </div>`;
+    }
+
+    async function loadCharPicker() {
+        try {
+            pickerRoster = await getAllCharacters();
+            const allOutfits = await (async () => {
+                try {
+                    const per = await Promise.all(pickerRoster.map(c => getOutfitsForCharacter(c.id)));
+                    return per;
+                } catch { return pickerRoster.map(() => []); }
+            })();
+            pickerOutfits = allOutfits;
+            const personas = await getAllPersonas();
+            pickerHasPersona = personas.length > 0;
+        } catch (e) {
+            console.warn('[IF Image] Character picker load failed:', e);
+            pickerRoster = [];
+            pickerOutfits = [];
+            pickerHasPersona = false;
+        }
+        renderCharPicker();
+    }
+
+    function renderCharPicker() {
+        if (!renderPicker) return;
+        const rows = pickerRoster.map((c, i) => pickerRowHtml(c.id, c.name, pickerOutfits[i] || []));
+        if (pickerHasPersona) rows.push(pickerRowHtml('__persona__', '$me (Persona)', []));
+        renderPicker.innerHTML = rows.length ? rows.join('') : 'No characters yet — add some in the Characters tab.';
+    }
+
+    function pickerTokens() {
+        if (!renderPicker) return [];
+        const tokens = [];
+        renderPicker.querySelectorAll('[data-picker-id]').forEach(row => {
+            if (!row.querySelector('.if-picker-select')?.checked) return;
+            const mods = [];
+            if (row.querySelector('.if-picker-back')?.checked) mods.push('back');
+            if (row.querySelector('.if-picker-full')?.checked) mods.push('full');
+            if (row.querySelector('.if-picker-nsfw')?.checked) mods.push('nsfw');
+            const outfit = row.querySelector('.if-picker-outfit')?.value;
+            if (outfit) mods.push(outfit);
+            const id = row.dataset.pickerId;
+            if (id === '__persona__') {
+                tokens.push(mods.length ? `$me:${mods.join('|')}` : '$me');
+                return;
+            }
+            const char = pickerRoster.find(c => c.id === id);
+            if (!char) return;
+            tokens.push(mods.length ? `$${char.name}:${mods.join('|')}` : `$${char.name}`);
+        });
+        return tokens;
+    }
+
+    if (renderInsertBtn) renderInsertBtn.addEventListener('click', () => {
+        const tokens = pickerTokens();
+        if (!tokens.length) return;
+        const current = renderInput.value.trim();
+        renderInput.value = current ? `${tokens.join(' ')} ${current}` : tokens.join(' ');
+    });
+    if (renderClearBtn) renderClearBtn.addEventListener('click', () => { renderInput.value = ''; });
+
+    loadCharPicker();
 
     // ================= 3-Dialect Preview Wiring =================
     const renderInput = $('if_render_input');
@@ -1316,6 +2136,54 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     if (dryRunEl) {
         dryRunEl.checked = settings.generation?.dryRun === true;
         dryRunEl.addEventListener('change', () => { settings.generation.dryRun = dryRunEl.checked; save(); });
+    }
+
+    // ================= Main Tab: Generation Params (C0) =================
+    const paramsProfile = $('if_params_profile');
+    const paramsWidth = $('if_params_width');
+    const paramsHeight = $('if_params_height');
+    const paramsSteps = $('if_params_steps');
+    const paramsCfg = $('if_params_cfg');
+
+    function currentParamsOverride() {
+        if (!settings.generation.params) settings.generation.params = { krea2: {}, anima: {}, illustrious: {} };
+        const key = paramsProfile.value;
+        if (!settings.generation.params[key]) settings.generation.params[key] = {};
+        return settings.generation.params[key];
+    }
+
+    function syncParamsForm() {
+        const profile = PROFILES[paramsProfile.value];
+        const override = currentParamsOverride();
+        paramsWidth.value = override.width ?? '';
+        paramsWidth.placeholder = String(profile?.width ?? '');
+        paramsHeight.value = override.height ?? '';
+        paramsHeight.placeholder = String(profile?.height ?? '');
+        paramsSteps.value = override.steps ?? '';
+        paramsSteps.placeholder = String(profile?.steps ?? '');
+        paramsCfg.value = override.cfg ?? '';
+        paramsCfg.placeholder = String(profile?.cfg ?? '');
+    }
+    if (paramsProfile) {
+        paramsProfile.value = settings.generation.profile || 'anima';
+        syncParamsForm();
+        paramsProfile.addEventListener('change', syncParamsForm);
+
+        const bindParam = (input, key, parse) => {
+            input.addEventListener('change', () => {
+                const override = currentParamsOverride();
+                const raw = input.value.trim();
+                if (!raw) { delete override[key]; save(); return; }
+                const n = parse(raw);
+                if (!Number.isFinite(n)) { delete override[key]; save(); return; }
+                override[key] = n;
+                save();
+            });
+        };
+        bindParam(paramsWidth, 'width', Number);
+        bindParam(paramsHeight, 'height', Number);
+        bindParam(paramsSteps, 'steps', Number);
+        bindParam(paramsCfg, 'cfg', Number);
     }
 
     // ================= LLM Tab Wiring =================
@@ -1503,11 +2371,6 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         });
     }
 
-    // Log/prompt text is user- or LLM-controlled: always escape before
-    // interpolating into innerHTML.
-    function escapeHtml(value) {
-        return String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-    }
 
     function renderLogEntries() {
         if (!logEntries) return;

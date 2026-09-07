@@ -251,8 +251,12 @@ function attachClickBehavior(el, { onSingleClick, onDoubleClick } = {}) {
 /**
  * Swap a slot to the succeeded image frame. Wires the 300ms click/dblclick
  * disambiguation: single click opens a lightbox, double click regenerates.
- * The caller owns the object URL's lifetime (create/revoke).
- * @param {{onSingleClick?: () => void, onDoubleClick?: () => void}} actions
+ * Also adds a hover overlay with explicit View/Regen/Delete buttons (Phase
+ * C10) — each stopPropagation()s so it never also triggers the frame's own
+ * click/dblclick handlers. Buttons are only rendered for actions the caller
+ * actually supplies. The caller owns the object URL's lifetime (create/revoke).
+ * @param {{onSingleClick?: () => void, onDoubleClick?: () => void,
+ *           onView?: () => void, onRegen?: () => void, onDelete?: () => void}} actions
  */
 export function renderImageFrame(slot, doc, objectUrl, actions = {}) {
     slot.dataset.ifimgState = 'succeeded';
@@ -263,9 +267,60 @@ export function renderImageFrame(slot, doc, objectUrl, actions = {}) {
     img.src = objectUrl;
     img.alt = 'Generated image';
     frame.appendChild(img);
+
+    const overlayActions = [
+        ['View', actions.onView],
+        ['Regen', actions.onRegen],
+        ['Delete', actions.onDelete],
+    ].filter(([, handler]) => typeof handler === 'function');
+    if (overlayActions.length) {
+        const overlay = doc.createElement('div');
+        overlay.className = 'if-image-frame-overlay';
+        for (const [label, handler] of overlayActions) {
+            const btn = doc.createElement('button');
+            btn.type = 'button';
+            btn.className = `menu_button ifimg-overlay-${label.toLowerCase()}`;
+            btn.textContent = label;
+            btn.addEventListener('click', (event) => {
+                event.stopPropagation();
+                handler();
+            });
+            overlay.appendChild(btn);
+        }
+        frame.appendChild(overlay);
+    }
+
     slot.appendChild(frame);
     attachClickBehavior(frame, actions);
     return frame;
+}
+
+/**
+ * Collapse a slot back to a compact "regenerate" chip (Phase C10) — used
+ * after the hover-overlay Delete button removes the image record, so the
+ * marker slot stays usable instead of going blank. All text is set via
+ * textContent (never innerHTML), so no HTML escaping is needed here.
+ * @param {Node} slot
+ * @param {Document} doc
+ * @param {() => void} [onRegenerate]
+ * @returns {Node} the chip element
+ */
+export function renderRegenerateChip(slot, doc, onRegenerate) {
+    slot.dataset.ifimgState = 'idle';
+    clearChildren(slot);
+    const chip = doc.createElement('span');
+    chip.className = 'ifimg-chip ifimg-chip-regenerate';
+    chip.textContent = 'Image deleted';
+    slot.appendChild(chip);
+    if (typeof onRegenerate === 'function') {
+        const btn = doc.createElement('button');
+        btn.type = 'button';
+        btn.className = 'ifimg-retry menu_button';
+        btn.textContent = 'Regenerate';
+        btn.addEventListener('click', onRegenerate);
+        slot.appendChild(btn);
+    }
+    return chip;
 }
 
 /**
