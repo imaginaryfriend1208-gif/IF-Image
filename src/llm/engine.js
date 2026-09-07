@@ -2,9 +2,9 @@
 // Handles Assist and Full modes by calling the LLM, parsing the reply,
 // and feeding the result into the existing compile → queue pipeline.
 
-import { createLlmClient } from './client.js';
+import { createLlmClient, LlmError } from './client.js';
 import { buildContext } from './context.js';
-import { renderSystemPrompt, renderUserPrompt, DIALECT_RULES } from './prompts.js';
+import { renderSystemPrompt, renderUserPrompt, DIALECT_RULES, REQUEST_PROMPT_RENDERERS } from './prompts.js';
 import { parseLlmReply } from './parser.js';
 import { resolveRequestMapping } from './profiles.js';
 import { resolveProfileKey } from '../prompt/render.js';
@@ -160,5 +160,169 @@ export function createEngine({
         });
     }
 
-    return { rewrite, regenerate };
+    // ------------------------------------------------------------------
+    // Phase C5: request types beside image_gen (char_design, char_modify,
+    // tag_modify, translation, persona_gen). All JSON parsing here is
+    // defensive: strips code fences/think blocks, tolerates trailing
+    // commas, and NEVER throws on malformed input — validation failures
+    // are surfaced as an LlmError('MALFORMED', ...) after one retry with
+    // the validator's errors appended to the prompt, per spec.
+    // ------------------------------------------------------------------
+
+    /** Best-effort JSON extraction from a free-form LLM reply. Returns null, never throws. */
+    function parseJsonLoose(text) {
+        if (typeof text !== 'string') return null;
+        let cleaned = text.trim();
+        cleaned = cleaned.replace(/```(?:json)?\s*([\s\S]*?)```/i, '$1').trim();
+        cleaned = cleaned.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '').trim();
+        const match = cleaned.match(/[{[][\s\S]*[}\]]/);
+        if (match) cleaned = match[0];
+        // Repair a common LLM mistake: a trailing comma before a closing brace/bracket.
+        cleaned = cleaned.replace(/,\s*([}\]])/g, '$1');
+        try {
+            return JSON.parse(cleaned);
+        } catch {
+            return null;
+        }
+    }
+
+    /** @returns {string[]} validation errors; empty array = valid. */
+    function validateCharJson(obj) {
+        const errors = [];
+        if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return ['Reply must be a single JSON object.'];
+        if (typeof obj.name !== 'string' || !obj.name.trim()) errors.push('"name" must be a non-empty string.');
+        if (typeof obj.countTag !== 'string' || !/^\d+(girl|boy|other)s?$/i.test(obj.countTag.trim())) {
+            errors.push('"countTag" must be a danbooru count tag like "1girl", "1boy", or "2girls".');
+        }
+        if (obj.booru !== undefined && typeof obj.booru !== 'string') errors.push('"booru" must be a comma-separated tag string.');
+        if (obj.facts !== undefined && !(Array.isArray(obj.facts) && obj.facts.every(f => typeof f === 'string'))) {
+            errors.push('"facts" must be an array of strings.');
+        }
+        if (obj.negative !== undefined && typeof obj.negative !== 'string') errors.push('"negative" must be a string.');
+        return errors;
+    }
+
+    function resolveProfileIdFor(requestType, settings) {
+        const mapping = resolveRequestMapping(settings, requestType);
+        return mapping.apiProfile?.id ?? settings.llm?.defaultApiProfileId ?? '';
+    }
+
+    /**
+     * Shared JSON request/validate/retry-once flow for char_design and
+     * char_modify (same schema, same validator).
+     * @param {string} type - 'char_design' | 'char_modify'
+     * @param {string} userPrompt
+     * @param {AbortSignal} [signal]
+     * @returns {Promise<{ char: object, raw: string, elapsedMs: number }>}
+     */
+    async function requestCharJson(type, userPrompt, signal) {
+        const settings = getSettings();
+        const systemPrompt = REQUEST_PROMPT_RENDERERS[type]();
+        const profileId = resolveProfileIdFor(type, settings);
+        let prompt = userPrompt;
+        let lastErrors = [];
+        for (let attempt = 0; attempt < 2; attempt++) {
+            const result = await client.request({ type, systemPrompt, userPrompt: prompt, profileId, signal });
+            const parsed = parseJsonLoose(result.text);
+            const errors = validateCharJson(parsed);
+            if (!errors.length) {
+                return { char: parsed, raw: result.text, elapsedMs: result.elapsedMs };
+            }
+            lastErrors = errors;
+            prompt = `${userPrompt}\n\nYour previous reply failed validation:\n- ${errors.join('\n- ')}\nReply again with corrected JSON only, following the schema exactly.`;
+        }
+        throw new LlmError('MALFORMED', `Character JSON failed validation after retry: ${lastErrors.join('; ')}`);
+    }
+
+    /**
+     * char_design: description -> new character JSON (not saved here — the
+     * caller previews and saves via src/storage/chars.js).
+     * @param {string} description
+     * @param {{ signal?: AbortSignal }} [opts]
+     */
+    async function generateCharacterDesign(description, { signal } = {}) {
+        return requestCharJson('char_design', `Design a character from this description:\n${description}`, signal);
+    }
+
+    /**
+     * char_modify: existing character JSON + instruction -> patched JSON.
+     * Only the caller decides which fields actually changed; this returns
+     * the full corrected record for the caller to diff/merge/save.
+     * @param {object} existingChar
+     * @param {string} instruction
+     * @param {{ signal?: AbortSignal }} [opts]
+     */
+    async function modifyCharacter(existingChar, instruction, { signal } = {}) {
+        const snapshot = JSON.stringify({
+            name: existingChar?.name, countTag: existingChar?.countTag,
+            booru: existingChar?.booru, facts: existingChar?.facts ? [existingChar.facts] : [],
+            negative: existingChar?.negative,
+        });
+        const userPrompt = `Current character JSON:\n${snapshot}\n\nInstruction: ${instruction}`;
+        return requestCharJson('char_modify', userPrompt, signal);
+    }
+
+    /**
+     * tag_modify: tag list + instruction -> new single-line tag list.
+     * @param {string} tagList
+     * @param {string} instruction
+     * @param {{ signal?: AbortSignal }} [opts]
+     * @returns {Promise<{ tags: string, elapsedMs: number }>}
+     */
+    async function modifyTags(tagList, instruction, { signal } = {}) {
+        const settings = getSettings();
+        const systemPrompt = REQUEST_PROMPT_RENDERERS.tag_modify();
+        const profileId = resolveProfileIdFor('tag_modify', settings);
+        const userPrompt = `Current tags: ${tagList}\n\nInstruction: ${instruction}`;
+        const result = await client.request({ type: 'tag_modify', systemPrompt, userPrompt, profileId, signal });
+        const tags = result.text.trim().split('\n')[0].trim();
+        return { tags, elapsedMs: result.elapsedMs };
+    }
+
+    /**
+     * translation: lazy backfill facts (natural language) -> booru tags for
+     * a character missing them.
+     * @param {object} char - { facts }
+     * @param {{ signal?: AbortSignal }} [opts]
+     * @returns {Promise<{ tags: string, elapsedMs: number }>}
+     */
+    async function translateFacts(char, { signal } = {}) {
+        const settings = getSettings();
+        const systemPrompt = REQUEST_PROMPT_RENDERERS.translation();
+        const profileId = resolveProfileIdFor('translation', settings);
+        const userPrompt = `Character facts: ${char?.facts || char?.natural || char?.name || ''}`;
+        const result = await client.request({ type: 'translation', systemPrompt, userPrompt, profileId, signal });
+        const tags = result.text.trim().split('\n')[0].trim();
+        return { tags, elapsedMs: result.elapsedMs };
+    }
+
+    /**
+     * persona_gen: read the current ST persona (name + description) and
+     * convert it into an IF-Image persona record via the LLM. Manual edits
+     * win: the caller should skip applying this when persona.meta.updatedAt
+     * is newer than persona.syncedAt (i.e. the user edited it since the
+     * last sync) unless the sync is explicitly forced.
+     * @param {{ signal?: AbortSignal }} [opts]
+     * @returns {Promise<{ persona: object, raw: string, elapsedMs: number }>}
+     */
+    async function syncPersonaFromSt({ signal } = {}) {
+        const ctx = getContext();
+        const name = ctx?.name1 ?? 'User';
+        const description = ctx?.powerUserSettings?.persona_description ?? '';
+        const settings = getSettings();
+        const systemPrompt = REQUEST_PROMPT_RENDERERS.persona_gen();
+        const profileId = resolveProfileIdFor('persona_gen', settings);
+        const userPrompt = `Persona name: ${name}\nPersona description: ${description || '(none set)'}`;
+        const result = await client.request({ type: 'persona_gen', systemPrompt, userPrompt, profileId, signal });
+        const parsed = parseJsonLoose(result.text);
+        if (!parsed || typeof parsed !== 'object' || typeof parsed.name !== 'string' || !parsed.name.trim()) {
+            throw new LlmError('MALFORMED', 'persona_gen reply was not a valid persona JSON object.');
+        }
+        return { persona: parsed, raw: result.text, elapsedMs: result.elapsedMs };
+    }
+
+    return {
+        rewrite, regenerate,
+        generateCharacterDesign, modifyCharacter, modifyTags, translateFacts, syncPersonaFromSt,
+    };
 }

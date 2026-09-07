@@ -112,3 +112,57 @@ export function renderUserPrompt(sceneText, { previousPrompt, variationHint } = 
     if (variationHint) out += `\n\nVariation hint: ${variationHint}`;
     return out;
 }
+
+// ------------------------------------------------------------------
+// Phase C5: request types beside image_gen. Each has its own master
+// system prompt; requestMapping entries key off these type strings.
+// ------------------------------------------------------------------
+
+/** Shared JSON schema description for char_design / char_modify replies. */
+const CHAR_JSON_SCHEMA_HINT = `Reply with EXACTLY ONE JSON object and nothing else — no prose, no code fences, no explanation. Schema:
+{
+  "name": "string, required, non-empty",
+  "countTag": "string, required, danbooru count tag e.g. \\"1girl\\", \\"1boy\\", \\"2girls\\"",
+  "booru": "string, comma-separated danbooru-style tags",
+  "facts": ["array of short natural-language fact strings"],
+  "negative": "string, optional, comma-separated tags to always avoid for this character"
+}`;
+
+export function renderCharDesignPrompt() {
+    return `You design visual characters for the IF Image extension from a short natural-language description. Infer sensible, specific tags — do not leave fields generic when the description implies detail.
+
+${CHAR_JSON_SCHEMA_HINT}`;
+}
+
+export function renderCharModifyPrompt() {
+    return `You patch an existing character's JSON record according to an instruction. You are given the character's CURRENT JSON and an instruction describing what to change. Reply with the FULL corrected JSON object (the same schema as char_design, not a diff) — fields the instruction does not mention must be copied over unchanged.
+
+${CHAR_JSON_SCHEMA_HINT}`;
+}
+
+export function renderTagModifyPrompt() {
+    return `You edit a comma-separated danbooru tag list according to an instruction. Reply with EXACTLY ONE line: the new tag list, comma-separated, spaces not underscores, nothing else (no prose, no code fences).`;
+}
+
+export function renderTranslationPrompt() {
+    return `You convert natural-language character facts into comma-separated danbooru-style booru tags, for a character whose booru tags are missing or incomplete. Reply with EXACTLY ONE line: the tag list, comma-separated, spaces not underscores, nothing else.`;
+}
+
+export function renderPersonaGenPrompt() {
+    return `You convert a SillyTavern user persona's name and description into an IF Image persona JSON record. Reply with EXACTLY ONE JSON object and nothing else:
+{
+  "name": "string",
+  "countTag": "string, danbooru count tag e.g. \\"1boy\\", \\"1girl\\"",
+  "booru": "string, comma-separated danbooru-style tags",
+  "natural": "string, one-paragraph prose description for photorealistic prompts"
+}`;
+}
+
+/** type -> system prompt renderer, for the non-image_gen request types. */
+export const REQUEST_PROMPT_RENDERERS = {
+    char_design: renderCharDesignPrompt,
+    char_modify: renderCharModifyPrompt,
+    tag_modify: renderTagModifyPrompt,
+    translation: renderTranslationPrompt,
+    persona_gen: renderPersonaGenPrompt,
+};

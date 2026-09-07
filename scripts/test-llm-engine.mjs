@@ -31,6 +31,19 @@ function makeMockLlm({ reply, error, calls = [] }) {
     };
 }
 
+// Cycles through a fixed sequence of replies, one per call — for retry tests.
+function makeMockLlmSeq(replies, calls = []) {
+    let i = 0;
+    return {
+        request: async ({ type, systemPrompt, userPrompt, profileId, signal }) => {
+            calls.push({ type, systemPrompt, userPrompt, profileId, signal });
+            const text = replies[Math.min(i, replies.length - 1)];
+            i += 1;
+            return { text, requestId: 'req-' + i, elapsedMs: 10, method: 'generateRaw' };
+        },
+    };
+}
+
 // --- Mock compile ---
 function makeCompile() {
     return (content) => ({
@@ -40,7 +53,7 @@ function makeCompile() {
 }
 
 // --- Mock engine deps ---
-function makeEngine({ llm, compile, settings = {}, chat = [] } = {}) {
+function makeEngine({ llm, compile, settings = {}, chat = [], contextExtra = {} } = {}) {
     const calls = [];
     const engine = createEngine({
         llmClient: llm,
@@ -49,7 +62,7 @@ function makeEngine({ llm, compile, settings = {}, chat = [] } = {}) {
             generation: { profile: 'anima' },
             ...settings,
         }),
-        getContext: () => ({ chat }),
+        getContext: () => ({ chat, ...contextExtra }),
         roster: () => ({ characters: [], persona: null }),
         substituteParams: (s) => s,
         compile: compile ?? makeCompile(),
@@ -147,6 +160,85 @@ test('system prompt includes dialect rules and scene window', async () => {
     assert.ok(calls[0].systemPrompt.includes('DIALECT'), 'dialect rules present');
     assert.ok(calls[0].systemPrompt.includes('SCENE WINDOW'), 'scene window present');
     assert.ok(calls[0].systemPrompt.includes('hello'), 'scene text present');
+});
+
+// --- Phase C5: request types beside image_gen ---
+
+test('char_design: valid JSON reply is parsed and returned', async () => {
+    const reply = '```json\n{"name":"Lyna","countTag":"1girl","booru":"silver hair, purple eyes","facts":["Elf archer"]}\n```';
+    const { engine } = makeEngine({ llm: makeMockLlm({ reply }) });
+    const result = await engine.generateCharacterDesign('a silver-haired elf archer');
+    assert.equal(result.char.name, 'Lyna');
+    assert.equal(result.char.countTag, '1girl');
+});
+
+test('char_design: invalid reply retries once with validator errors, then succeeds', async () => {
+    const calls = [];
+    const llm = makeMockLlmSeq([
+        '{"name":"","countTag":"not-a-tag"}',
+        '{"name":"Mira","countTag":"1girl","booru":"red hair","facts":["A knight"]}',
+    ], calls);
+    const { engine } = makeEngine({ llm });
+    const result = await engine.generateCharacterDesign('a red-haired knight');
+    assert.equal(result.char.name, 'Mira');
+    assert.equal(calls.length, 2);
+    assert.ok(calls[1].userPrompt.includes('failed validation'), 'retry prompt includes validator errors');
+});
+
+test('char_design: invalid reply on both attempts throws MALFORMED', async () => {
+    const llm = makeMockLlmSeq(['not json at all', 'still not json']);
+    const { engine } = makeEngine({ llm });
+    await assert.rejects(
+        () => engine.generateCharacterDesign('a mystery character'),
+        (err) => err.code === 'MALFORMED',
+    );
+});
+
+test('char_modify: patches an existing character JSON', async () => {
+    const reply = '{"name":"Lyna","countTag":"1girl","booru":"silver hair, red eyes","facts":["Elf archer"]}';
+    const { engine } = makeEngine({ llm: makeMockLlm({ reply }) });
+    const existing = { name: 'Lyna', countTag: '1girl', booru: 'silver hair, purple eyes', facts: 'Elf archer' };
+    const result = await engine.modifyCharacter(existing, 'change eyes to red');
+    assert.equal(result.char.booru, 'silver hair, red eyes');
+});
+
+test('tag_modify: returns a single-line tag list', async () => {
+    const reply = '1girl, solo, red hair, blue eyes\n(extra lines are ignored)';
+    const { engine } = makeEngine({ llm: makeMockLlm({ reply }) });
+    const result = await engine.modifyTags('1girl, solo, black hair, blue eyes', 'change hair to red');
+    assert.equal(result.tags, '1girl, solo, red hair, blue eyes');
+});
+
+test('translation: backfills booru tags from facts', async () => {
+    const reply = 'elf, silver hair, purple eyes, archer';
+    const { engine } = makeEngine({ llm: makeMockLlm({ reply }) });
+    const result = await engine.translateFacts({ facts: 'A silver-haired elf archer with purple eyes' });
+    assert.equal(result.tags, 'elf, silver hair, purple eyes, archer');
+});
+
+test('persona_gen: reads name1/persona_description from context and returns a persona payload', async () => {
+    const reply = '{"name":"Alex","countTag":"1boy","booru":"black hair, casual clothes","natural":"a young man in casual attire"}';
+    const calls = [];
+    const { engine } = makeEngine({
+        llm: makeMockLlm({ reply, calls }),
+        contextExtra: { name1: 'Alex', powerUserSettings: { persona_description: 'a young man in casual attire' } },
+    });
+    const result = await engine.syncPersonaFromSt();
+    assert.equal(result.persona.name, 'Alex');
+    assert.ok(calls[0].userPrompt.includes('Alex'));
+    assert.ok(calls[0].userPrompt.includes('casual attire'));
+});
+
+test('persona_gen: malformed reply throws MALFORMED, never throws to the caller as a crash', async () => {
+    const { engine } = makeEngine({ llm: makeMockLlm({ reply: 'sorry, I cannot help with that' }) });
+    await assert.rejects(() => engine.syncPersonaFromSt(), (err) => err.code === 'MALFORMED');
+});
+
+test('defensive JSON repair: trailing commas and surrounding prose are tolerated', async () => {
+    const reply = 'Sure, here you go:\n{"name":"Kai","countTag":"1boy","booru":"tag1, tag2,","facts":["fact1",],}\nHope that helps!';
+    const { engine } = makeEngine({ llm: makeMockLlm({ reply }) });
+    const result = await engine.generateCharacterDesign('a boy named Kai');
+    assert.equal(result.char.name, 'Kai');
 });
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`);
