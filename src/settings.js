@@ -25,6 +25,7 @@ export const defaultSettings = {
             username: '',
             password: '',
             profile: 'anima',
+            proxyModel: '',
         },
         a1111: {
             baseUrl: '',
@@ -38,12 +39,19 @@ export const defaultSettings = {
         contextProfiles: [],
         requestMapping: {},
         defaultMethod: 'direct',
+        defaultApiProfileId: '',
+        injectionStyle: 'compact',
     },
     generation: {
         mode: 'direct',       // direct | assist | full
         startTag: 'image###',
         endTag: '###',
         enabled: true,
+        backend: 'comfy',
+        profile: 'anima',
+        sceneWindow: 4,
+        logLimit: 50,
+        dryRun: false,
     },
     test: {
         prompt: '',

@@ -22,8 +22,10 @@ export const EXTENSION_VERSION = '0.3.0';
  * @param {NaiClient} args.nai
  * @param {ComfyProxyClient} args.comfy legacy proxy client (connection 'legacy_proxy')
  * @param {A1111Client} args.a1111 AUTOMATIC1111-compatible API client (connection 'a1111')
+ * @param {Array} [args.genLog] - B7: ring buffer of pipeline/LLM events
+ * @param {() => object} [args.getQueue] - B7: live queue instance for task list
  */
-export function renderDrawer({ settings, save, nai, comfy, a1111 }) {
+export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQueue }) {
     const html = `
     <div class="if-image-settings">
         <div class="if-image-title">
@@ -33,8 +35,10 @@ export function renderDrawer({ settings, save, nai, comfy, a1111 }) {
 
         <div class="if-image-tabs">
             <button class="if-image-tab menu_button active" data-if-tab="main">Main</button>
+            <button class="if-image-tab menu_button" data-if-tab="llm">LLM</button>
             <button class="if-image-tab menu_button" data-if-tab="backends">Backends</button>
             <button class="if-image-tab menu_button" data-if-tab="test">Test Gen</button>
+            <button class="if-image-tab menu_button" data-if-tab="log">Log</button>
             <button class="if-image-tab menu_button" data-if-tab="chars">Characters</button>
             <button class="if-image-tab menu_button" data-if-tab="presets">Persona & Style</button>
             <button class="if-image-tab menu_button" data-if-tab="render">3-Dialect Preview</button>
@@ -79,11 +83,133 @@ export function renderDrawer({ settings, save, nai, comfy, a1111 }) {
                 <label for="if_main_mode">Mode</label>
                 <select id="if_main_mode" class="text_pole">
                     <option value="direct">Direct (marker → image)</option>
-                    <option value="assist" disabled>Assist (Phase B)</option>
-                    <option value="full" disabled>Full (Phase B)</option>
+                    <option value="assist">Assist (LLM rewrite)</option>
+                    <option value="full">Full (LLM replies)</option>
                 </select>
             </div>
-            <div class="if-image-note">Assist and Full modes arrive in Phase B (LLM rewrite). Direct mode is active now.</div>
+            <div class="if-image-note">Direct compiles markers locally. Assist rewrites hand-typed markers through the LLM. Full also scans LLM chat replies for &lt;ifimage&gt; blocks.</div>
+            <div class="if-image-row">
+                <label class="if-image-check">
+                    <input type="checkbox" id="if_main_dryrun"> Dry-run (log envelope, no generation)
+                </label>
+            </div>
+        </div>
+
+        <!-- ============ LLM TAB ============ -->
+        <div class="if-image-panel" data-if-panel="llm" style="display:none;">
+            <h3>LLM API Profiles</h3>
+            <div class="if-image-row">
+                <label for="if_llm_default_method">Default method</label>
+                <select id="if_llm_default_method" class="text_pole">
+                    <option value="direct">ST generateRaw (current connection)</option>
+                    <option value="st_connection_manager">ST Connection Manager profile</option>
+                    <option value="direct_fetch">Direct OpenAI-compatible endpoint</option>
+                </select>
+            </div>
+            <div class="if-image-row">
+                <label for="if_llm_default_profile">Default API profile</label>
+                <select id="if_llm_default_profile" class="text_pole">
+                    <option value="">-- none --</option>
+                </select>
+            </div>
+            <div class="if-image-row">
+                <label for="if_llm_injection">Character injection style</label>
+                <select id="if_llm_injection" class="text_pole">
+                    <option value="compact">Compact (one line per char)</option>
+                    <option value="xml">XML (structured tags)</option>
+                    <option value="full">Full (multi-line sheet)</option>
+                </select>
+            </div>
+
+            <hr class="if-image-sep"/>
+
+            <h3>API Profile Editor</h3>
+            <div class="if-image-row">
+                <label for="if_llm_profile_select">Profile</label>
+                <div style="display:flex; gap:6px;">
+                    <select id="if_llm_profile_select" class="text_pole" style="flex:1;">
+                        <option value="">-- New Profile --</option>
+                    </select>
+                    <button id="if_llm_profile_new" class="menu_button">+ New</button>
+                    <button id="if_llm_profile_del" class="menu_button" style="background:#552222;">Delete</button>
+                </div>
+            </div>
+            <div class="if-image-row">
+                <label for="if_llm_profile_name">Name</label>
+                <input id="if_llm_profile_name" type="text" class="text_pole">
+            </div>
+            <div class="if-image-row">
+                <label for="if_llm_profile_method">Method</label>
+                <select id="if_llm_profile_method" class="text_pole">
+                    <option value="generateRaw">ST generateRaw</option>
+                    <option value="connection_manager">ST Connection Manager</option>
+                    <option value="direct_fetch">Direct fetch</option>
+                </select>
+            </div>
+            <div class="if-image-row" data-if-llm-fetch>
+                <label for="if_llm_profile_baseurl">Base URL</label>
+                <input id="if_llm_profile_baseurl" type="text" class="text_pole" placeholder="https://api.example.com">
+            </div>
+            <div class="if-image-row" data-if-llm-fetch>
+                <label for="if_llm_profile_key">API key</label>
+                <input id="if_llm_profile_key" type="password" class="text_pole" autocomplete="off">
+            </div>
+            <div class="if-image-row" data-if-llm-fetch>
+                <label for="if_llm_profile_model">Model</label>
+                <input id="if_llm_profile_model" type="text" class="text_pole" placeholder="gpt-4o-mini">
+            </div>
+            <div class="if-image-row" data-if-llm-fetch>
+                <label for="if_llm_profile_temp">Temperature</label>
+                <input id="if_llm_profile_temp" type="number" min="0" max="2" step="0.1" class="text_pole">
+            </div>
+            <div class="if-image-row" data-if-llm-fetch>
+                <label for="if_llm_profile_maxtokens">Max tokens</label>
+                <input id="if_llm_profile_maxtokens" type="number" min="1" max="32768" class="text_pole">
+            </div>
+            <div style="display:flex; gap:6px; margin-top:4px;">
+                <button id="if_llm_profile_save" class="menu_button" style="flex:1;">Save Profile</button>
+                <button id="if_llm_test" class="menu_button">Test call</button>
+            </div>
+            <div class="if-image-result" id="if_llm_result"></div>
+
+            <hr class="if-image-sep"/>
+
+            <h3>Request Mapping</h3>
+            <div class="if-image-row">
+                <label for="if_llm_map_api">image_gen → API profile</label>
+                <select id="if_llm_map_api" class="text_pole">
+                    <option value="">-- none --</option>
+                </select>
+            </div>
+            <div class="if-image-row">
+                <label for="if_llm_map_ctx">image_gen → Context profile</label>
+                <select id="if_llm_map_ctx" class="text_pole">
+                    <option value="">-- none --</option>
+                </select>
+            </div>
+            <div class="if-image-note">Context profiles control the scene window and roster injection. More request types arrive in Phase C.</div>
+        </div>
+
+        <!-- ============ LOG TAB ============ -->
+        <div class="if-image-panel" data-if-panel="log" style="display:none;">
+            <h3>Generation Log</h3>
+            <div class="if-image-row">
+                <label for="if_log_limit">Log limit</label>
+                <input id="if_log_limit" type="number" min="1" max="500" class="text_pole">
+            </div>
+            <div class="if-image-row">
+                <button id="if_log_refresh" class="menu_button">Refresh</button>
+                <button id="if_log_clear" class="menu_button">Clear</button>
+            </div>
+            <div id="if_log_entries" class="if-image-log"></div>
+
+            <hr class="if-image-sep"/>
+
+            <h3>Live Tasks</h3>
+            <div class="if-image-row">
+                <button id="if_log_tasks_refresh" class="menu_button">Refresh tasks</button>
+            </div>
+            <div id="if_log_tasks" class="if-image-log"></div>
         </div>
 
         <!-- ============ BACKENDS TAB ============ -->
@@ -1184,6 +1310,253 @@ export function renderDrawer({ settings, save, nai, comfy, a1111 }) {
             }
         }
     });
+
+    // ================= Main Tab: dry-run toggle =================
+    const dryRunEl = $('if_main_dryrun');
+    if (dryRunEl) {
+        dryRunEl.checked = settings.generation?.dryRun === true;
+        dryRunEl.addEventListener('change', () => { settings.generation.dryRun = dryRunEl.checked; save(); });
+    }
+
+    // ================= LLM Tab Wiring =================
+    const llmMethod = $('if_llm_default_method');
+    const llmProfileSelect = $('if_llm_default_profile');
+    const llmInjection = $('if_llm_injection');
+    const llmProfSel = $('if_llm_profile_select');
+    const llmProfNew = $('if_llm_profile_new');
+    const llmProfDel = $('if_llm_profile_del');
+    const llmProfName = $('if_llm_profile_name');
+    const llmProfMethod = $('if_llm_profile_method');
+    const llmProfUrl = $('if_llm_profile_baseurl');
+    const llmProfKey = $('if_llm_profile_key');
+    const llmProfModel = $('if_llm_profile_model');
+    const llmProfTemp = $('if_llm_profile_temp');
+    const llmProfMaxTok = $('if_llm_profile_maxtokens');
+    const llmProfSave = $('if_llm_profile_save');
+    const llmTestBtn = $('if_llm_test');
+    const llmResult = $('if_llm_result');
+    const llmMapApi = $('if_llm_map_api');
+    const llmMapCtx = $('if_llm_map_ctx');
+    const llmFetchRows = el.querySelectorAll('[data-if-llm-fetch]');
+
+    if (llmMethod) llmMethod.value = settings.llm?.defaultMethod ?? 'direct';
+    if (llmInjection) llmInjection.value = settings.llm?.injectionStyle ?? 'compact';
+
+    function refreshLlmProfileSelects() {
+        const profiles = settings.llm?.apiProfiles ?? [];
+        const options = profiles.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`).join('');
+        if (llmProfileSelect) llmProfileSelect.innerHTML = '<option value="">-- none --</option>' + options;
+        if (llmProfSel) llmProfSel.innerHTML = '<option value="">-- New Profile --</option>' + options;
+        if (llmMapApi) llmMapApi.innerHTML = '<option value="">-- none --</option>' + options;
+        if (llmProfileSelect) llmProfileSelect.value = settings.llm?.defaultApiProfileId ?? '';
+        if (llmMapApi) llmMapApi.value = settings.llm?.requestMapping?.image_gen?.apiProfileId ?? '';
+    }
+
+    function refreshContextProfileSelect() {
+        const profiles = settings.llm?.contextProfiles ?? [];
+        const options = profiles.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`).join('');
+        if (llmMapCtx) {
+            llmMapCtx.innerHTML = '<option value="">-- none --</option>' + options;
+            llmMapCtx.value = settings.llm?.requestMapping?.image_gen?.contextProfileId ?? '';
+        }
+    }
+
+    function syncLlmFetchRows() {
+        const show = llmProfMethod?.value === 'direct_fetch';
+        llmFetchRows.forEach(row => row.style.display = show ? '' : 'none');
+    }
+
+    if (llmMethod) llmMethod.addEventListener('change', () => { settings.llm.defaultMethod = llmMethod.value; save(); });
+    if (llmProfileSelect) llmProfileSelect.addEventListener('change', () => { settings.llm.defaultApiProfileId = llmProfileSelect.value; save(); });
+    if (llmInjection) llmInjection.addEventListener('change', () => { settings.llm.injectionStyle = llmInjection.value; save(); });
+
+    let activeLlmProfileId = null;
+    function populateLlmProfileForm(profile) {
+        activeLlmProfileId = profile?.id ?? null;
+        if (!profile) {
+            if (llmProfName) llmProfName.value = '';
+            if (llmProfMethod) llmProfMethod.value = 'generateRaw';
+            if (llmProfUrl) llmProfUrl.value = '';
+            if (llmProfKey) llmProfKey.value = '';
+            if (llmProfModel) llmProfModel.value = '';
+            if (llmProfTemp) llmProfTemp.value = '0.7';
+            if (llmProfMaxTok) llmProfMaxTok.value = '4096';
+            syncLlmFetchRows();
+            return;
+        }
+        if (llmProfName) llmProfName.value = profile.name ?? '';
+        if (llmProfMethod) llmProfMethod.value = profile.method ?? 'generateRaw';
+        if (llmProfUrl) llmProfUrl.value = profile.baseUrl ?? '';
+        if (llmProfKey) llmProfKey.value = profile.apiKey ?? '';
+        if (llmProfModel) llmProfModel.value = profile.model ?? '';
+        if (llmProfTemp) llmProfTemp.value = String(profile.temperature ?? 0.7);
+        if (llmProfMaxTok) llmProfMaxTok.value = String(profile.maxTokens ?? 4096);
+        syncLlmFetchRows();
+    }
+
+    if (llmProfSel) llmProfSel.addEventListener('change', () => {
+        const profiles = settings.llm?.apiProfiles ?? [];
+        const found = profiles.find(p => p.id === llmProfSel.value);
+        populateLlmProfileForm(found);
+    });
+    if (llmProfNew) llmProfNew.addEventListener('click', () => { llmProfSel.value = ''; populateLlmProfileForm(null); });
+    if (llmProfMethod) llmProfMethod.addEventListener('change', syncLlmFetchRows);
+
+    if (llmProfDel) llmProfDel.addEventListener('click', () => {
+        if (!activeLlmProfileId) return;
+        const deletedId = activeLlmProfileId;
+        const profiles = settings.llm?.apiProfiles ?? [];
+        settings.llm.apiProfiles = profiles.filter(p => p.id !== deletedId);
+        activeLlmProfileId = null;
+        // Clean up mapping and default references
+        for (const key of Object.keys(settings.llm.requestMapping ?? {})) {
+            if (settings.llm.requestMapping[key]?.apiProfileId === deletedId) {
+                settings.llm.requestMapping[key].apiProfileId = '';
+            }
+        }
+        if (settings.llm.defaultApiProfileId === deletedId) settings.llm.defaultApiProfileId = '';
+        refreshLlmProfileSelects();
+        populateLlmProfileForm(null);
+        save();
+    });
+
+    if (llmProfSave) llmProfSave.addEventListener('click', () => {
+        if (!settings.llm) settings.llm = {};
+        if (!Array.isArray(settings.llm.apiProfiles)) settings.llm.apiProfiles = [];
+        const name = llmProfName?.value?.trim();
+        if (!name) { showResult(llmResult, 'Profile name is required', true); return; }
+        const profile = {
+            id: activeLlmProfileId || (crypto.randomUUID ? crypto.randomUUID() : 'ap_' + Date.now()),
+            name,
+            method: llmProfMethod?.value ?? 'generateRaw',
+            baseUrl: llmProfUrl?.value?.trim() ?? '',
+            apiKey: llmProfKey?.value ?? '',
+            model: llmProfModel?.value?.trim() ?? '',
+            temperature: Number(llmProfTemp?.value) || 0.7,
+            maxTokens: Number(llmProfMaxTok?.value) || 4096,
+        };
+        const idx = settings.llm.apiProfiles.findIndex(p => p.id === profile.id);
+        if (idx >= 0) settings.llm.apiProfiles[idx] = profile;
+        else settings.llm.apiProfiles.push(profile);
+        activeLlmProfileId = profile.id;
+        refreshLlmProfileSelects();
+        save();
+        showResult(llmResult, `Profile "${name}" saved!`, false);
+    });
+
+    // LLM test call
+    if (llmTestBtn) llmTestBtn.addEventListener('click', async () => {
+        llmTestBtn.disabled = true;
+        showResult(llmResult, 'Testing...', false);
+        try {
+            // Lazy import: the module is always available since Phase B
+            const { createLlmClient } = await import('./llm/client.js');
+            const client = createLlmClient({
+                getSettings: () => settings,
+                getContext: () => (typeof SillyTavern !== 'undefined' && SillyTavern.getContext?.()) || {},
+            });
+            const result = await client.request({
+                type: 'image_gen',
+                systemPrompt: 'Reply with exactly one line: OK.',
+                userPrompt: 'Reply with: OK',
+                signal: AbortSignal.timeout(30000),
+            });
+            showResult(llmResult, `Test OK (${result.elapsedMs.toFixed(0)}ms): ${result.text.slice(0, 200)}`, false);
+        } catch (err) {
+            showResult(llmResult, `Test failed: ${err?.message ?? err}`, true);
+        } finally {
+            llmTestBtn.disabled = false;
+        }
+    });
+
+    // Request mapping
+    if (llmMapApi) llmMapApi.addEventListener('change', () => {
+        if (!settings.llm.requestMapping) settings.llm.requestMapping = {};
+        if (!settings.llm.requestMapping.image_gen) settings.llm.requestMapping.image_gen = {};
+        settings.llm.requestMapping.image_gen.apiProfileId = llmMapApi.value;
+        save();
+    });
+    if (llmMapCtx) llmMapCtx.addEventListener('change', () => {
+        if (!settings.llm.requestMapping) settings.llm.requestMapping = {};
+        if (!settings.llm.requestMapping.image_gen) settings.llm.requestMapping.image_gen = {};
+        settings.llm.requestMapping.image_gen.contextProfileId = llmMapCtx.value;
+        save();
+    });
+
+    refreshLlmProfileSelects();
+    refreshContextProfileSelect();
+    syncLlmFetchRows();
+
+    // ================= Log Tab Wiring =================
+    const logLimit = $('if_log_limit');
+    const logRefresh = $('if_log_refresh');
+    const logClear = $('if_log_clear');
+    const logEntries = $('if_log_entries');
+    const logTasksRefresh = $('if_log_tasks_refresh');
+    const logTasks = $('if_log_tasks');
+
+    if (logLimit) {
+        logLimit.value = settings.generation?.logLimit ?? 50;
+        logLimit.addEventListener('change', () => {
+            settings.generation.logLimit = Math.max(1, Number(logLimit.value) || 50);
+            save();
+        });
+    }
+
+    // Log/prompt text is user- or LLM-controlled: always escape before
+    // interpolating into innerHTML.
+    function escapeHtml(value) {
+        return String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+
+    function renderLogEntries() {
+        if (!logEntries) return;
+        const log = genLog ?? [];
+        if (!log.length) { logEntries.textContent = 'No entries yet.'; return; }
+        logEntries.innerHTML = log.slice().reverse().map(e => {
+            const time = new Date(e.timestamp).toLocaleTimeString();
+            const body = e.content ?? e.prompt ?? '';
+            const detail = body ? `: ${escapeHtml(String(body).slice(0, 120))}` : '';
+            const method = e.method ? ` [${escapeHtml(e.method)}]` : '';
+            const error = e.error ? ` ⚠ ${escapeHtml(String(e.error).slice(0, 100))}` : '';
+            return `<div class="if-image-log-entry"><span class="if-image-log-time">${time}</span> <span class="if-image-log-type">${escapeHtml(e.type)}</span>${method}${detail}${error}</div>`;
+        }).join('');
+    }
+
+    if (logRefresh) logRefresh.addEventListener('click', renderLogEntries);
+    if (logClear) logClear.addEventListener('click', () => {
+        if (genLog) genLog.length = 0;
+        renderLogEntries();
+    });
+
+    function renderTaskList() {
+        if (!logTasks || !getQueue) return;
+        const queue = getQueue();
+        if (!queue || typeof queue.listTasks !== 'function') {
+            logTasks.textContent = 'Queue unavailable.';
+            return;
+        }
+        const tasks = queue.listTasks();
+        if (!tasks.length) { logTasks.textContent = 'No tasks.'; return; }
+        logTasks.innerHTML = tasks.map(t => {
+            const promptText = typeof t.prompt === 'object' && t.prompt?.prompt
+                ? String(t.prompt.prompt).slice(0, 80)
+                : String(t.prompt ?? '').slice(0, 80);
+            return `<div class="if-image-log-entry">
+                <span class="if-image-log-type">${escapeHtml(t.status)}</span> ${escapeHtml(t.id)}: ${escapeHtml(promptText)}
+                ${t.status === 'running' || t.status === 'queued' ? `<button class="ifimg-retry menu_button" data-task-id="${escapeHtml(t.id)}">Cancel</button>` : ''}
+            </div>`;
+        }).join('');
+        // Wire cancel buttons
+        logTasks.querySelectorAll('[data-task-id]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const id = btn.dataset.taskId;
+                queue.cancelTask(id);
+                renderTaskList();
+            });
+        });
+    }
+    if (logTasksRefresh) logTasksRefresh.addEventListener('click', renderTaskList);
 
     return el;
 }

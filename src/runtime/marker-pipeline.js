@@ -31,6 +31,12 @@
  * @param {(slot, doc, objectUrl, actions?) => Node} deps.renderImageFrame
  * @param {(doc, src) => () => void} deps.openLightbox
  * @param {(root, tags, onFound) => number} deps.replaceMarkers
+ * @param {(content: string) => Promise<{entries: Array<{profileKey, envelope}>}>} [deps.rewrite]
+ *   Assist-mode LLM hook. Called AFTER the IDB restore check misses, with the
+ *   ORIGINAL marker content (entry identity/hash stays bound to the marker
+ *   text in the DOM). Must reject with code 'ABORTED' on abort; any other
+ *   rejection falls back to local compile.
+ * @param {(type: string, detail: object) => void} [deps.logEvent] - B7 log sink
  * @param {(messageId: number) => object|null} deps.getMessage
  * @param {(messageId: number) => Node|null} deps.getMessageElement
  * @param {() => object} deps.getSettings - live settings reference
@@ -41,7 +47,8 @@ export function createMarkerPipeline(deps) {
     const {
         getQueue, compile, getImagesForMessage, saveImageRecord, contentHash,
         defaultBackendKind, defaultProfileKey, notify, doc, createSlotElement, renderSlotState,
-        renderImageFrame, openLightbox, replaceMarkers, getMessage,
+        renderImageFrame, openLightbox, replaceMarkers, rewrite, logEvent,
+        getMessage,
         getMessageElement, getSettings, getCurrentChatId, setTimeoutImpl = setTimeout,
     } = deps;
 
@@ -138,9 +145,34 @@ export function createMarkerPipeline(deps) {
         };
     }
 
-    function regenerate(entry) {
+    async function regenerate(entry) {
         if (!entry?.envelope) return;
         releaseUrl(entry); // closes any open lightbox for this entry first (FIX 4)
+        // Assist/Full: re-call the LLM with previous_prompt + a variation
+        // hint so the regeneration is a genuine new take, not the same
+        // prompt with a new seed. Direct mode keeps prompt/params, seed -1.
+        const mode = getSettings().generation?.mode ?? 'direct';
+        if ((mode === 'assist' || mode === 'full') && typeof rewrite === 'function') {
+            entry.rewriting = true;
+            if (entry.slot) renderSlotState(entry.slot, { status: 'running' }, doc);
+            try {
+                const result = await rewrite(entry.content, {
+                    previousPrompt: entry.envelope.prompt,
+                    variationHint: 'Generate a different variation of this scene.',
+                });
+                entry.rewriting = false;
+                if (slots.get(entry.key) !== entry) return; // superseded during await
+                const first = result?.entries?.[0];
+                if (first?.envelope) {
+                    entry.profileKey = first.profileKey ?? entry.profileKey;
+                    entry.envelope = first.envelope;
+                }
+            } catch (err) {
+                entry.rewriting = false;
+                if (err?.code === 'ABORTED' || err?.name === 'AbortError') return;
+                console.warn('[IF Image] Regenerate rewrite failed; reusing previous prompt:', err?.message ?? err);
+            }
+        }
         const envelope = { ...entry.envelope, params: { ...entry.envelope.params, seed: -1 } };
         entry.envelope = envelope;
         const id = enqueue(entry, envelope);
@@ -220,14 +252,35 @@ export function createMarkerPipeline(deps) {
 
     let sequence = 0;
 
+    /** Merge parser-derived overrides (Full-mode <ifimage> size/negative)
+     *  into a compiled envelope without mutating the original. */
+    function applyOverrides(envelope, overrides) {
+        if (!overrides) return envelope;
+        const params = { ...envelope.params };
+        if (Number.isFinite(overrides.width) && Number.isFinite(overrides.height)) {
+            params.width = overrides.width;
+            params.height = overrides.height;
+        }
+        let negative = envelope.negative;
+        if (overrides.negative) {
+            negative = negative ? `${negative}, ${overrides.negative}` : overrides.negative;
+        }
+        return { ...envelope, negative, params };
+    }
+
     async function onMarker(marker) {
         const settings = getSettings();
         if (!settings.enabled || !settings.generation.enabled) return;
-        if (settings.generation.mode !== 'direct') {
-            console.log(`[IF Image] generation.mode="${settings.generation.mode}" is not available yet (Phase B); marker skipped.`);
+        const mode = settings.generation.mode ?? 'direct';
+        if (mode !== 'direct' && mode !== 'assist' && mode !== 'full') {
+            console.log(`[IF Image] generation.mode="${mode}" is unknown; marker skipped.`);
             return;
         }
         const key = slotKey(marker.chatId, marker.messageId, marker.swipeId, marker.occurrence);
+        // Entry identity is ALWAYS the marker text as it appears in the
+        // message (never an LLM-rewritten prompt): the DOM pass and the IDB
+        // restore check both hash the rendered marker content, so identity
+        // must match it in every mode.
         let compiled;
         try {
             compiled = compile(marker.content);
@@ -235,6 +288,7 @@ export function createMarkerPipeline(deps) {
             console.error('[IF Image] compile failed:', err?.message ?? err);
             return;
         }
+        compiled = { ...compiled, envelope: applyOverrides(compiled.envelope, marker.overrides) };
 
         sequence += 1;
         const hash = contentHash(marker.content);
@@ -255,6 +309,7 @@ export function createMarkerPipeline(deps) {
             taskId: null,
             objectUrl: null,
             pendingError: null,
+            rewriting: false,
         };
         // Registered synchronously (before the IDB await below) so a
         // concurrent DOM pass or click has something to find immediately.
@@ -278,8 +333,59 @@ export function createMarkerPipeline(deps) {
 
         if (existingRecord) {
             // Restore path: a persisted image already matches this exact
-            // marker content. Do NOT generate again — the DOM pass's
-            // restoreImages() will attach it from IDB.
+            // marker content. Do NOT generate (or call the LLM) again — the
+            // DOM pass's restoreImages() will attach it from IDB.
+            scheduleDomPass(marker.chatId, marker.messageId);
+            return;
+        }
+
+        // Assist/Full mode: LLM rewrite AFTER the restore check missed, so
+        // chat revisits never re-call the LLM. `marker.final` (markers whose
+        // content is already a final prompt: Full-mode LLM-reply markers and
+        // transformed <ifimage> blocks) bypasses the rewrite.
+        if ((mode === 'assist' || mode === 'full') && typeof rewrite === 'function' && !marker.final) {
+            // Show a spinner while the LLM call runs: the DOM pass renders
+            // `rewriting` entries as 'running'.
+            entry.rewriting = true;
+            scheduleDomPass(marker.chatId, marker.messageId);
+            try {
+                const result = await rewrite(marker.content);
+                entry.rewriting = false;
+                if (slots.get(key) !== entry) { scheduleDomPass(marker.chatId, marker.messageId); return; }
+                const first = result?.entries?.[0];
+                if (first?.envelope) {
+                    if (result.entries.length > 1) {
+                        console.warn(`[IF Image] LLM returned ${result.entries.length} entries for one marker; using the first.`);
+                    }
+                    entry.profileKey = first.profileKey ?? entry.profileKey;
+                    entry.envelope = first.envelope;
+                }
+            } catch (err) {
+                entry.rewriting = false;
+                if (err?.code === 'ABORTED' || err?.name === 'AbortError') {
+                    // Chat switch or dispose: the slot map is being torn down.
+                    logEvent?.('llm_reply', { key, method: 'aborted' });
+                    return;
+                }
+                // Engine-level failures already fall back internally; this
+                // catch covers unexpected throws. Keep the local compile.
+                console.warn('[IF Image] LLM rewrite failed; using direct compile:', err?.message ?? err);
+                notify('warning', 'LLM rewrite failed; generated with direct compile instead.');
+            }
+            if (slots.get(key) !== entry) { scheduleDomPass(marker.chatId, marker.messageId); return; }
+        }
+
+        // Dry-run: log the final envelope, never enqueue.
+        if (settings.generation.dryRun === true) {
+            logEvent?.('dry_run', {
+                key,
+                prompt: entry.envelope.prompt,
+                negative: entry.envelope.negative,
+                params: entry.envelope.params,
+                profileKey: entry.profileKey,
+                backend: entry.backend,
+            });
+            notify('info', 'Dry-run: envelope logged, generation skipped.');
             scheduleDomPass(marker.chatId, marker.messageId);
             return;
         }
@@ -320,6 +426,9 @@ export function createMarkerPipeline(deps) {
                     renderImageFrame(slot, doc, entry.objectUrl, bindImageActions(entry));
                 } else if (task && task.status !== 'succeeded') {
                     renderSlotState(slot, task, doc, { onRetry: () => retry(entry) });
+                } else if (entry.rewriting) {
+                    // LLM rewrite in flight (no queue task yet): spinner.
+                    renderSlotState(slot, { status: 'running' }, doc);
                 } else if (entry.pendingError) {
                     // FIX 3: queue-full (or other pre-task) failure — always a
                     // visible failed/retry chip, never a silent blank slot.
@@ -360,6 +469,10 @@ export function createMarkerPipeline(deps) {
                 }
                 if (task) {
                     renderSlotState(target.slot, task, doc, { onRetry: () => retry(live) });
+                    continue;
+                }
+                if (live?.rewriting) {
+                    renderSlotState(target.slot, { status: 'running' }, doc);
                     continue;
                 }
                 if (live?.pendingError) {

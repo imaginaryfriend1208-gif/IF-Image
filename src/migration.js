@@ -58,6 +58,43 @@ export const migrators = [
             s.backends.comfy.connection = 'legacy_proxy';
         }
     },
+
+    // 3 → 4: promote runtime-only fields (written by the UI/pipeline in Phase
+    // A but absent from defaultSettings) into persisted defaults, and add the
+    // Phase B LLM settings. Non-destructive: existing user values always win,
+    // only missing keys are stamped.
+    (s) => {
+        // Generation runtime defaults promoted from index.js.
+        if (!s.generation) s.generation = {};
+        if (s.generation.backend === undefined) s.generation.backend = 'comfy';
+        if (s.generation.profile === undefined) s.generation.profile = 'anima';
+        if (s.generation.sceneWindow === undefined) s.generation.sceneWindow = 4;
+        else {
+            const n = Number(s.generation.sceneWindow);
+            s.generation.sceneWindow = Number.isFinite(n) ? Math.min(8, Math.max(2, n)) : 4;
+        }
+        if (s.generation.logLimit === undefined) s.generation.logLimit = 50;
+        else {
+            const n = Number(s.generation.logLimit);
+            s.generation.logLimit = Number.isFinite(n) ? Math.max(1, n) : 50;
+        }
+        if (s.generation.dryRun === undefined) s.generation.dryRun = false;
+        if (s.backends?.comfy && s.backends.comfy.proxyModel === undefined) {
+            s.backends.comfy.proxyModel = '';
+        }
+        // Phase B LLM settings.
+        if (!s.llm) {
+            s.llm = {
+                apiProfiles: [],
+                contextProfiles: [],
+                requestMapping: {},
+                defaultMethod: 'direct',
+            };
+        }
+        if (s.llm.defaultApiProfileId === undefined) s.llm.defaultApiProfileId = '';
+        if (s.llm.injectionStyle === undefined) s.llm.injectionStyle = 'compact';
+        else if (!['compact', 'xml', 'full'].includes(s.llm.injectionStyle)) s.llm.injectionStyle = 'compact';
+    },
 ];
 
 /** Current schema version = number of migrators applied from zero. */

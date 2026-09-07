@@ -18,6 +18,8 @@ import { getAllStyles, getAllPersonas } from './src/storage/presets.js';
 import { parseTriggers } from './src/prompt/triggers.js';
 import { assemblePrompt, resolveProfileKey } from './src/prompt/render.js';
 import { PROFILES } from './src/profiles.js';
+import { createEngine } from './src/llm/engine.js';
+import { parseLlmReply } from './src/llm/parser.js';
 import { event_types, eventSource } from '../../../../script.js';
 import { getContext } from '../../../st-context.js';
 
@@ -26,12 +28,7 @@ import { getContext } from '../../../st-context.js';
 /* global toastr */
 
 // ------------------------------------------------------------------
-// Runtime-only settings fields — written at UI or pipeline time but
-// absent from defaultSettings (src/settings.js is off-limits here).
-// Phase B: promote to defaultSettings + add migrator v4.
-//   settings.generation.backend  ('comfy' | 'nai') — default backend for chat gen
-//   settings.generation.profile  (PROFILE_KEYS string) — default profile
-//   settings.backends.comfy.proxyModel — selected proxy checkpoint title
+// Settings and backend clients
 // ------------------------------------------------------------------
 
 const settings = getSettings();
@@ -71,10 +68,6 @@ function messageElement(id) {
 }
 
 jQuery(async () => {
-    const drawer = renderDrawer({ settings, save: saveSettings, nai, comfy, a1111 });
-    $('#extensions_settings2').append(drawer);
-    notify('info', 'IF Image loaded. Configure backends in the extensions drawer.');
-
     // ------------------------------------------------------------------
     // Roster cache (characters/styles/persona) — refreshed on chat change.
     // Async loads are epoch-guarded so a stale load never overwrites the
@@ -120,6 +113,49 @@ jQuery(async () => {
         };
     }
 
+    // ------------------------------------------------------------------
+    // Generation log ring buffer (B7)
+    // ------------------------------------------------------------------
+    const genLog = [];
+    function logEvent(type, detail) {
+        const limit = settings.generation?.logLimit ?? 50;
+        genLog.push({ timestamp: Date.now(), type, ...detail });
+        while (genLog.length > limit) genLog.shift();
+    }
+
+    // ------------------------------------------------------------------
+    // LLM rewrite engine (B6). The pipeline calls `rewriteWithAbort` for
+    // assist/full markers; chat switch aborts every in-flight call.
+    // ------------------------------------------------------------------
+    const engine = createEngine({
+        getSettings: () => settings,
+        getContext: () => getContext(),
+        roster: () => roster,
+        substituteParams: (s) => {
+            try { return getContext().substituteParams?.(s) ?? s; } catch { return s; }
+        },
+        compile,
+        notify,
+    });
+
+    const activeLlmAborts = new Set();
+    async function rewriteWithAbort(content, opts = {}) {
+        const controller = new AbortController();
+        activeLlmAborts.add(controller);
+        logEvent('llm_request', { content: String(content).slice(0, 200) });
+        try {
+            const result = await engine.rewrite(content, { ...opts, signal: controller.signal });
+            logEvent('llm_reply', { method: result.method, entries: result.entries.length, error: result.error });
+            return result;
+        } finally {
+            activeLlmAborts.delete(controller);
+        }
+    }
+    function abortAllLlm() {
+        for (const controller of activeLlmAborts) controller.abort();
+        activeLlmAborts.clear();
+    }
+
     const pipeline = createMarkerPipeline({
         getQueue: () => queue,
         compile,
@@ -135,6 +171,8 @@ jQuery(async () => {
         renderImageFrame,
         openLightbox,
         replaceMarkers,
+        rewrite: rewriteWithAbort,
+        logEvent,
         getMessage: id => getContext().chat?.[id],
         getMessageElement: messageElement,
         getSettings: () => settings,
@@ -153,6 +191,72 @@ jQuery(async () => {
     });
 
     // ------------------------------------------------------------------
+    // Full mode: transform <ifimage> blocks in LLM replies into standard
+    // image### markers BEFORE the message renders. ST sanitizes rendered
+    // HTML through DOMPurify (MESSAGE_SANITIZE), which strips unknown tags
+    // like <ifimage> from the DOM — so blocks are read from message.mes on
+    // MESSAGE_RECEIVED (fires before render/CHARACTER_MESSAGE_RENDERED)
+    // and rewritten in place. The resulting marker carries the FINAL
+    // prompt; parser-level <size>/<negative> overrides ride along in a
+    // hash-keyed side map consumed by the onMarker wrapper below.
+    // ------------------------------------------------------------------
+    const overridesByHash = new Map(); // contentHash(prompt) -> {width,height,negative}
+    function transformIfImageBlocks(messageId) {
+        if (!settings.enabled || !settings.generation.enabled) return;
+        if (settings.generation.mode !== 'full') return;
+        const id = Number(messageId);
+        if (!Number.isSafeInteger(id) || id < 0) return;
+        const ctx = getContext();
+        const message = ctx.chat?.[id];
+        if (!message || message.is_user || message.is_system) return;
+        if (typeof message.mes !== 'string' || !/<ifimage/i.test(message.mes)) return;
+        const tags = settings.generation;
+        let changed = false;
+        // Well-formed (closed) blocks only; the defensive parser handles the
+        // inner repairs. An unclosed trailing block is left as-is.
+        const mes = message.mes.replace(/<ifimage[\s\S]*?>[\s\S]*?<\/ifimage>/gi, (block) => {
+            const entry = parseLlmReply(block)[0];
+            if (!entry?.prompt) return block;
+            // The prompt must never contain the end tag, or the marker would
+            // terminate early on render.
+            const promptText = entry.prompt.split(tags.endTag).join(' ').trim();
+            if (!promptText) return block;
+            // Bounded side map: parser-level overrides only matter for the
+            // detection pass that follows this event; old hashes are evicted.
+            if (overridesByHash.size > 64) {
+                overridesByHash.delete(overridesByHash.keys().next().value);
+            }
+            overridesByHash.set(contentHash(promptText), {
+                width: entry.width,
+                height: entry.height,
+                negative: entry.negative,
+            });
+            changed = true;
+            return `${tags.startTag} ${promptText} ${tags.endTag}`;
+        });
+        if (!changed) return;
+        message.mes = mes;
+        // Persist the transformed text so revisits render the marker (and
+        // the IDB restore path matches) without re-parsing <ifimage>.
+        try { ctx.saveChat?.(); } catch (err) { console.warn('[IF Image] saveChat after transform failed:', err?.message ?? err); }
+        logEvent('ifimage_transform', { messageId: id });
+    }
+    const onMessageReceived = (messageId) => {
+        try { transformIfImageBlocks(messageId); } catch (err) {
+            console.error('[IF Image] <ifimage> transform failed:', err?.message ?? err);
+        }
+    };
+    const receivedType = event_types.MESSAGE_RECEIVED;
+    if (receivedType) eventSource.on(receivedType, onMessageReceived);
+
+    // ------------------------------------------------------------------
+    // Drawer UI (mounted after queue/genLog/engine exist)
+    // ------------------------------------------------------------------
+    const drawer = renderDrawer({ settings, save: saveSettings, nai, comfy, a1111, genLog, getQueue: () => queue });
+    $('#extensions_settings2').append(drawer);
+    notify('info', 'IF Image loaded. Configure backends in the extensions drawer.');
+
+    // ------------------------------------------------------------------
     // Runtime registration and lifecycle.
     // ------------------------------------------------------------------
     const runtime = createMarkerRuntime({
@@ -166,25 +270,81 @@ jQuery(async () => {
             return Boolean(stream && !stream.isStopped && Number(stream.messageId) === id);
         },
         settings,
-        onMarker: pipeline.onMarker,
+        // Thin wrapper: attach Full-mode metadata, then hand off. The
+        // pipeline owns the assist/full LLM rewrite (after its IDB restore
+        // check) via the injected `rewrite` dependency.
+        onMarker: (marker) => {
+            const overrides = overridesByHash.get(contentHash(marker.content));
+            if (overrides) {
+                // Marker produced by the <ifimage> transform above: the
+                // prompt is already final; never send it back to the LLM.
+                pipeline.onMarker({ ...marker, final: true, overrides });
+                return;
+            }
+            if (settings.generation.mode === 'full') {
+                // Full mode: markers inside LLM replies are final prompts
+                // authored by the LLM; only user-typed markers get rewritten.
+                const message = getContext().chat?.[marker.messageId];
+                if (message && !message.is_user) {
+                    pipeline.onMarker({ ...marker, final: true });
+                    return;
+                }
+            }
+            pipeline.onMarker(marker);
+        },
         onChatWillChange: (previous) => {
+            abortAllLlm();
             queue.cancelAllForChat(previous);
             pipeline.forgetChat(previous);
         },
         onChatChanged: () => {
             refreshRoster();
-            // Chat load renders every message WITHOUT per-message rendered
-            // events (ST printMessages), so no DOM pass would run and markers
-            // would stay as raw text. Restore-only sweep: replace markers and
-            // re-attach persisted images; markers without records become
-            // idle placeholders (no auto-generation of old history).
             const chatId = getContext().getCurrentChatId();
             const length = getContext().chat?.length ?? 0;
             for (let i = 0; i < length; i++) pipeline.scheduleDomPass(chatId, i);
         },
-        onDispose: () => { queue.cancelAll(); },
+        onDispose: () => {
+            abortAllLlm();
+            queue.cancelAll();
+        },
     });
     runtime.register();
+
+    // ------------------------------------------------------------------
+    // Slash command /ifimg: append a marker to the last message and
+    // re-render it. The regular detection → pipeline path then creates the
+    // slot, runs the LLM rewrite (assist/full), and inserts the image —
+    // no parallel enqueue path, and the image is visible in chat.
+    // ------------------------------------------------------------------
+    try {
+        const { SlashCommandParser, SlashCommand } = getContext();
+        if (SlashCommandParser && SlashCommand) {
+            SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+                name: 'ifimg',
+                helpString: 'Append an image marker for the scene text to the last message (uses the configured mode).',
+                callback: async (_args, sceneText) => {
+                    const text = typeof sceneText === 'string' ? sceneText.trim() : '';
+                    if (!text) return 'Usage: /ifimg <scene text>';
+                    const ctx = getContext();
+                    const messageId = (ctx.chat?.length ?? 0) - 1;
+                    const message = ctx.chat?.[messageId];
+                    if (!message) return 'No message to attach the image to.';
+                    const tags = settings.generation;
+                    // The scene text must not contain the end tag, or the
+                    // marker would terminate early.
+                    const safeText = text.split(tags.endTag).join(' ').trim();
+                    message.mes = `${message.mes}\n${tags.startTag} ${safeText} ${tags.endTag}`;
+                    try { ctx.saveChat?.(); } catch (err) { console.warn('[IF Image] saveChat failed:', err?.message ?? err); }
+                    ctx.updateMessageBlock?.(messageId, message);
+                    await eventSource.emit(event_types.MESSAGE_UPDATED, messageId);
+                    return 'Image marker added.';
+                },
+                namedArgumentList: [],
+            }));
+        }
+    } catch (err) {
+        console.warn('[IF Image] Slash command registration failed:', err?.message ?? err);
+    }
 
     // Restore listener: registered AFTER the runtime so it runs after
     // detection on the same event. Handles re-renders/swipes where the
@@ -202,6 +362,7 @@ jQuery(async () => {
 
     $(window).on('beforeunload.if_image', () => {
         for (const type of restoreEvents) eventSource.removeListener(type, onRendered);
+        if (receivedType) eventSource.removeListener(receivedType, onMessageReceived);
         runtime.unregister();
         queue.dispose();
         pipeline.disposeAll();

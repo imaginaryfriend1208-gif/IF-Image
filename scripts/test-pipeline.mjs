@@ -75,7 +75,7 @@ function makeQueue() {
 }
 
 // ---- Pipeline factory ------------------------------------------------------
-function makePipeline({ records = [], full = false, currentChatId = 'A', settings } = {}) {
+function makePipeline({ records = [], full = false, currentChatId = 'A', settings, rewrite, logEvent } = {}) {
     const queue = makeQueue();
     queue.full = full;
     const rendered = [];
@@ -130,6 +130,8 @@ function makePipeline({ records = [], full = false, currentChatId = 'A', setting
         getMessageElement: () => el('DIV', 'image### scene ###'),
         getSettings: () => currentSettings,
         getCurrentChatId: () => currentChatId,
+        rewrite,
+        logEvent,
     });
     return { pipeline, queue, rendered, slots };
 }
@@ -240,12 +242,98 @@ test('FIX 5: missing generation.backend/profile fall back without throwing', asy
     assert.equal(queue._tasks.size, 1);
 });
 
-test('FIX 5: generation.mode != direct is skipped, not errored', async () => {
+test('Phase B: assist mode without a rewrite hook falls back to direct compile', async () => {
     const { pipeline, queue } = makePipeline({
         settings: { enabled: true, generation: { enabled: true, mode: 'assist' } },
     });
     await pipeline.onMarker(marker);
+    assert.equal(queue._tasks.size, 1);
+});
+
+test('Phase B: unknown generation.mode is skipped, not errored', async () => {
+    const { pipeline, queue } = makePipeline({
+        settings: { enabled: true, generation: { enabled: true, mode: 'bogus' } },
+    });
+    await pipeline.onMarker(marker);
     assert.equal(queue._tasks.size, 0);
+});
+
+// ---- Phase B: assist/full rewrite through the pipeline ---------------------
+test('Phase B: assist mode calls rewrite and enqueues the rewritten envelope', async () => {
+    const calls = [];
+    const { pipeline, queue } = makePipeline({
+        settings: { enabled: true, generation: { enabled: true, mode: 'assist', startTag: 'image###', endTag: '###' } },
+        rewrite: async (content) => {
+            calls.push(content);
+            return { entries: [{ profileKey: 'illustrious', envelope: { prompt: 'rewritten prompt', negative: 'n', params: { seed: -1, width: 640, height: 640 } } }], method: 'generateRaw' };
+        },
+    });
+    await pipeline.onMarker(marker);
+    assert.deepEqual(calls, [marker.content]);
+    assert.equal(queue._tasks.size, 1);
+    const task = [...queue._tasks.values()][0];
+    assert.equal(task.prompt.prompt, 'rewritten prompt');
+    assert.equal(task.profile, 'illustrious');
+});
+
+test('Phase B: rewrite rejection (non-abort) keeps the direct compile', async () => {
+    const { pipeline, queue } = makePipeline({
+        settings: { enabled: true, generation: { enabled: true, mode: 'assist', startTag: 'image###', endTag: '###' } },
+        rewrite: async () => { throw new Error('boom'); },
+    });
+    await pipeline.onMarker(marker);
+    assert.equal(queue._tasks.size, 1);
+    const task = [...queue._tasks.values()][0];
+    assert.equal(task.prompt.prompt, marker.content); // fallback = local compile of the marker
+});
+
+test('Phase B: rewrite abort enqueues nothing', async () => {
+    const { pipeline, queue } = makePipeline({
+        settings: { enabled: true, generation: { enabled: true, mode: 'assist', startTag: 'image###', endTag: '###' } },
+        rewrite: async () => { const err = new Error('aborted'); err.code = 'ABORTED'; throw err; },
+    });
+    await pipeline.onMarker(marker);
+    assert.equal(queue._tasks.size, 0);
+});
+
+test('Phase B: marker.final bypasses rewrite in full mode and applies overrides', async () => {
+    let rewriteCalled = false;
+    const { pipeline, queue } = makePipeline({
+        settings: { enabled: true, generation: { enabled: true, mode: 'full', startTag: 'image###', endTag: '###' } },
+        rewrite: async () => { rewriteCalled = true; return { entries: [] }; },
+    });
+    await pipeline.onMarker({ ...marker, final: true, overrides: { width: 512, height: 768, negative: 'extra neg' } });
+    assert.equal(rewriteCalled, false);
+    assert.equal(queue._tasks.size, 1);
+    const task = [...queue._tasks.values()][0];
+    assert.equal(task.prompt.params.width, 512);
+    assert.equal(task.prompt.params.height, 768);
+    assert.ok(task.prompt.negative.includes('extra neg'));
+});
+
+test('Phase B: restore hit skips the LLM entirely (no rewrite on chat revisit)', async () => {
+    let rewriteCalled = false;
+    const { pipeline, queue } = makePipeline({
+        records: [{ occurrence: 0, content: marker.content, blob: new Blob(['x']), prompt: 'p', negative: '', params: {} }],
+        settings: { enabled: true, generation: { enabled: true, mode: 'assist', startTag: 'image###', endTag: '###' } },
+        rewrite: async () => { rewriteCalled = true; return { entries: [] }; },
+    });
+    await pipeline.onMarker(marker);
+    assert.equal(rewriteCalled, false);
+    assert.equal(queue._tasks.size, 0);
+});
+
+test('Phase B: dryRun logs the envelope and never enqueues', async () => {
+    const logged = [];
+    const { pipeline, queue } = makePipeline({
+        settings: { enabled: true, generation: { enabled: true, mode: 'direct', dryRun: true, startTag: 'image###', endTag: '###' } },
+        logEvent: (type, detail) => logged.push({ type, detail }),
+    });
+    await pipeline.onMarker(marker);
+    assert.equal(queue._tasks.size, 0);
+    assert.equal(logged.length, 1);
+    assert.equal(logged[0].type, 'dry_run');
+    assert.equal(logged[0].detail.prompt, marker.content);
 });
 
 test('FIX 5: settings.enabled=false is silently skipped', async () => {

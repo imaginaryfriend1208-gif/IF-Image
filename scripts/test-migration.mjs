@@ -169,6 +169,86 @@ test('missing/corrupt comfy section is created without throwing', () => {
     assert.deepEqual(s.backends.a1111, { baseUrl: '', auth: '', checkpoint: '' });
 });
 
+// --- Test 11: v3 → v4 promotes runtime defaults and adds Phase B LLM fields ---
+test('v3 settings migrate to v4 with generation defaults, llm fields, and proxyModel', () => {
+    const v3 = {
+        settingsVersion: 3,
+        enabled: true,
+        backends: {
+            nai: { apiKey: 'pst-keep', model: 'nai-diffusion-4-5-full' },
+            comfy: { baseUrl: 'http://localhost:7861', username: 'u', password: 'p', profile: 'anima', connection: 'legacy_proxy' },
+            a1111: { baseUrl: 'https://host', auth: 'k', checkpoint: 'ckpt' },
+        },
+    };
+    const ran = runMigrations(v3);
+    assert.equal(ran, true);
+    assert.equal(v3.settingsVersion, CURRENT_VERSION);
+    // generation defaults promoted (absent in v3)
+    assert.equal(v3.generation.backend, 'comfy');
+    assert.equal(v3.generation.profile, 'anima');
+    assert.equal(v3.generation.sceneWindow, 4);
+    assert.equal(v3.generation.logLimit, 50);
+    // proxyModel stamped
+    assert.equal(v3.backends.comfy.proxyModel, '');
+    // Phase B LLM fields added
+    assert.equal(v3.llm.defaultApiProfileId, '');
+    assert.equal(v3.llm.injectionStyle, 'compact');
+    // Existing values never overwritten
+    assert.equal(v3.backends.comfy.baseUrl, 'http://localhost:7861');
+    assert.equal(v3.backends.comfy.username, 'u');
+});
+
+// --- Test 12: existing v3 user values preserved ---
+test('v3 settings with user values preserved during v3→v4 migration', () => {
+    const v3 = {
+        settingsVersion: 3,
+        enabled: true,
+        generation: { mode: 'assist', startTag: 'img[[', endTag: ']]', enabled: true, backend: 'nai', profile: 'krea2', sceneWindow: 6, logLimit: 25 },
+        backends: { nai: {}, comfy: { connection: 'a1111', proxyModel: 'my_model.safetensors' }, a1111: {} },
+        llm: { apiProfiles: [], contextProfiles: [], requestMapping: {}, defaultMethod: 'st_proxy', defaultApiProfileId: 'prof-1', injectionStyle: 'xml' },
+    };
+    const ran = runMigrations(v3);
+    assert.equal(ran, true);
+    // User values survive
+    assert.equal(v3.generation.backend, 'nai');
+    assert.equal(v3.generation.profile, 'krea2');
+    assert.equal(v3.generation.sceneWindow, 6);
+    assert.equal(v3.generation.logLimit, 25);
+    assert.equal(v3.backends.comfy.proxyModel, 'my_model.safetensors');
+    assert.equal(v3.llm.defaultApiProfileId, 'prof-1');
+    assert.equal(v3.llm.injectionStyle, 'xml');
+    assert.equal(v3.llm.defaultMethod, 'st_proxy');
+});
+
+// --- Test 13: sceneWindow clamp in v4 migration ---
+test('v3 migration clamps out-of-range sceneWindow to 2–8', () => {
+    const s = { settingsVersion: 3, generation: { sceneWindow: 15 } };
+    runMigrations(s);
+    assert.equal(s.generation.sceneWindow, 8);
+    const s2 = { settingsVersion: 3, generation: { sceneWindow: 0 } };
+    runMigrations(s2);
+    assert.equal(s2.generation.sceneWindow, 2);
+});
+
+// --- Test 14: invalid injectionStyle falls back to compact ---
+test('v3 migration sanitizes invalid injectionStyle to compact', () => {
+    const s = { settingsVersion: 3, llm: { injectionStyle: 'bogus' } };
+    runMigrations(s);
+    assert.equal(s.llm.injectionStyle, 'compact');
+});
+
+// --- Test 15: v0.1.0 through full migration to v4 ---
+test('v0.1.0 legacy reaches v4 with all defaults', () => {
+    const legacy = { enabled: true, backends: { nai: { apiKey: 'pst-test' }, comfy: { baseUrl: 'http://x', username: 'u', password: 'p', profile: 'anima' } } };
+    runMigrations(legacy);
+    assert.equal(legacy.settingsVersion, CURRENT_VERSION);
+    assert.equal(legacy.generation.backend, 'comfy');
+    assert.equal(legacy.generation.profile, 'anima');
+    assert.equal(legacy.generation.sceneWindow, 4);
+    assert.equal(legacy.backends.comfy.proxyModel, '');
+    assert.equal(legacy.llm.injectionStyle, 'compact');
+});
+
 // --- Summary ---
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
