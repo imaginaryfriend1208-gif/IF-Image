@@ -52,6 +52,15 @@ export const defaultSettings = {
         sceneWindow: 4,
         logLimit: 50,
         dryRun: false,
+        // Phase C0: per-profile generation param overrides. Empty/absent
+        // fields inherit the PROFILES[key] default; clamping happens on
+        // read (src/ui.js / index.js), never here, so a value saved under
+        // one clamp policy is never silently rewritten by a later one.
+        params: {
+            krea2: {},
+            anima: {},
+            illustrious: {},
+        },
     },
     test: {
         prompt: '',

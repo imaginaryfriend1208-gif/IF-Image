@@ -95,6 +95,22 @@ export const migrators = [
         if (s.llm.injectionStyle === undefined) s.llm.injectionStyle = 'compact';
         else if (!['compact', 'xml', 'full'].includes(s.llm.injectionStyle)) s.llm.injectionStyle = 'compact';
     },
+
+    // 4 -> 5: add the Phase C0 per-profile generation param overrides
+    // structure. Values are clamped on read (never here) so this migrator
+    // stays a pure structural stamp — see src/settings.js's comment.
+    (s) => {
+        if (!s.generation) s.generation = {};
+        if (!s.generation.params || typeof s.generation.params !== 'object') {
+            s.generation.params = { krea2: {}, anima: {}, illustrious: {} };
+        } else {
+            for (const key of ['krea2', 'anima', 'illustrious']) {
+                if (!s.generation.params[key] || typeof s.generation.params[key] !== 'object') {
+                    s.generation.params[key] = {};
+                }
+            }
+        }
+    },
 ];
 
 /** Current schema version = number of migrators applied from zero. */

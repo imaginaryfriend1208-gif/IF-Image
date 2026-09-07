@@ -249,6 +249,43 @@ test('v0.1.0 legacy reaches v4 with all defaults', () => {
     assert.equal(legacy.llm.injectionStyle, 'compact');
 });
 
+// --- Test 16 (v4 → v5): generation.params structure added (Phase C0) ---
+test('v4 settings migrate to v5 with an empty generation.params structure per profile', () => {
+    const v4 = {
+        settingsVersion: 4,
+        enabled: true,
+        generation: { mode: 'direct', startTag: 'image###', endTag: '###', enabled: true, backend: 'comfy', profile: 'anima', sceneWindow: 4, logLimit: 50, dryRun: false },
+        backends: { nai: {}, comfy: { connection: 'legacy_proxy', proxyModel: '' }, a1111: {} },
+        llm: { apiProfiles: [], contextProfiles: [], requestMapping: {}, defaultMethod: 'direct', defaultApiProfileId: '', injectionStyle: 'compact' },
+    };
+    const ran = runMigrations(v4);
+    assert.equal(ran, true);
+    assert.equal(v4.settingsVersion, CURRENT_VERSION);
+    assert.deepEqual(v4.generation.params, { krea2: {}, anima: {}, illustrious: {} });
+});
+
+// --- Test 17: existing generation.params values survive v4→v5 migration ---
+test('v4→v5 migration preserves existing generation.params overrides', () => {
+    const v4 = {
+        settingsVersion: 4,
+        generation: { mode: 'direct', params: { anima: { width: 1024, steps: 24 } } },
+    };
+    runMigrations(v4);
+    assert.equal(v4.generation.params.anima.width, 1024);
+    assert.equal(v4.generation.params.anima.steps, 24);
+    // Missing profile keys are still filled in as empty objects.
+    assert.deepEqual(v4.generation.params.krea2, {});
+    assert.deepEqual(v4.generation.params.illustrious, {});
+});
+
+// --- Test 18: v0.1.0 through full migration reaches v5 with generation.params ---
+test('v0.1.0 legacy reaches v5 with generation.params present', () => {
+    const legacy = { enabled: true, backends: { nai: { apiKey: 'pst-test' }, comfy: { baseUrl: 'http://x', username: 'u', password: 'p', profile: 'anima' } } };
+    runMigrations(legacy);
+    assert.equal(legacy.settingsVersion, CURRENT_VERSION);
+    assert.deepEqual(legacy.generation.params, { krea2: {}, anima: {}, illustrious: {} });
+});
+
 // --- Summary ---
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
