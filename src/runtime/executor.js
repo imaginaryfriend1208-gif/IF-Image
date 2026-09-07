@@ -5,8 +5,12 @@
 //
 // The taskSnapshot.prompt field carries a compiled envelope:
 //   { prompt: string, negative: string,
-//     params: { width, height, steps, cfg, seed, sampler? },
+//     params: { width, height, steps, cfg, seed,
+//               checkpoint?, sampler?, scheduler? },  // R2: a1111 only
 //     characters?: string[] }  // C8 per-character strings; NAI-only
+// params.checkpoint is the checkpoint TITLE captured at compile time so a
+// task/regeneration reuses the same model even if settings change later; it
+// is still validated against fresh discovery here before every generation.
 // The taskSnapshot.backend field is { kind: 'comfy' | 'a1111' | 'nai' }.
 // The taskSnapshot.profile field is a profile key string (e.g. 'anima').
 //
@@ -101,17 +105,23 @@ export function createExecutor({ nai, comfy, a1111, getSettings }) {
             const resolvedSeed = typeof info?.seed === 'number' ? info.seed : seed;
             result = { blob, seed: resolvedSeed, width, height, backend: 'comfy', profileKey, elapsedMs: performance.now() - startedAt };
         } else if (kind === 'a1111') {
-            // Fresh discovery per task to resolve checkpoint against the live
-            // model list — never inferred from dialect/profile names.
+            // R2: the envelope's checkpoint (captured at compile/record time)
+            // wins; fall back to the current settings selection. Still
+            // resolved against fresh per-task discovery — never inferred
+            // from dialect/profile names.
+            const requested = (typeof params.checkpoint === 'string' && params.checkpoint)
+                || settings.generation?.checkpoint
+                || settings.backends.a1111.checkpoint
+                || '';
             const models = await a1111.models({ signal });
-            const checkpoint = resolveCheckpoint(models, settings.backends.a1111.checkpoint);
+            const checkpoint = resolveCheckpoint(models, requested);
             if (!checkpoint) {
-                throw Object.assign(
-                    new Error('No valid checkpoint for AUTOMATIC1111. Open Backends, click Refresh Models, and select a checkpoint.'),
-                    { code: 'A1111_CONFIG' },
-                );
+                const message = requested
+                    ? `Checkpoint "${requested}" is no longer offered by the server. Open Backends → Test connection and pick another.`
+                    : 'No checkpoint selected for AUTOMATIC1111. Open Backends, click Refresh Models, and select a checkpoint.';
+                throw Object.assign(new Error(message), { code: 'EXECUTOR_CONFIG' });
             }
-            const { image: blob, info } = await a1111.txt2img({
+            const body = {
                 prompt,
                 negative_prompt: negative,
                 checkpoint,
@@ -120,9 +130,12 @@ export function createExecutor({ nai, comfy, a1111, getSettings }) {
                 height,
                 steps,
                 cfg_scale: cfg,
-            }, { signal });
+            };
+            if (typeof params.sampler === 'string' && params.sampler) body.sampler_name = params.sampler;
+            if (typeof params.scheduler === 'string' && params.scheduler) body.scheduler = params.scheduler;
+            const { image: blob, info } = await a1111.txt2img(body, { signal });
             const resolvedSeed = typeof info?.seed === 'number' ? info.seed : seed;
-            result = { blob, seed: resolvedSeed, width, height, backend: 'a1111', profileKey, elapsedMs: performance.now() - startedAt };
+            result = { blob, seed: resolvedSeed, width, height, backend: 'a1111', profileKey, checkpoint, elapsedMs: performance.now() - startedAt };
         } else {
             throw Object.assign(new Error(`Unknown backend kind "${kind}". Expected 'comfy', 'nai', or 'a1111'.`), { code: 'EXECUTOR_CONFIG' });
         }

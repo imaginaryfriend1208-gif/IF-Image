@@ -81,13 +81,86 @@ test('a1111 dispatch: resolves checkpoint from fresh discovery', async () => {
     assert.equal(calls[0][0], 'a1111');
     assert.equal(calls[0][1].checkpoint, 'ckpt-a');
     assert.equal(result.seed, 7);
+    assert.equal(result.checkpoint, 'ckpt-a', 'R2: result carries the resolved checkpoint');
 });
 
-test('a1111 with stale checkpoint fails before txt2img', async () => {
+test('a1111 with stale checkpoint fails before txt2img with a named message', async () => {
     const { clients, calls } = makeClients();
     const execute = createExecutor({ ...clients, getSettings: () => ({ backends: { ...settings().backends, a1111: { checkpoint: 'gone' } } }) });
-    await assert.rejects(execute(task('a1111'), new AbortController().signal), err => err.code === 'A1111_CONFIG');
+    await assert.rejects(execute(task('a1111'), new AbortController().signal), err => {
+        assert.equal(err.code, 'EXECUTOR_CONFIG');
+        assert.match(err.message, /"gone" is no longer offered by the server/);
+        assert.match(err.message, /Test connection/);
+        return true;
+    });
     assert.equal(calls.length, 0);
+});
+
+// ---- R2: envelope checkpoint/sampler/scheduler ------------------------------
+
+const r2task = (params) => ({
+    id: 't2',
+    prompt: { ...envelope, params: { ...envelope.params, ...params } },
+    backend: { kind: 'a1111' },
+    profile: 'anima',
+});
+
+test('R2: params.checkpoint is preferred over settings checkpoints', async () => {
+    const { clients, calls } = makeClients({
+        a1111: {
+            models: async () => [
+                { title: 'ckpt-a', model_name: 'ckpt-a', filename: null },
+                { title: 'ckpt-envelope', model_name: 'ckpt-envelope', filename: null },
+            ],
+            txt2img: async (body, opts) => { calls.push(['a1111', body, opts]); return { image: blob(), info: { seed: 7 } }; },
+        },
+    });
+    const execute = createExecutor({
+        ...clients,
+        getSettings: () => ({ backends: settings().backends, generation: { checkpoint: 'ckpt-a' } }),
+    });
+    const result = await execute(r2task({ checkpoint: 'ckpt-envelope' }), new AbortController().signal);
+    assert.equal(calls[0][1].checkpoint, 'ckpt-envelope');
+    assert.equal(result.checkpoint, 'ckpt-envelope');
+});
+
+test('R2: generation.checkpoint is used when the envelope has none', async () => {
+    const { clients, calls } = makeClients({
+        a1111: {
+            models: async () => [{ title: 'gen-choice', model_name: 'gen-choice', filename: null }],
+            txt2img: async (body, opts) => { calls.push(['a1111', body, opts]); return { image: blob(), info: { seed: 7 } }; },
+        },
+    });
+    const execute = createExecutor({
+        ...clients,
+        getSettings: () => ({ backends: { ...settings().backends, a1111: { checkpoint: 'old-field' } }, generation: { checkpoint: 'gen-choice' } }),
+    });
+    await execute(task('a1111'), new AbortController().signal);
+    assert.equal(calls[0][1].checkpoint, 'gen-choice');
+});
+
+test('R2: unresolved envelope checkpoint throws EXECUTOR_CONFIG naming the title', async () => {
+    const { clients, calls } = makeClients();
+    const execute = createExecutor({ ...clients, getSettings: settings });
+    await assert.rejects(execute(r2task({ checkpoint: 'vanished-model' }), new AbortController().signal), err => {
+        assert.equal(err.code, 'EXECUTOR_CONFIG');
+        assert.match(err.message, /"vanished-model" is no longer offered/);
+        return true;
+    });
+    assert.equal(calls.length, 0);
+});
+
+test('R2: sampler/scheduler are forwarded as sampler_name/scheduler when present', async () => {
+    const { clients, calls } = makeClients();
+    const execute = createExecutor({ ...clients, getSettings: settings });
+    await execute(r2task({ checkpoint: 'ckpt-a', sampler: 'Euler a', scheduler: 'karras' }), new AbortController().signal);
+    assert.equal(calls[0][1].sampler_name, 'Euler a');
+    assert.equal(calls[0][1].scheduler, 'karras');
+    // Absent -> not sent at all.
+    calls.length = 0;
+    await execute(r2task({ checkpoint: 'ckpt-a' }), new AbortController().signal);
+    assert.equal('sampler_name' in calls[0][1], false);
+    assert.equal('scheduler' in calls[0][1], false);
 });
 
 test('abort mid-flight rejects', async () => {

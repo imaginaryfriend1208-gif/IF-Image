@@ -19,6 +19,7 @@ import { getAllOutfits } from './src/storage/outfits.js';
 import { resolveActiveCharacters } from './src/prompt/binding.js';
 import { parseTriggers } from './src/prompt/triggers.js';
 import { assemblePrompt, resolveProfileKey, mergeProfileParams, applyMarkerParamOverrides } from './src/prompt/render.js';
+import { resolveCheckpointProfile, mergeParams } from './src/backends/checkpoint-profiles.js';
 import { cleanupEnvelope } from './src/prompt/cleanup.js';
 import { applyReplaceRules } from './src/prompt/replace.js';
 import { PROFILES } from './src/profiles.js';
@@ -127,7 +128,17 @@ jQuery(async () => {
             outfits: roster.outfits,
             onFallback: (tier, token) => notify('warning', `Character trigger "$${token}" resolved via ${tier} fallback (not active for this chat/card).`),
         });
-        const { profileKey } = resolveProfileKey(parsed.dialectOverride, defaultProfileKey());
+        // R2: with the A1111-compatible SD connection, the selected
+        // checkpoint's profile becomes the configured default (still beaten
+        // by a marker {{dialect}} override). The checkpoint itself is NEVER
+        // derived from the profile — only the reverse.
+        const backendKind = defaultBackendKind();
+        const checkpointTitle = backendKind === 'a1111'
+            ? (settings.generation?.checkpoint || settings.backends.a1111.checkpoint || '')
+            : '';
+        const checkpointProfile = checkpointTitle ? resolveCheckpointProfile(settings, checkpointTitle) : null;
+        const configuredProfileKey = checkpointProfile?.profileKey ?? defaultProfileKey();
+        const { profileKey } = resolveProfileKey(parsed.dialectOverride, configuredProfileKey);
         const baseProfile = PROFILES[profileKey] ?? PROFILES.anima;
         const effectiveProfile = mergeProfileParams(baseProfile, settings.generation?.params?.[profileKey]);
         const assembled = assemblePrompt(parsed, baseProfile.dialect, effectiveProfile);
@@ -147,7 +158,23 @@ jQuery(async () => {
         envelope = applyReplaceRules(envelope, rules, 'final', ruleCtx);
 
         const params = { ...envelope.params, seed: -1 };
-        applyMarkerParamOverrides(params, parsed.paramOverrides);
+        if (backendKind === 'a1111' && checkpointTitle) {
+            // R2: five-layer numeric precedence (PROFILES < settings params
+            // < checkpoint profile < marker JSON; LLM <size> is applied
+            // later by the pipeline's applyOverrides). checkpoint/sampler/
+            // scheduler ride on params so they survive the queue's declared
+            // snapshot projection (prompt envelope is cloned whole).
+            const merged = mergeParams({
+                profileKey,
+                checkpointTitle,
+                settings,
+                markerOverrides: parsed.paramOverrides,
+            });
+            Object.assign(params, merged);
+        } else {
+            // Legacy proxy and NAI paths: unchanged C0 behavior.
+            applyMarkerParamOverrides(params, parsed.paramOverrides);
+        }
         return {
             profileKey,
             envelope: {
@@ -271,6 +298,16 @@ jQuery(async () => {
         const backendKind = record.backend || defaultBackendKind();
         const profileKey = record.profileKey || defaultProfileKey();
         const params = { ...(record.params || {}), seed: -1 };
+        // R2: a regenerated image must use the same model as the original.
+        // Fall back to the current selection only when the record has none
+        // (pre-R2 records).
+        if (backendKind === 'a1111') {
+            params.checkpoint = record.checkpoint
+                || params.checkpoint
+                || settings.generation?.checkpoint
+                || settings.backends.a1111.checkpoint
+                || '';
+        }
         const characters = Array.isArray(record.characters) ? record.characters : [];
         const taskId = queue.addTask({
             chatId: record.chatId,
@@ -296,6 +333,7 @@ jQuery(async () => {
             characters,
             backend: result.backend,
             profileKey: result.profileKey,
+            checkpoint: result.checkpoint ?? params.checkpoint,
             seed: result.seed,
             blob: result.blob,
             width: result.width,

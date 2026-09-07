@@ -236,6 +236,9 @@ export function createMarkerPipeline(deps) {
                     characters: entry.envelope.characters,
                     backend: result.backend,
                     profileKey: result.profileKey,
+                    // R2: the checkpoint actually used (executor-resolved),
+                    // falling back to the compiled envelope's request.
+                    checkpoint: result.checkpoint ?? entry.envelope.params?.checkpoint,
                     seed: result.seed,
                     blob: result.blob,
                     width: result.width,
@@ -526,7 +529,13 @@ export function createMarkerPipeline(deps) {
                     envelope: {
                         prompt: record.prompt,
                         negative: record.negative,
-                        params: { ...record.params },
+                        // R2: rehydrate the record's checkpoint into the
+                        // envelope params so a retry/regenerate from this
+                        // restored entry reuses the SAME model.
+                        params: {
+                            ...record.params,
+                            ...(record.checkpoint ? { checkpoint: record.checkpoint } : {}),
+                        },
                         characters: Array.isArray(record.characters) ? [...record.characters] : [],
                     },
                     slot: target.slot,
@@ -537,6 +546,17 @@ export function createMarkerPipeline(deps) {
                 slots.set(target.key, entry);
             } else {
                 entry.slot = target.slot;
+                // R2: the entry may have been registered by onMarker with a
+                // freshly compiled envelope (current settings). A restored
+                // image must regenerate with the SAME model it was made
+                // with, so the record's checkpoint wins over the compile-
+                // time one.
+                if (record.checkpoint && entry.envelope?.params) {
+                    entry.envelope = {
+                        ...entry.envelope,
+                        params: { ...entry.envelope.params, checkpoint: record.checkpoint },
+                    };
+                }
             }
             entry.recordId = record.id;
             showImage(entry, record.blob);

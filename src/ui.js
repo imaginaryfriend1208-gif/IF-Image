@@ -3,6 +3,7 @@
 
 import { NAI_MODELS } from './backends/nai.js';
 import { resolveCheckpoint } from './backends/a1111.js';
+import { resolveCheckpointProfile, mergeParams } from './backends/checkpoint-profiles.js';
 import { PROFILES, PROFILE_KEYS, applyProfile } from './profiles.js';
 import { getAllCharacters, saveCharacter, removeCharacter, createDefaultCharacter, emptyBooruDetail } from './storage/chars.js';
 import { getAllPersonas, savePersona, removePersona, getAllStyles, saveStyle, removeStyle, createDefaultPersona, createDefaultStyle, getReplaceRules, saveReplaceRules } from './storage/presets.js';
@@ -1214,6 +1215,24 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     testCheckpoint.addEventListener('change', () => {
         if (currentSdConnection() === 'a1111') {
             settings.backends.a1111.checkpoint = testCheckpoint.value;
+            // R2: prefill W/H/steps/cfg from the checkpoint's effective
+            // params (PROFILES < settings params < checkpoint profile).
+            // The user can still edit any field before Generate.
+            const title = testCheckpoint.value;
+            const cp = title ? resolveCheckpointProfile(settings, title) : null;
+            if (cp) {
+                const merged = mergeParams({ profileKey: cp.profileKey, checkpointTitle: title, settings });
+                settings.test.width = merged.width;
+                settings.test.height = merged.height;
+                settings.test.steps = merged.steps;
+                settings.test.cfg = merged.cfg;
+                settings.test.profile = cp.profileKey;
+                testWidth.value = merged.width;
+                testHeight.value = merged.height;
+                testSteps.value = merged.steps;
+                testCfg.value = merged.cfg;
+                testProfile.value = cp.profileKey;
+            }
         } else {
             settings.backends.comfy.proxyModel = testCheckpoint.value;
         }

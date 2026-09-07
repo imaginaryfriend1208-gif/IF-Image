@@ -8,7 +8,7 @@ import { STORES, getDB, getAllItems, getItem, putItem, deleteItem } from './idb.
  * Save a generation result as an image record.
  * The Blob is stored natively in IndexedDB.
  * @param {{ chatId, messageId, swipeId, occurrence, prompt, negative, params,
- *           backend, profileKey, seed, blob, width, height, content }} record
+ *           backend, profileKey, checkpoint?, seed, blob, width, height, content }} record
  * @returns {Promise<string>} the new record id
  */
 export async function saveImageRecord(record) {
@@ -28,6 +28,9 @@ export async function saveImageRecord(record) {
         characters: Array.isArray(record.characters) ? [...record.characters] : [],
         backend: record.backend ?? '',
         profileKey: record.profileKey ?? '',
+        // R2: checkpoint title used for this generation (a1111 backend);
+        // undefined for backends without a checkpoint concept.
+        checkpoint: typeof record.checkpoint === 'string' && record.checkpoint ? record.checkpoint : undefined,
         seed: record.seed ?? -1,
         blob: record.blob,               // Blob stored directly
         width: record.width ?? 0,

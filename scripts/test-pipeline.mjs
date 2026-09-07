@@ -352,6 +352,84 @@ test('FIX 5: generation.enabled=false is silently skipped', async () => {
     assert.equal(queue._tasks.size, 0);
 });
 
+// ---- R2: checkpoint carried through save/restore ---------------------------
+test('R2: successful task saves the record with the executor-resolved checkpoint', async () => {
+    const saved = [];
+    const queue = makeQueue();
+    const pipeline = createMarkerPipeline({
+        getQueue: () => queue,
+        setTimeoutImpl: (fn) => { fn(); return 0; },
+        compile: c => ({ profileKey: 'anima', envelope: { prompt: c, negative: '', params: { seed: -1, checkpoint: 'requested-ckpt' } } }),
+        getImagesForMessage: async () => [],
+        saveImageRecord: async (record) => { saved.push(record); return 'rec-9'; },
+        contentHash,
+        defaultBackendKind: () => 'a1111', defaultProfileKey: () => 'anima',
+        notify: () => {}, doc,
+        createSlotElement: d => d.createElement('span'),
+        renderSlotState: () => {}, renderImageFrame: () => {},
+        openLightbox: () => () => {}, replaceMarkers: () => 0,
+        getMessage: () => ({ swipe_id: 0 }), getMessageElement: () => el('DIV', ''),
+        getSettings: () => ({ enabled: true, generation: { enabled: true, mode: 'direct' } }),
+        getCurrentChatId: () => 'A',
+    });
+    await pipeline.onMarker(marker);
+    const taskId = [...queue._tasks.keys()][0];
+    await pipeline.onTaskStateChange({
+        id: taskId, status: 'succeeded',
+        result: { blob: new Blob(['img']), backend: 'a1111', profileKey: 'anima', checkpoint: 'resolved-ckpt', seed: 5, width: 832, height: 1216 },
+    });
+    assert.equal(saved.length, 1);
+    assert.equal(saved[0].checkpoint, 'resolved-ckpt', 'executor-resolved checkpoint wins');
+    assert.equal(saved[0].params.checkpoint, 'requested-ckpt', 'envelope params keep the request');
+});
+
+test('R2: restore rehydrates the record checkpoint; regenerate reuses it', async () => {
+    const record = {
+        id: 'rec-1', chatId: 'A', messageId: 0, swipeId: 0, occurrence: 0,
+        content: 'scene', prompt: 'p', negative: '', params: { width: 832 },
+        backend: 'a1111', profileKey: 'anima', checkpoint: 'saved-ckpt', blob: new Blob(['x']),
+    };
+    const queue = makeQueue();
+    let frameActions = null;
+    const pipeline = createMarkerPipeline({
+        getQueue: () => queue,
+        setTimeoutImpl: (fn) => { fn(); return 0; },
+        compile: c => ({ profileKey: 'anima', envelope: { prompt: c, negative: '', params: { seed: -1 } } }),
+        getImagesForMessage: async () => [record],
+        saveImageRecord: async () => 'rec-2',
+        contentHash,
+        defaultBackendKind: () => 'a1111', defaultProfileKey: () => 'anima',
+        notify: () => {}, doc,
+        createSlotElement: (d, info) => {
+            const s = d.createElement('span');
+            s.dataset.ifimgOcc = String(info.occurrence);
+            return s;
+        },
+        renderSlotState: () => {},
+        renderImageFrame: (slot, d, url, actions) => { frameActions = actions; },
+        openLightbox: () => () => {},
+        replaceMarkers: (root, tags, onFound) => {
+            const slot = onFound({ occurrence: 0, content: 'scene' });
+            root.childNodes = [slot];
+            return 1;
+        },
+        getMessage: () => ({ swipe_id: 0 }),
+        getMessageElement: () => el('DIV', 'image### scene ###'),
+        getSettings: () => ({ enabled: true, generation: { enabled: true, mode: 'direct', startTag: 'image###', endTag: '###' } }),
+        getCurrentChatId: () => 'A',
+    });
+    await pipeline.onMarker(marker);          // restore hit: no task
+    assert.equal(queue._tasks.size, 0, 'restore alone never enqueues');
+    pipeline.attachSlots('A', 0);             // restoreImages builds the entry
+    await new Promise(r => setTimeout(r, 10)); // let the async restore settle
+    assert.ok(frameActions, 'restored image frame was rendered with actions');
+    await frameActions.onRegen();             // the C10 hover Regen button
+    assert.equal(queue._tasks.size, 1, 'regenerate enqueues one task');
+    const regen = [...queue._tasks.values()][0];
+    assert.equal(regen.prompt.params.checkpoint, 'saved-ckpt', 'regen reuses the record checkpoint');
+    assert.equal(regen.prompt.params.seed, -1, 'regen uses a fresh seed');
+});
+
 // ---- Snapshot never contains credentials -----------------------------------
 test('task snapshot never contains API keys or auth strings', async () => {
     const { pipeline, queue } = makePipeline({});
