@@ -360,6 +360,104 @@ export class A1111Client {
         return data;
     }
 
+    /** GET /sdapi/v1/schedulers — raw array. Optional endpoint (Forge/new
+     *  A1111 only); callers must tolerate a 404. */
+    async schedulers({ signal } = {}) {
+        const response = await this._request('/sdapi/v1/schedulers', { signal });
+        const data = await this._json(response, '/sdapi/v1/schedulers');
+        if (!Array.isArray(data)) {
+            throw new A1111Error('A1111_MALFORMED', '/sdapi/v1/schedulers did not return a JSON array.');
+        }
+        return data;
+    }
+
+    /**
+     * GET /internal/models — comfy-cloud-forge enrichment endpoint:
+     * [{ id, title, family: 'krea2'|'anima'|'illustrious', checkpointFile,
+     *    defaults: { steps, cfg, sampler, scheduler, width, height } }].
+     * Strictly optional: plain A1111 hosts do not have it; callers must
+     * tolerate ANY failure (401/404/network) and proceed without it.
+     */
+    async internalModels({ signal } = {}) {
+        const response = await this._request('/internal/models', { signal });
+        const data = await this._json(response, '/internal/models');
+        if (!Array.isArray(data)) {
+            throw new A1111Error('A1111_MALFORMED', '/internal/models did not return a JSON array.');
+        }
+        return data;
+    }
+
+    /**
+     * Full discovery pass (R1): models + samplers + schedulers +
+     * /internal/models enrichment in parallel. Models are required — a
+     * models() failure rejects. Samplers/schedulers failures yield empty
+     * lists; /internal/models failures are ignored entirely.
+     *
+     * Enrichment matching: exact title first, then checkpointFile ==
+     * model_name or filename. Matched entries gain `family` and mapped
+     * `defaults` ({width,height,steps,cfg,sampler,scheduler}).
+     * @param {{signal?: AbortSignal}} [options]
+     * @returns {Promise<{models: Array<{title: string, modelName: string,
+     *   family?: string, defaults?: object}>, samplers: string[],
+     *   schedulers: string[], enrichment: 'internal'|'none'}>}
+     */
+    async discover({ signal } = {}) {
+        const [modelsRes, samplersRes, schedulersRes, internalRes] = await Promise.allSettled([
+            this.models({ signal }),
+            this.samplers({ signal }),
+            this.schedulers({ signal }),
+            this.internalModels({ signal }),
+        ]);
+        if (modelsRes.status === 'rejected') throw modelsRes.reason;
+
+        const asName = entry => {
+            if (typeof entry === 'string') return entry;
+            if (entry && typeof entry.name === 'string') return entry.name;
+            return null;
+        };
+        const samplers = samplersRes.status === 'fulfilled'
+            ? samplersRes.value.map(asName).filter(Boolean)
+            : [];
+        const schedulers = schedulersRes.status === 'fulfilled'
+            ? schedulersRes.value.map(s => asName(s) ?? (s && typeof s.label === 'string' ? s.label : null)).filter(Boolean)
+            : [];
+
+        const internal = internalRes.status === 'fulfilled' ? internalRes.value : null;
+        const byTitle = new Map();
+        const byFile = new Map();
+        if (internal) {
+            for (const entry of internal) {
+                if (!entry || typeof entry !== 'object') continue;
+                if (typeof entry.title === 'string' && entry.title) byTitle.set(entry.title, entry);
+                if (typeof entry.checkpointFile === 'string' && entry.checkpointFile) byFile.set(entry.checkpointFile, entry);
+            }
+        }
+        const mapDefaults = d => {
+            if (!d || typeof d !== 'object') return undefined;
+            const out = {};
+            if (Number.isFinite(Number(d.width))) out.width = Number(d.width);
+            if (Number.isFinite(Number(d.height))) out.height = Number(d.height);
+            if (Number.isFinite(Number(d.steps))) out.steps = Number(d.steps);
+            if (Number.isFinite(Number(d.cfg))) out.cfg = Number(d.cfg);
+            if (typeof d.sampler === 'string' && d.sampler) out.sampler = d.sampler;
+            if (typeof d.scheduler === 'string' && d.scheduler) out.scheduler = d.scheduler;
+            return Object.keys(out).length ? out : undefined;
+        };
+        const models = modelsRes.value.map(m => {
+            const match = byTitle.get(m.title)
+                ?? byFile.get(m.model_name)
+                ?? (m.filename ? byFile.get(m.filename) : undefined);
+            const out = { title: m.title, modelName: m.model_name };
+            if (match) {
+                if (typeof match.family === 'string' && match.family) out.family = match.family;
+                const defaults = mapDefaults(match.defaults);
+                if (defaults) out.defaults = defaults;
+            }
+            return out;
+        });
+        return { models, samplers, schedulers, enrichment: internal ? 'internal' : 'none' };
+    }
+
     /**
      * Connectivity + credential check: GET options and models.
      * Never writes options or switches the server model. A samplers failure

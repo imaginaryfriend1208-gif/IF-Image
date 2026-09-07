@@ -118,8 +118,12 @@ test('v2 → v3 adds a1111 backend and comfy.connection without touching legacy 
     const ran = runMigrations(v2);
     assert.equal(ran, true);
     assert.equal(v2.settingsVersion, CURRENT_VERSION);
-    // New a1111 section exists and starts blank.
-    assert.deepEqual(v2.backends.a1111, { baseUrl: '', auth: '', checkpoint: '' });
+    // New a1111 section exists and starts blank (v6 adds discovery fields).
+    assert.deepEqual(v2.backends.a1111, {
+        baseUrl: '', auth: '', checkpoint: '',
+        discovery: { at: 0, models: [], samplers: [], schedulers: [] },
+        checkpointProfiles: {},
+    });
     // Connection defaults to the legacy proxy.
     assert.equal(v2.backends.comfy.connection, 'legacy_proxy');
     // Legacy proxy URL/credentials survive byte-for-byte.
@@ -155,7 +159,11 @@ test('v0.1.0 legacy settings receive the a1111 section through full migration', 
         },
     };
     runMigrations(legacy);
-    assert.deepEqual(legacy.backends.a1111, { baseUrl: '', auth: '', checkpoint: '' });
+    assert.deepEqual(legacy.backends.a1111, {
+        baseUrl: '', auth: '', checkpoint: '',
+        discovery: { at: 0, models: [], samplers: [], schedulers: [] },
+        checkpointProfiles: {},
+    });
     assert.equal(legacy.backends.comfy.connection, 'legacy_proxy');
     assert.equal(legacy.backends.comfy.username, 'u');
     assert.equal(legacy.backends.comfy.password, 'p');
@@ -166,7 +174,11 @@ test('missing/corrupt comfy section is created without throwing', () => {
     const s = { settingsVersion: 2, backends: { nai: {} } };
     runMigrations(s);
     assert.equal(s.backends.comfy.connection, 'legacy_proxy');
-    assert.deepEqual(s.backends.a1111, { baseUrl: '', auth: '', checkpoint: '' });
+    assert.deepEqual(s.backends.a1111, {
+        baseUrl: '', auth: '', checkpoint: '',
+        discovery: { at: 0, models: [], samplers: [], schedulers: [] },
+        checkpointProfiles: {},
+    });
 });
 
 // --- Test 11: v3 → v4 promotes runtime defaults and adds Phase B LLM fields ---
@@ -284,6 +296,65 @@ test('v0.1.0 legacy reaches v5 with generation.params present', () => {
     runMigrations(legacy);
     assert.equal(legacy.settingsVersion, CURRENT_VERSION);
     assert.deepEqual(legacy.generation.params, { krea2: {}, anima: {}, illustrious: {} });
+});
+
+// --- Test 19 (v5 → v6): discovery cache, checkpointProfiles, generation.checkpoint ---
+test('v5 settings migrate to v6 with discovery cache, checkpointProfiles, and copied checkpoint', () => {
+    const v5 = {
+        settingsVersion: 5,
+        enabled: true,
+        generation: { mode: 'direct', backend: 'comfy', profile: 'anima', params: { krea2: {}, anima: {}, illustrious: {} } },
+        backends: {
+            nai: {},
+            comfy: { connection: 'a1111' },
+            a1111: { baseUrl: 'https://host.example', auth: 'k', checkpoint: 'Anima | RDBT Anima' },
+        },
+    };
+    const ran = runMigrations(v5);
+    assert.equal(ran, true);
+    assert.equal(v5.settingsVersion, CURRENT_VERSION);
+    assert.deepEqual(v5.backends.a1111.discovery, { at: 0, models: [], samplers: [], schedulers: [] });
+    assert.deepEqual(v5.backends.a1111.checkpointProfiles, {});
+    // generation.checkpoint copied from the old field; the old field survives.
+    assert.equal(v5.generation.checkpoint, 'Anima | RDBT Anima');
+    assert.equal(v5.backends.a1111.checkpoint, 'Anima | RDBT Anima');
+});
+
+// --- Test 20: v5 → v6 with no stored checkpoint copies an empty string ---
+test('v5 → v6 with blank a1111.checkpoint stamps generation.checkpoint = ""', () => {
+    const v5 = { settingsVersion: 5, backends: { nai: {}, comfy: {}, a1111: { baseUrl: '', auth: '', checkpoint: '' } }, generation: {} };
+    runMigrations(v5);
+    assert.equal(v5.generation.checkpoint, '');
+});
+
+// --- Test 21: v6 fields already present are never overwritten ---
+test('existing v6 discovery/checkpointProfiles/generation.checkpoint survive migration untouched', () => {
+    const s = {
+        settingsVersion: 5,
+        generation: { checkpoint: 'User Choice' },
+        backends: {
+            nai: {}, comfy: {},
+            a1111: {
+                checkpoint: 'Old Field',
+                discovery: { at: 123, models: [{ title: 'M' }], samplers: ['Euler a'], schedulers: ['Karras'] },
+                checkpointProfiles: { M: { profile: 'krea2', steps: 8 } },
+            },
+        },
+    };
+    runMigrations(s);
+    assert.equal(s.generation.checkpoint, 'User Choice');
+    assert.equal(s.backends.a1111.discovery.at, 123);
+    assert.deepEqual(s.backends.a1111.checkpointProfiles, { M: { profile: 'krea2', steps: 8 } });
+});
+
+// --- Test 22: v0.1.0 through full migration reaches v6 ---
+test('v0.1.0 legacy reaches v6 with all R1 fields present', () => {
+    const legacy = { enabled: true, backends: { nai: { apiKey: 'pst-test' }, comfy: { baseUrl: 'http://x', username: 'u', password: 'p', profile: 'anima' } } };
+    runMigrations(legacy);
+    assert.equal(legacy.settingsVersion, CURRENT_VERSION);
+    assert.deepEqual(legacy.backends.a1111.discovery, { at: 0, models: [], samplers: [], schedulers: [] });
+    assert.deepEqual(legacy.backends.a1111.checkpointProfiles, {});
+    assert.equal(legacy.generation.checkpoint, '');
 });
 
 // --- Summary ---

@@ -111,6 +111,33 @@ export const migrators = [
             }
         }
     },
+
+    // 5 -> 6 (Phase R1): persisted A1111 discovery cache + per-checkpoint
+    // profile map, and the generation-level checkpoint selection.
+    // - discovery: last successful discover() result ({at: 0} = never ran);
+    //   cleared on URL/auth change, so it is a cache, not configuration.
+    // - checkpointProfiles: title -> { profile, width?, height?, steps?,
+    //   cfg?, sampler?, scheduler? }; user edits live here and survive
+    //   re-discovery (seedCheckpointProfiles only adds missing titles).
+    // - generation.checkpoint: copied from backends.a1111.checkpoint; the
+    //   old field is kept as-is (executor fallback + rollback safety).
+    (s) => {
+        if (!s.backends) s.backends = {};
+        if (!s.backends.a1111 || typeof s.backends.a1111 !== 'object') {
+            s.backends.a1111 = { baseUrl: '', auth: '', checkpoint: '' };
+        }
+        const a1111 = s.backends.a1111;
+        if (!a1111.discovery || typeof a1111.discovery !== 'object') {
+            a1111.discovery = { at: 0, models: [], samplers: [], schedulers: [] };
+        }
+        if (!a1111.checkpointProfiles || typeof a1111.checkpointProfiles !== 'object') {
+            a1111.checkpointProfiles = {};
+        }
+        if (!s.generation) s.generation = {};
+        if (s.generation.checkpoint === undefined) {
+            s.generation.checkpoint = typeof a1111.checkpoint === 'string' ? a1111.checkpoint : '';
+        }
+    },
 ];
 
 /** Current schema version = number of migrators applied from zero. */

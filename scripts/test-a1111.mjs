@@ -539,6 +539,77 @@ test('resolveCheckpoint: exact title/model_name match only, no dialect inference
 });
 
 // ---------------------------------------------------------------------------
+// R1: discover() — models + samplers + schedulers + optional /internal/models
+// ---------------------------------------------------------------------------
+
+const DISCOVERY_ROUTES = {
+    'GET /sdapi/v1/sd-models': jsonResponse([
+        { title: 'Krea 2 | Turbo18+', model_name: 'krea2_turbo', filename: 'krea2_turbo.safetensors' },
+        { title: 'Anima | RDBT Anima', model_name: 'rdbt_anima', filename: 'rdbt_anima.safetensors' },
+        { title: 'Mystery Model', model_name: 'mystery', filename: 'mystery.safetensors' },
+    ]),
+    'GET /sdapi/v1/samplers': jsonResponse([{ name: 'Euler a' }, { name: 'DPM++ 2M' }]),
+    'GET /sdapi/v1/schedulers': jsonResponse([{ name: 'karras' }, { name: 'simple' }]),
+};
+
+test('discover(): /internal/models 200 enriches matched titles with family + mapped defaults', async () => {
+    const routes = {
+        ...DISCOVERY_ROUTES,
+        'GET /internal/models': jsonResponse([
+            {
+                id: 'krea', title: 'Krea 2 | Turbo18+', family: 'krea2', checkpointFile: 'krea2_turbo.safetensors',
+                defaults: { steps: 8, cfg: 1, sampler: 'Euler a', scheduler: 'simple', width: 1344, height: 768 },
+            },
+            // Matched by checkpointFile == model_name (title differs).
+            { id: 'anima', title: 'Anima (renamed)', family: 'anima', checkpointFile: 'rdbt_anima', defaults: { steps: 16 } },
+        ]),
+    };
+    const client = makeClient(routes);
+    const result = await client.discover();
+    assert.equal(result.enrichment, 'internal');
+    assert.deepEqual(result.samplers, ['Euler a', 'DPM++ 2M']);
+    assert.deepEqual(result.schedulers, ['karras', 'simple']);
+    const krea = result.models.find(m => m.title === 'Krea 2 | Turbo18+');
+    assert.equal(krea.family, 'krea2');
+    assert.deepEqual(krea.defaults, { width: 1344, height: 768, steps: 8, cfg: 1, sampler: 'Euler a', scheduler: 'simple' });
+    const anima = result.models.find(m => m.title === 'Anima | RDBT Anima');
+    assert.equal(anima.family, 'anima');
+    assert.deepEqual(anima.defaults, { steps: 16 });
+    const mystery = result.models.find(m => m.title === 'Mystery Model');
+    assert.equal(mystery.family, undefined);
+    assert.equal(mystery.defaults, undefined);
+});
+
+test('discover(): /internal/models 404 is ignored (enrichment none)', async () => {
+    const routes = { ...DISCOVERY_ROUTES, 'GET /internal/models': jsonResponse({ detail: 'Not Found' }, { status: 404 }) };
+    const client = makeClient(routes);
+    const result = await client.discover();
+    assert.equal(result.enrichment, 'none');
+    assert.equal(result.models.length, 3);
+    assert.equal(result.models.every(m => m.family === undefined), true);
+});
+
+test('discover(): /internal/models network error and schedulers 404 are both tolerated', async () => {
+    const routes = {
+        ...DISCOVERY_ROUTES,
+        'GET /sdapi/v1/schedulers': jsonResponse({ detail: 'Not Found' }, { status: 404 }),
+        'GET /internal/models': () => { throw new TypeError('Failed to fetch'); },
+    };
+    const client = makeClient(routes);
+    const result = await client.discover();
+    assert.equal(result.enrichment, 'none');
+    assert.deepEqual(result.schedulers, []);
+    assert.deepEqual(result.samplers, ['Euler a', 'DPM++ 2M']);
+    assert.equal(result.models.length, 3);
+});
+
+test('discover(): models() failure rejects (models are required)', async () => {
+    const routes = { ...DISCOVERY_ROUTES, 'GET /sdapi/v1/sd-models': jsonResponse({ detail: 'boom' }, { status: 500 }) };
+    const client = makeClient(routes);
+    await assert.rejects(client.discover(), err => err.code === 'A1111_HTTP');
+});
+
+// ---------------------------------------------------------------------------
 // Constructor validation
 // ---------------------------------------------------------------------------
 

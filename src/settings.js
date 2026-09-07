@@ -32,6 +32,13 @@ export const defaultSettings = {
             auth: '',
             // Discovered checkpoint title; set explicitly via Refresh Models.
             checkpoint: '',
+            // Phase R1: persisted discovery cache ({at: 0} = never ran).
+            // Cleared on URL/auth change; never carries credentials.
+            discovery: { at: 0, models: [], samplers: [], schedulers: [] },
+            // Phase R1: checkpoint title -> { profile, width?, height?,
+            // steps?, cfg?, sampler?, scheduler? }. Seeded from discovery,
+            // user edits always win and survive re-seeding.
+            checkpointProfiles: {},
         },
     },
     llm: {
@@ -52,6 +59,10 @@ export const defaultSettings = {
         sceneWindow: 4,
         logLimit: 50,
         dryRun: false,
+        // Phase R1: chat-generation checkpoint title (A1111-compatible SD
+        // connection). Migrator v6 copies the old backends.a1111.checkpoint
+        // here; that field remains as an executor fallback.
+        checkpoint: '',
         // Phase C0: per-profile generation param overrides. Empty/absent
         // fields inherit the PROFILES[key] default; clamping happens on
         // read (src/ui.js / index.js), never here, so a value saved under
