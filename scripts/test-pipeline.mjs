@@ -138,14 +138,14 @@ const marker = { chatId: 'A', messageId: 0, swipeId: 0, occurrence: 0, content: 
 
 // ---- FIX 2: restore-before-regenerate -------------------------------------
 test('FIX 2: marker with an existing record does NOT enqueue a new task', async () => {
-    const record = { chatId: 'A', messageId: 0, swipeId: 0, occurrence: 0, content: 'scene', blob: { fake: true } };
+    const record = { chatId: 'A', messageId: 0, swipeId: 0, occurrence: 0, content: 'scene', blob: new Blob(["x"]) };
     const { pipeline, queue } = makePipeline({ records: [record] });
     await pipeline.onMarker(marker);
     assert.equal(queue._tasks.size, 0, 'existing record must prevent regeneration');
 });
 
 test('FIX 2: marker with different content hash still enqueues', async () => {
-    const record = { chatId: 'A', messageId: 0, swipeId: 0, occurrence: 0, content: 'DIFFERENT', blob: {} };
+    const record = { chatId: 'A', messageId: 0, swipeId: 0, occurrence: 0, content: 'DIFFERENT', blob: new Blob(["y"]) };
     const { pipeline, queue } = makePipeline({ records: [record] });
     await pipeline.onMarker(marker);
     assert.equal(queue._tasks.size, 1, 'different content must trigger generation');
@@ -187,7 +187,7 @@ test('FIX 2: consecutive onMarker calls do not clobber each other', async () => 
 });
 
 test('FIX 2: double-click regenerate still works (bypasses onMarker)', async () => {
-    const record = { chatId: 'A', messageId: 0, swipeId: 0, occurrence: 0, content: 'scene', blob: { fake: true } };
+    const record = { chatId: 'A', messageId: 0, swipeId: 0, occurrence: 0, content: 'scene', blob: new Blob(["x"]) };
     const { pipeline, queue } = makePipeline({ records: [record] });
     // onMarker skips because record exists:
     await pipeline.onMarker(marker);

@@ -348,8 +348,26 @@ export function createMarkerPipeline(deps) {
             const hash = contentHash(target.content);
             const record = records.find(r => r.occurrence === target.occurrence && contentHash(r.content) === hash);
             if (!record?.blob) {
-                // Nothing persisted for this marker and no live task owns it:
-                // quiet invisible placeholder (slot is aria-hidden already).
+                // Live-race guard: this restore pass may resolve AFTER a task
+                // enqueued by the same event's onMarker (its IDB check queued
+                // earlier). Never clobber a slot that now has a live task or a
+                // pending queue error — render that state instead of idle.
+                const live = slots.get(target.key);
+                const task = live?.taskId ? getQueue().getTask(live.taskId) : null;
+                if (task && task.status === 'succeeded' && live.objectUrl) {
+                    renderImageFrame(target.slot, doc, live.objectUrl, bindImageActions(live));
+                    continue;
+                }
+                if (task) {
+                    renderSlotState(target.slot, task, doc, { onRetry: () => retry(live) });
+                    continue;
+                }
+                if (live?.pendingError) {
+                    renderSlotState(target.slot, { status: 'failed', error: live.pendingError }, doc, { onRetry: () => retry(live) });
+                    continue;
+                }
+                // Nothing persisted and no live task owns it: quiet invisible
+                // placeholder (slot is aria-hidden already).
                 target.slot.dataset.ifimgState = 'idle';
                 target.slot.textContent = '';
                 continue;

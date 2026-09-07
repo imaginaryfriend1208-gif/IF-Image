@@ -171,7 +171,17 @@ jQuery(async () => {
             queue.cancelAllForChat(previous);
             pipeline.forgetChat(previous);
         },
-        onChatChanged: () => { refreshRoster(); },
+        onChatChanged: () => {
+            refreshRoster();
+            // Chat load renders every message WITHOUT per-message rendered
+            // events (ST printMessages), so no DOM pass would run and markers
+            // would stay as raw text. Restore-only sweep: replace markers and
+            // re-attach persisted images; markers without records become
+            // idle placeholders (no auto-generation of old history).
+            const chatId = getContext().getCurrentChatId();
+            const length = getContext().chat?.length ?? 0;
+            for (let i = 0; i < length; i++) pipeline.scheduleDomPass(chatId, i);
+        },
         onDispose: () => { queue.cancelAll(); },
     });
     runtime.register();
