@@ -1,4 +1,4 @@
-// IF Image - ComfyUI Cloud proxy backend.
+// IF Image - ComfyUI Cloud proxy backend (hardened).
 // Talks to the user's own "comfy-cloud-forge-proxy" (SillytavernproxyComfyuicloud).
 // Proxy schema verified from its src/server.ts:
 //   GET  /internal/ping    -> { ok, service } (no auth)
@@ -9,8 +9,26 @@
 //        Response: { images: [base64...], parameters, info (JSON string) }
 // Error shape from setErrorHandler: { error, detail, body, errors }
 
+export const DISCOVERY_TIMEOUT_MS = 30000;
+export const GENERATION_TIMEOUT_MS = 300000;
+
+// Typed error codes for the proxy backend.
+export class ComfyError extends Error {
+    constructor(code, message) {
+        super(message);
+        this.name = 'ComfyError';
+        this.code = code;
+    }
+}
+
 function trimSlash(url) {
     return String(url || '').replace(/\/+$/, '');
+}
+
+/** Replace any occurrence of a secret with '***' in error details. */
+function redact(text, secret) {
+    const value = String(text);
+    return secret ? value.split(secret).join('***') : value;
 }
 
 /**
@@ -26,32 +44,125 @@ export function base64ToBlob(base64, mime = 'image/png') {
 
 export class ComfyProxyClient {
     /**
-     * @param {{getBaseUrl: () => string, getUsername: () => string, getPassword: () => string}} cfg
+     * @param {{getBaseUrl: () => string, getUsername: () => string, getPassword: () => string,
+     *          fetchImpl?: typeof fetch}} cfg
+     * fetchImpl is injectable for offline tests.
      */
     constructor(cfg) {
         this.cfg = cfg;
+        this.fetchImpl = cfg.fetchImpl ?? globalThis.fetch?.bind(globalThis);
+        if (typeof this.fetchImpl !== 'function') {
+            throw new TypeError('ComfyProxyClient: no fetch implementation available (pass fetchImpl).');
+        }
     }
 
     baseUrl() {
         return trimSlash(this.cfg.getBaseUrl());
     }
 
+    _authString() {
+        const user = this.cfg.getUsername();
+        const pass = this.cfg.getPassword();
+        return (user || pass) ? `${user}:${pass}` : '';
+    }
+
     headers(json = true) {
         const headers = {};
         if (json) headers['Content-Type'] = 'application/json';
-        const user = this.cfg.getUsername();
-        const pass = this.cfg.getPassword();
-        if (user || pass) {
-            headers['Authorization'] = 'Basic ' + btoa(`${user}:${pass}`);
+        const auth = this._authString();
+        if (auth) {
+            headers['Authorization'] = 'Basic ' + btoa(auth);
         }
         return headers;
     }
 
-    async _fetchTextOnError(response) {
+    /** Bounded, credential-redacted error detail. */
+    async _safeDetail(response) {
+        let text = '';
+        try { text = await response.text(); } catch { return ''; }
+        if (!text) return '';
+        const secret = this._authString();
         try {
-            return await response.text();
-        } catch {
-            return '';
+            const parsed = JSON.parse(text);
+            for (const key of ['detail', 'error', 'message', 'errors', 'body']) {
+                const value = parsed?.[key];
+                if (typeof value === 'string' && value) return redact(value.slice(0, 300), secret);
+                if (Array.isArray(value) && value.length) {
+                    const first = value[0];
+                    return redact(String(first?.msg ?? first).slice(0, 300), secret);
+                }
+            }
+        } catch { /* not JSON — fall through to plain text */ }
+        return redact(text.slice(0, 300), secret);
+    }
+
+    /**
+     * Core request runner with timeout, redirect guard, and credential
+     * redaction — mirrors the A1111Client._request hardening pattern.
+     * Exactly one fetch per call; no retries.
+     */
+    async _request(path, { method = 'GET', body, signal, timeoutMs } = {}) {
+        const base = trimSlash(this.cfg.getBaseUrl());
+        if (!base) throw new ComfyError('COMFY_CONFIG', 'Proxy base URL is not configured.');
+        const url = `${base}${path}`;
+        const headers = this.headers(body !== undefined);
+
+        const controller = new AbortController();
+        let timedOut = false;
+        let userCancelled = false;
+        const onExternalAbort = () => { userCancelled = true; controller.abort(); };
+        if (signal) {
+            if (signal.aborted) {
+                throw new ComfyError('COMFY_ABORTED', `Request to ${path} was cancelled before it started.`);
+            }
+            signal.addEventListener('abort', onExternalAbort, { once: true });
+        }
+        const timeout = timeoutMs ?? (method === 'GET' ? DISCOVERY_TIMEOUT_MS : GENERATION_TIMEOUT_MS);
+        const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeout);
+
+        let response;
+        try {
+            response = await this.fetchImpl(url, {
+                method,
+                headers,
+                redirect: 'error',
+                ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+                signal: controller.signal,
+            });
+        } catch (error) {
+            if (timedOut) {
+                throw new ComfyError('COMFY_TIMEOUT', `Request to ${path} timed out after ${timeout}ms. The server job (if any) was NOT cancelled.`);
+            }
+            if (userCancelled || signal?.aborted || error?.name === 'AbortError') {
+                throw new ComfyError('COMFY_ABORTED', `Request to ${path} was cancelled. The proxy job (if already started) may still be running.`);
+            }
+            throw new ComfyError('COMFY_NETWORK', `Could not reach the proxy at ${base} (${error?.message ?? error}). Is it running?`);
+        } finally {
+            clearTimeout(timer);
+            if (signal) signal.removeEventListener('abort', onExternalAbort);
+        }
+
+        if (response.status >= 300 && response.status < 400) {
+            throw new ComfyError('COMFY_REDIRECT', `Proxy answered with HTTP ${response.status} (redirect). Credentials are never sent across redirects — configure the final URL directly.`);
+        }
+        if (response.status === 401 || response.status === 403) {
+            const detail = await this._safeDetail(response);
+            throw new ComfyError('COMFY_AUTH', `Proxy rejected the credentials (HTTP ${response.status}).${detail ? ` Server message: ${detail}` : ''}`);
+        }
+        if (!response.ok) {
+            const detail = await this._safeDetail(response);
+            throw new ComfyError('COMFY_HTTP', `Proxy returned HTTP ${response.status}.${detail ? ` ${detail}` : ''}`);
+        }
+        return response;
+    }
+
+    async _json(response, path) {
+        let text;
+        try { text = await response.text(); } catch (err) {
+            throw new ComfyError('COMFY_MALFORMED', `${path} returned an unreadable body (${err?.message ?? err}).`);
+        }
+        try { return JSON.parse(text); } catch {
+            throw new ComfyError('COMFY_MALFORMED', `${path} did not return valid JSON.`);
         }
     }
 
@@ -60,64 +171,29 @@ export class ComfyProxyClient {
      * @param {{signal?: AbortSignal}} [options] aborts the browser request only
      */
     async ping({ signal } = {}) {
-        let response;
-        try {
-            response = await fetch(`${this.baseUrl()}/internal/ping`, { headers: this.headers(), signal });
-        } catch (error) {
-            if (error?.name === 'AbortError') throw new Error('Connection test cancelled.');
-            throw new Error(`Cannot reach the proxy at ${this.baseUrl()}. Is it running? Start it with "npm start" (or start.bat) in the SillytavernproxyComfyuicloud folder. (${error.message})`);
-        }
-        if (!response.ok) {
-            throw new Error(`Proxy ping failed (${response.status}): ${await this._fetchTextOnError(response)}`);
-        }
-        return response.json();
+        const response = await this._request('/internal/ping', { signal });
+        return this._json(response, '/internal/ping');
     }
 
     /**
      * Full status: cloud key configured, active jobs, model profiles, character count.
      * Requires valid credentials.
-     * @param {{signal?: AbortSignal}} [options] aborts the browser request only
+     * @param {{signal?: AbortSignal}} [options]
      */
     async status({ signal } = {}) {
-        let response;
-        try {
-            response = await fetch(`${this.baseUrl()}/internal/status`, { headers: this.headers(), signal });
-        } catch (error) {
-            if (error?.name === 'AbortError') throw new Error('Status request cancelled.');
-            throw new Error(`Cannot reach the proxy at ${this.baseUrl()}. (${error.message})`);
-        }
-        if (response.status === 401) {
-            throw new Error('Proxy rejected the credentials (401). Set PROXY_USERNAME / PROXY_PASSWORD in the proxy .env and enter the same username/password here.');
-        }
-        if (!response.ok) {
-            throw new Error(`Proxy status failed (${response.status}): ${await this._fetchTextOnError(response)}`);
-        }
-        return response.json();
+        const response = await this._request('/internal/status', { signal });
+        return this._json(response, '/internal/status');
     }
 
     /**
      * List enabled model profiles from the proxy (sd-models endpoint).
      * Each entry: { title, model_name, filename }. `title` is accepted as the
      * txt2img `model` field (proxy matches id / title / checkpoint file name).
-     * @param {{signal?: AbortSignal}} [options] aborts the browser request only
+     * @param {{signal?: AbortSignal}} [options]
      */
     async models({ signal } = {}) {
-        let response;
-        try {
-            response = await fetch(`${this.baseUrl()}/sdapi/v1/sd-models`, { headers: this.headers(), signal });
-        } catch (error) {
-            if (error?.name === 'AbortError') {
-                throw new Error('Model list request cancelled. Only the browser request was aborted; the proxy was not told to stop anything.');
-            }
-            throw new Error(`Cannot reach the proxy at ${this.baseUrl()}. (${error.message})`);
-        }
-        if (response.status === 401) {
-            throw new Error('Proxy rejected the credentials (401).');
-        }
-        if (!response.ok) {
-            throw new Error(`Proxy sd-models failed (${response.status}).`);
-        }
-        return response.json();
+        const response = await this._request('/sdapi/v1/sd-models', { signal });
+        return this._json(response, '/sdapi/v1/sd-models');
     }
 
     /**
@@ -126,14 +202,10 @@ export class ComfyProxyClient {
      * Family names (krea2/anima/illustrious) are NOT matched by the proxy.
      * @param {{prompt: string, negative_prompt: string, model?: string, seed?: number,
      *          width?: number, height?: number, steps?: number, cfg_scale?: number}} body
-     * @param {{signal?: AbortSignal}} [options] aborts the browser request only —
-     *        the cloud job may still run on the proxy; nothing is interrupted server-side
+     * @param {{signal?: AbortSignal}} [options]
      * @returns {Promise<{image: Blob, dataUrl: string, raw: object, info: object}>}
      */
     async txt2img(body, { signal } = {}) {
-        // Coerce to the proxy's zod bounds: ints for seed/width/height/steps,
-        // 64..4096 px, 1..200 steps, 0..100 cfg. Avoids opaque 400/500 on
-        // fractional values typed into the UI number inputs.
         const int = (value, fallback) => Number.isFinite(value) ? Math.trunc(value) : fallback;
         const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
         const width = body.width === undefined ? undefined : clamp(int(Number(body.width), 832), 64, 4096);
@@ -152,37 +224,15 @@ export class ComfyProxyClient {
             send_images: true,
         };
 
-        let response;
-        try {
-            response = await fetch(`${this.baseUrl()}/sdapi/v1/txt2img`, {
-                method: 'POST',
-                headers: this.headers(),
-                body: JSON.stringify(payload),
-                signal,
-            });
-        } catch (error) {
-            if (error?.name === 'AbortError') {
-                throw new Error('Generation cancelled. Only the browser request was aborted; the proxy job (if it already started) may still be running on the cloud.');
-            }
-            throw new Error(`Cannot reach the proxy at ${this.baseUrl()}. Is it running? (${error.message})`);
-        }
-
-        const text = await this._fetchTextOnError(response);
-        if (!response.ok) {
-            let detail = text;
-            try {
-                const parsed = JSON.parse(text);
-                detail = parsed.detail || parsed.error || text;
-            } catch { /* keep raw text */ }
-            if (response.status === 401) {
-                throw new Error(`Proxy rejected the credentials (401). ${detail}`);
-            }
-            throw new Error(`Proxy txt2img failed (${response.status}): ${String(detail).slice(0, 500)}`);
-        }
-
-        const data = JSON.parse(text);
+        const response = await this._request('/sdapi/v1/txt2img', {
+            method: 'POST',
+            body: payload,
+            signal,
+            timeoutMs: GENERATION_TIMEOUT_MS,
+        });
+        const data = await this._json(response, '/sdapi/v1/txt2img');
         if (!Array.isArray(data.images) || data.images.length === 0 || !data.images[0]) {
-            throw new Error('Proxy returned no image data (send_images is false or cloud job produced no output).');
+            throw new ComfyError('COMFY_MALFORMED', 'Proxy returned no image data.');
         }
         let info = {};
         try { info = JSON.parse(data.info); } catch { /* info is optional */ }
