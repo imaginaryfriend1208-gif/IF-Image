@@ -9,6 +9,12 @@
 //        Response: { images: [base64...], parameters, info (JSON string) }
 // Error shape from setErrorHandler: { error, detail, body, errors }
 
+// Circular-import note: a1111.js imports base64ToBlob from this module and
+// this module imports the pure summarizeValidationError helper back. Both
+// are hoisted function declarations used only at call time, so the cycle is
+// safe in browser ESM and Node alike.
+import { summarizeValidationError } from './a1111.js';
+
 export const DISCOVERY_TIMEOUT_MS = 30000;
 export const GENERATION_TIMEOUT_MS = 300000;
 
@@ -76,24 +82,28 @@ export class ComfyProxyClient {
         return headers;
     }
 
-    /** Bounded, credential-redacted error detail. */
-    async _safeDetail(response) {
-        let text = '';
-        try { text = await response.text(); } catch { return ''; }
+    /** Bounded (unredacted) detail extraction from a raw body text. */
+    _detailFromText(text) {
         if (!text) return '';
-        const secret = this._authString();
         try {
             const parsed = JSON.parse(text);
             for (const key of ['detail', 'error', 'message', 'errors', 'body']) {
                 const value = parsed?.[key];
-                if (typeof value === 'string' && value) return redact(value.slice(0, 300), secret);
+                if (typeof value === 'string' && value) return value.slice(0, 300);
                 if (Array.isArray(value) && value.length) {
                     const first = value[0];
-                    return redact(String(first?.msg ?? first).slice(0, 300), secret);
+                    return String(first?.msg ?? first).slice(0, 300);
                 }
             }
         } catch { /* not JSON — fall through to plain text */ }
-        return redact(text.slice(0, 300), secret);
+        return text.slice(0, 300);
+    }
+
+    /** Bounded, credential-redacted error detail. */
+    async _safeDetail(response) {
+        let text = '';
+        try { text = await response.text(); } catch { return ''; }
+        return redact(this._detailFromText(text), this._authString());
     }
 
     /**
@@ -101,7 +111,7 @@ export class ComfyProxyClient {
      * redaction — mirrors the A1111Client._request hardening pattern.
      * Exactly one fetch per call; no retries.
      */
-    async _request(path, { method = 'GET', body, signal, timeoutMs } = {}) {
+    async _request(path, { method = 'GET', body, signal, timeoutMs, summarizeDetail = false } = {}) {
         const base = trimSlash(this.cfg.getBaseUrl());
         if (!base) throw new ComfyError('COMFY_CONFIG', 'Proxy base URL is not configured.');
         const url = `${base}${path}`;
@@ -150,7 +160,24 @@ export class ComfyProxyClient {
             throw new ComfyError('COMFY_AUTH', `Proxy rejected the credentials (HTTP ${response.status}).${detail ? ` Server message: ${detail}` : ''}`);
         }
         if (!response.ok) {
-            const detail = await this._safeDetail(response);
+            let detail;
+            if (summarizeDetail) {
+                // Generation failures (R0): distill ComfyUI-style workflow
+                // validation bodies (node_errors / value_not_in_list) into
+                // one legible "missing files" line. Summarize from the
+                // redacted RAW body (not the 300-char _safeDetail slice) so
+                // entries deep inside the JSON are still found; the raw
+                // body itself never reaches the error object. Non-matching
+                // bodies keep the existing bounded JSON-preferring detail.
+                let text = '';
+                try { text = await response.text(); } catch { /* stays empty */ }
+                const secret = this._authString();
+                detail = /node_errors|value_not_in_list/.test(text)
+                    ? summarizeValidationError(redact(text, secret))
+                    : redact(this._detailFromText(text), secret);
+            } else {
+                detail = await this._safeDetail(response);
+            }
             throw new ComfyError('COMFY_HTTP', `Proxy returned HTTP ${response.status}.${detail ? ` ${detail}` : ''}`);
         }
         return response;
@@ -229,6 +256,7 @@ export class ComfyProxyClient {
             body: payload,
             signal,
             timeoutMs: GENERATION_TIMEOUT_MS,
+            summarizeDetail: true,
         });
         const data = await this._json(response, '/sdapi/v1/txt2img');
         if (!Array.isArray(data.images) || data.images.length === 0 || !data.images[0]) {

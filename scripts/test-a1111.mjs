@@ -7,8 +7,9 @@ import { test } from 'node:test';
 import {
     A1111Client, A1111Error,
     utf8Base64, buildBasicAuthHeader, normalizeBaseUrl,
-    normalizeModels, resolveCheckpoint,
+    normalizeModels, resolveCheckpoint, summarizeValidationError,
 } from '../src/backends/a1111.js';
+import { ComfyProxyClient } from '../src/backends/comfy.js';
 
 // Node has no DOM URL.createObjectURL; a stand-in is enough for shape checks.
 if (typeof URL.createObjectURL !== 'function') {
@@ -297,6 +298,107 @@ test('plain-text error bodies are redacted too', async () => {
     const client = makeClient(routes);
     await assert.rejects(client.options(), err => {
         assert.match(err.message, /500/);
+        assert.equal(err.message.includes('dummy-secret'), false);
+        return true;
+    });
+});
+
+// ---------------------------------------------------------------------------
+// R0: legible server errors (summarizeValidationError)
+// ---------------------------------------------------------------------------
+
+// Captured shape from a comfy-cloud-forge proxy relaying ComfyUI's prompt
+// validation failure (missing checkpoint + LoRA files on the cloud host).
+const NODE_ERRORS_BODY = {
+    error: 'txt2img failed',
+    detail: JSON.stringify({
+        error: { type: 'prompt_outputs_failed_validation', message: 'Prompt outputs failed validation' },
+        node_errors: {
+            '4': {
+                errors: [{
+                    type: 'value_not_in_list',
+                    message: 'Value not in list',
+                    details: "ckpt_name: 'krea2_turbo.safetensors' not in ['animaX.safetensors']",
+                    extra_info: { input_name: 'ckpt_name', received_value: 'krea2_turbo.safetensors' },
+                }],
+            },
+            '10': {
+                errors: [{
+                    type: 'value_not_in_list',
+                    message: 'Value not in list',
+                    details: "lora_name: 'detailer_v2.safetensors' not in []",
+                    extra_info: { input_name: 'lora_name', received_value: 'detailer_v2.safetensors' },
+                }],
+            },
+        },
+    }),
+};
+
+test('summarizeValidationError: node_errors payload becomes a short missing-files line', () => {
+    const summary = summarizeValidationError(NODE_ERRORS_BODY.detail);
+    assert.ok(summary.startsWith('Server workflow references missing files:'), summary);
+    assert.match(summary, /ckpt_name=krea2_turbo\.safetensors/);
+    assert.match(summary, /lora_name=detailer_v2\.safetensors/);
+    assert.ok(summary.length <= 300);
+    assert.equal(summary.includes('{'), false, 'no raw JSON in the summary');
+});
+
+test('summarizeValidationError: at most 3 items, still <= 300 chars', () => {
+    const details = Array.from({ length: 6 }, (_, i) =>
+        `ckpt_name: 'model_number_${i}_${'x'.repeat(40)}.safetensors' not in ['a']`).join(' ');
+    const summary = summarizeValidationError(`node_errors ${details}`);
+    assert.ok(summary.length <= 300, `too long: ${summary.length}`);
+    assert.equal(summary.split(';').length <= 3, true, 'max 3 items');
+});
+
+test('summarizeValidationError: plain text falls back to the bounded input', () => {
+    assert.equal(summarizeValidationError('Internal Server Error'), 'Internal Server Error');
+    const long = 'y'.repeat(900);
+    assert.equal(summarizeValidationError(long).length, 300);
+    // Mentions node_errors but has no parseable entries: bounded fallback.
+    assert.equal(summarizeValidationError('node_errors: unreadable'), 'node_errors: unreadable');
+});
+
+test('A1111 txt2img failure surfaces the missing-files summary, no URL/auth leak', async () => {
+    const routes = { 'POST /sdapi/v1/txt2img': jsonResponse(NODE_ERRORS_BODY, { status: 500 }) };
+    const client = makeClient(routes);
+    await assert.rejects(client.txt2img({ prompt: 'p', checkpoint: 'm' }), err => {
+        assert.equal(err.code, 'A1111_HTTP');
+        assert.match(err.message, /Server workflow references missing files:/);
+        assert.match(err.message, /ckpt_name=krea2_turbo\.safetensors/);
+        assert.equal(err.message.includes('dummy-secret'), false, 'auth never leaks');
+        assert.equal(err.message.includes('sd.example.com'), false, 'base URL never leaks');
+        assert.equal(err.message.includes('node_errors'), false, 'raw JSON structure never leaks');
+        return true;
+    });
+});
+
+test('A1111 txt2img plain-text 500 keeps the existing bounded redacted detail', async () => {
+    const routes = { 'POST /sdapi/v1/txt2img': textResponse('boom from dummy-secret', 500) };
+    const client = makeClient(routes);
+    await assert.rejects(client.txt2img({ prompt: 'p', checkpoint: 'm' }), err => {
+        assert.equal(err.code, 'A1111_HTTP');
+        assert.match(err.message, /500/);
+        assert.match(err.message, /boom/);
+        assert.equal(err.message.includes('dummy-secret'), false);
+        return true;
+    });
+});
+
+test('Comfy proxy txt2img failure reuses the same summary helper', async () => {
+    const client = new ComfyProxyClient({
+        getBaseUrl: () => 'http://localhost:7861',
+        getUsername: () => 'user',
+        getPassword: () => 'dummy-secret',
+        fetchImpl: async () => ({
+            ok: false, status: 400, headers: {},
+            text: async () => JSON.stringify(NODE_ERRORS_BODY),
+        }),
+    });
+    await assert.rejects(client.txt2img({ prompt: 'p' }), err => {
+        assert.equal(err.code, 'COMFY_HTTP');
+        assert.match(err.message, /Server workflow references missing files:/);
+        assert.match(err.message, /lora_name=detailer_v2\.safetensors/);
         assert.equal(err.message.includes('dummy-secret'), false);
         return true;
     });

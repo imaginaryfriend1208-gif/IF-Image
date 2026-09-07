@@ -133,6 +133,68 @@ function redact(text, secret) {
     return secret ? value.split(secret).join('***') : value;
 }
 
+/**
+ * Extract a bounded, credential-redacted detail string from a raw error
+ * body (JSON-preferring). Pure counterpart of A1111Client._safeDetail so
+ * callers that already hold the body text can reuse it.
+ */
+function extractDetail(text, secret) {
+    if (!text) return '';
+    try {
+        const parsed = JSON.parse(text);
+        for (const key of ['detail', 'error', 'message', 'errors']) {
+            const value = parsed?.[key];
+            if (typeof value === 'string' && value) return redact(value.slice(0, 300), secret);
+            if (Array.isArray(value) && value.length) {
+                const first = value[0];
+                return redact(String(first?.msg ?? first).slice(0, 300), secret);
+            }
+        }
+    } catch { /* not JSON — fall through to plain text */ }
+    return redact(text.slice(0, 200), secret);
+}
+
+const VALIDATION_SUMMARY_PREFIX = 'Server workflow references missing files:';
+
+/**
+ * Turn a ComfyUI-style workflow validation error (`node_errors` /
+ * `value_not_in_list` entries) into one legible line naming the missing
+ * files, e.g. "Server workflow references missing files:
+ * ckpt_name=X.safetensors; lora_name=Y.safetensors" — at most 3 items,
+ * never longer than 300 chars. Any other text passes through as the
+ * existing bounded detail. Pure and shared with the Comfy proxy client.
+ *
+ * Callers must pass text that is ALREADY sanitized/redacted: this helper
+ * never sees (and never re-adds) the base URL, the auth string, or the
+ * full JSON body.
+ * @param {string} detailText sanitized error body/detail text
+ * @returns {string} summary line, or the bounded input text
+ */
+export function summarizeValidationError(detailText) {
+    const text = String(detailText ?? '');
+    const bounded = text.slice(0, 300);
+    if (!/node_errors|value_not_in_list/.test(text)) return bounded;
+    // Bound the scan work, and tolerate one level of JSON string escaping
+    // (proxies often carry the ComfyUI JSON stringified inside "detail").
+    const norm = text.slice(0, 20000).replace(/\\"/g, '"');
+    const items = [];
+    const seen = new Set();
+    const push = (name, value) => {
+        const entry = `${name}=${value}`;
+        if (!seen.has(entry) && items.length < 3) {
+            seen.add(entry);
+            items.push(entry);
+        }
+    };
+    // ComfyUI "details" strings: `ckpt_name: 'file.safetensors' not in [...]`
+    for (const m of norm.matchAll(/(\w+):\s*'([^']{1,160})'\s+not in/g)) push(m[1], m[2]);
+    // extra_info fallback: "input_name": "ckpt_name" ... "received_value": "f"
+    for (const m of norm.matchAll(/"input_name"\s*:\s*"(\w+)"[\s\S]{0,300}?"received_value"\s*:\s*"([^"]{1,160})"/g)) push(m[1], m[2]);
+    if (!items.length) return bounded;
+    const summary = `${VALIDATION_SUMMARY_PREFIX} ${items.join('; ')}`;
+    return summary.length <= 300 ? summary : `${summary.slice(0, 297)}...`;
+}
+
 // ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
@@ -162,7 +224,7 @@ export class A1111Client {
      * timeout vs user-abort distinction, safe errors without credential
      * leakage. Exactly one fetch per call — no retries.
      */
-    async _request(path, { method = 'GET', body, signal, timeoutMs } = {}) {
+    async _request(path, { method = 'GET', body, signal, timeoutMs, summarizeDetail = false } = {}) {
         const base = normalizeBaseUrl(this.cfg.getBaseUrl());
         if (!base.ok) {
             throw new A1111Error('A1111_CONFIG', `Invalid AUTOMATIC1111 base URL: ${base.error}.`);
@@ -227,7 +289,16 @@ export class A1111Client {
             throw new A1111Error('A1111_AUTH', `The server rejected the Authentication string (HTTP ${response.status}). Enter the whole string exactly as the service provides it (user:password, or the bare key) — no quotes, no trimming.${detail ? ` Server message: ${detail}` : ''}`);
         }
         if (!response.ok) {
-            const detail = await this._safeDetail(response, auth);
+            let text = '';
+            try { text = await response.text(); } catch { /* detail stays empty */ }
+            // Generation failures (R0): distill ComfyUI-style workflow
+            // validation bodies (node_errors / value_not_in_list) into one
+            // legible "missing files" line for the in-chat chip. The raw
+            // body is redacted BEFORE summarization and never reaches the
+            // error object; other bodies keep the existing bounded detail.
+            const detail = summarizeDetail && /node_errors|value_not_in_list/.test(text)
+                ? summarizeValidationError(redact(text, auth))
+                : extractDetail(text, auth);
             throw new A1111Error('A1111_HTTP', `HTTP ${response.status} from ${path}${detail ? `: ${detail}` : '.'}`);
         }
         return response;
@@ -241,19 +312,7 @@ export class A1111Client {
         } catch {
             return '';
         }
-        if (!text) return '';
-        try {
-            const parsed = JSON.parse(text);
-            for (const key of ['detail', 'error', 'message', 'errors']) {
-                const value = parsed?.[key];
-                if (typeof value === 'string' && value) return redact(value.slice(0, 300), secret);
-                if (Array.isArray(value) && value.length) {
-                    const first = value[0];
-                    return redact(String(first?.msg ?? first).slice(0, 300), secret);
-                }
-            }
-        } catch { /* not JSON — fall through to plain text */ }
-        return redact(text.slice(0, 200), secret);
+        return extractDetail(text, secret);
     }
 
     async _json(response, path) {
@@ -379,7 +438,7 @@ export class A1111Client {
         if (typeof body.sampler_name === 'string' && body.sampler_name) payload.sampler_name = body.sampler_name;
         if (typeof body.scheduler === 'string' && body.scheduler) payload.scheduler = body.scheduler;
 
-        const response = await this._request('/sdapi/v1/txt2img', { method: 'POST', body: payload, signal });
+        const response = await this._request('/sdapi/v1/txt2img', { method: 'POST', body: payload, signal, summarizeDetail: true });
         const data = await this._json(response, '/sdapi/v1/txt2img');
         if (!data || typeof data !== 'object' || !Array.isArray(data.images) || !data.images[0]) {
             throw new A1111Error('A1111_MALFORMED', '/sdapi/v1/txt2img returned no image data (expected a non-empty images array).');
