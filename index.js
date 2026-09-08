@@ -18,7 +18,7 @@ import { getAllStyles, getAllPersonas, getReplaceRules } from './src/storage/pre
 import { getAllOutfits } from './src/storage/outfits.js';
 import { resolveActiveCharacters } from './src/prompt/binding.js';
 import { parseTriggers } from './src/prompt/triggers.js';
-import { assemblePrompt, resolveProfileKey, mergeProfileParams, applyMarkerParamOverrides, resolveLockedSeed } from './src/prompt/render.js';
+import { assemblePrompt, resolveProfileKey, mergeProfileParams, applyMarkerParamOverrides, resolveLockedSeed, resolveSizeKeyword } from './src/prompt/render.js';
 import { resolveCheckpointProfile, mergeParams } from './src/backends/checkpoint-profiles.js';
 import { cleanupEnvelope } from './src/prompt/cleanup.js';
 import { applyReplaceRules } from './src/prompt/replace.js';
@@ -158,9 +158,12 @@ jQuery(async () => {
         envelope = applyReplaceRules(envelope, rules, 'final', ruleCtx);
 
         const params = { ...envelope.params, seed: -1 };
+        // D3: resolve a portrait/landscape/square keyword into the numeric
+        // pair for THIS profile, so both param paths below see plain numbers.
+        const markerOverrides = resolveSizeKeyword(parsed.paramOverrides, profileKey);
         // D2: character seed lock (single resolved character only; marker
         // JSON seed beats the lock) — logic lives in render.js for testing.
-        const lockedSeed = resolveLockedSeed(parsed.characters, parsed.paramOverrides);
+        const lockedSeed = resolveLockedSeed(parsed.characters, markerOverrides);
         if (lockedSeed !== undefined) params.seed = lockedSeed;
         if (backendKind === 'a1111' && checkpointTitle) {
             // R2: five-layer numeric precedence (PROFILES < settings params
@@ -172,12 +175,12 @@ jQuery(async () => {
                 profileKey,
                 checkpointTitle,
                 settings,
-                markerOverrides: parsed.paramOverrides,
+                markerOverrides,
             });
             Object.assign(params, merged);
         } else {
             // Legacy proxy and NAI paths: unchanged C0 behavior.
-            applyMarkerParamOverrides(params, parsed.paramOverrides);
+            applyMarkerParamOverrides(params, markerOverrides);
         }
         return {
             profileKey,

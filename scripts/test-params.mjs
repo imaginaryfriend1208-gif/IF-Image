@@ -3,7 +3,7 @@
 // Run: node scripts/test-params.mjs
 import assert from 'node:assert/strict';
 import { parseTriggers } from '../src/prompt/triggers.js';
-import { assemblePrompt, mergeProfileParams, applyMarkerParamOverrides, clampDim, clampSteps, clampCfg, resolveLockedSeed } from '../src/prompt/render.js';
+import { assemblePrompt, mergeProfileParams, applyMarkerParamOverrides, clampDim, clampSteps, clampCfg, resolveLockedSeed, resolveSizeKeyword } from '../src/prompt/render.js';
 import { PROFILES } from '../src/profiles.js';
 import { inferProfileKey, seedCheckpointProfiles, resolveCheckpointProfile, mergeParams } from '../src/backends/checkpoint-profiles.js';
 
@@ -293,6 +293,40 @@ test('D2: marker seed beats the character lock', () => {
     const locked = { char: { lock: { seed: 42, params: null } } };
     assert.equal(resolveLockedSeed([locked], { seed: 7 }), undefined, 'marker seed present -> lock skipped');
     assert.equal(resolveLockedSeed([locked], { seed: -1 }), undefined, 'explicit random marker seed also beats the lock');
+});
+
+// --- D3: size keyword --------------------------------------------------------
+test('D3: ${size: portrait|landscape|square} parses into sizeKeyword', () => {
+    assert.equal(parseTriggers('${size: "portrait"} x').paramOverrides.sizeKeyword, 'portrait');
+    assert.equal(parseTriggers('${size: "LANDSCAPE"} x').paramOverrides.sizeKeyword, 'landscape');
+    assert.equal(parseTriggers('${size: "square"} x').paramOverrides.sizeKeyword, 'square');
+    // Numeric WxH still parses as before (no keyword set).
+    const numeric = parseTriggers('${size: "640x960"} x').paramOverrides;
+    assert.equal(numeric.width, 640);
+    assert.equal(numeric.sizeKeyword, undefined);
+    // Invalid keyword still warns and is dropped.
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+        assert.equal(parseTriggers('${size: "diagonal"} x').paramOverrides.sizeKeyword, undefined);
+    } finally { console.warn = warn; }
+});
+
+test('D3: resolveSizeKeyword maps per profile and strips the keyword', () => {
+    assert.deepEqual(resolveSizeKeyword({ sizeKeyword: 'portrait' }, 'anima'), { width: 832, height: 1216 });
+    assert.deepEqual(resolveSizeKeyword({ sizeKeyword: 'landscape' }, 'anima'), { width: 1216, height: 832 });
+    assert.deepEqual(resolveSizeKeyword({ sizeKeyword: 'portrait' }, 'krea2'), { width: 768, height: 1344 });
+    assert.deepEqual(resolveSizeKeyword({ sizeKeyword: 'square' }, 'illustrious'), { width: 1024, height: 1024 });
+    // Unknown profile: keyword dropped, nothing invented.
+    assert.deepEqual(resolveSizeKeyword({ sizeKeyword: 'square' }, 'nope'), {});
+});
+
+test('D3: numeric WxH beats the keyword; input never mutated; no keyword = passthrough', () => {
+    const both = { sizeKeyword: 'square', width: 640, height: 960, steps: 10 };
+    assert.deepEqual(resolveSizeKeyword(both, 'anima'), { width: 640, height: 960, steps: 10 });
+    assert.equal(both.sizeKeyword, 'square', 'input object untouched');
+    const plain = { steps: 10 };
+    assert.equal(resolveSizeKeyword(plain, 'anima'), plain, 'no keyword returns the same object');
 });
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`);

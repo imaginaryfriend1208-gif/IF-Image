@@ -357,6 +357,48 @@ test('v0.1.0 legacy reaches v6 with all R1 fields present', () => {
     assert.equal(legacy.generation.checkpoint, '');
 });
 
+// --- Test 23: v6 → v7 adds llmSize / cache / nai.variety with defaults ---
+test('v6 → v7 stamps generation.llmSize, cache block, and backends.nai.variety', () => {
+    const v6 = {
+        settingsVersion: 6,
+        backends: { nai: { apiKey: 'k', model: 'm' }, comfy: {}, a1111: { baseUrl: '', auth: '', checkpoint: '', discovery: { at: 0, models: [], samplers: [], schedulers: [] }, checkpointProfiles: {} } },
+        generation: { checkpoint: '' },
+    };
+    const ran = runMigrations(v6);
+    assert.equal(ran, true);
+    assert.equal(v6.settingsVersion, CURRENT_VERSION);
+    assert.equal(v6.generation.llmSize, 'auto');
+    assert.deepEqual(v6.cache, { ttlDays: 0, maxMB: 0, jpegQuality: 0 });
+    assert.equal(v6.backends.nai.variety, false);
+    assert.equal(v6.backends.nai.apiKey, 'k', 'existing nai fields untouched');
+});
+
+// --- Test 24: v7 is idempotent; user values never overwritten ---
+test('v7 re-run and existing user values survive untouched', () => {
+    const s = {
+        settingsVersion: 6,
+        backends: { nai: { apiKey: '', model: '', variety: true }, comfy: {}, a1111: {} },
+        generation: { llmSize: 'ignore' },
+        cache: { ttlDays: 30, maxMB: 200, jpegQuality: 85 },
+    };
+    runMigrations(s);
+    assert.equal(s.generation.llmSize, 'ignore');
+    assert.deepEqual(s.cache, { ttlDays: 30, maxMB: 200, jpegQuality: 85 });
+    assert.equal(s.backends.nai.variety, true);
+    // Re-run at current version: no change, no error.
+    assert.equal(runMigrations(s), false);
+});
+
+// --- Test 25: v0.1.0 legacy reaches v7 with the Phase D fields ---
+test('v0.1.0 legacy reaches v7 with llmSize/cache/variety present', () => {
+    const legacy = { enabled: true, backends: { nai: { apiKey: 'pst-test' }, comfy: { baseUrl: 'http://x', username: 'u', password: 'p', profile: 'anima' } } };
+    runMigrations(legacy);
+    assert.equal(legacy.settingsVersion, CURRENT_VERSION);
+    assert.equal(legacy.generation.llmSize, 'auto');
+    assert.deepEqual(legacy.cache, { ttlDays: 0, maxMB: 0, jpegQuality: 0 });
+    assert.equal(legacy.backends.nai.variety, false);
+});
+
 // --- Summary ---
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

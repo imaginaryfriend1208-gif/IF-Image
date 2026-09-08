@@ -112,6 +112,15 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                     <input type="checkbox" id="if_main_dryrun"> Dry-run (log envelope, no generation)
                 </label>
             </div>
+            <div class="if-image-row">
+                <label for="if_main_llmsize">LLM size hint</label>
+                <select id="if_main_llmsize" class="text_pole">
+                    <option value="auto">Auto (LLM &lt;size&gt; wins)</option>
+                    <option value="ignore">Ignore (discard LLM size)</option>
+                    <option value="force">Force (always use LLM size)</option>
+                </select>
+            </div>
+            <div class="if-image-note">How an Assist/Full-mode LLM &lt;size&gt; hint interacts with sizes from markers and profiles. Auto and Force behave identically today.</div>
 
             <hr class="if-image-sep"/>
             <h3>Generation Params</h3>
@@ -2392,6 +2401,14 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     if (dryRunEl) {
         dryRunEl.checked = settings.generation?.dryRun === true;
         dryRunEl.addEventListener('change', () => { settings.generation.dryRun = dryRunEl.checked; save(); });
+    }
+
+    // ================= Main Tab: D3 LLM size hint policy =================
+    const llmSizeEl = $('if_main_llmsize');
+    if (llmSizeEl) {
+        llmSizeEl.value = ['auto', 'ignore', 'force'].includes(settings.generation?.llmSize)
+            ? settings.generation.llmSize : 'auto';
+        llmSizeEl.addEventListener('change', () => { settings.generation.llmSize = llmSizeEl.value; save(); });
     }
 
     // ================= Main Tab: Generation Params (C0) =================

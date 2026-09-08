@@ -399,11 +399,16 @@ export function createMarkerPipeline(deps) {
     let sequence = 0;
 
     /** Merge parser-derived overrides (Full-mode <ifimage> size/negative)
-     *  into a compiled envelope without mutating the original. */
+     *  into a compiled envelope without mutating the original.
+     *  D3: generation.llmSize gates the LLM <size> pair — 'ignore' discards
+     *  it; 'auto' and 'force' both apply it (identical today; 'auto' is
+     *  reserved to later mean "only when the marker set no size"). */
     function applyOverrides(envelope, overrides) {
         if (!overrides) return envelope;
         const params = { ...envelope.params };
-        if (Number.isFinite(overrides.width) && Number.isFinite(overrides.height)) {
+        const llmSize = getSettings().generation?.llmSize ?? 'auto';
+        if (llmSize !== 'ignore'
+            && Number.isFinite(overrides.width) && Number.isFinite(overrides.height)) {
             params.width = overrides.width;
             params.height = overrides.height;
         }

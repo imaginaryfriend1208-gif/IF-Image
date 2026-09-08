@@ -185,12 +185,20 @@ export function parseTriggers(input, context = {}) {
             }
             if (typeof parsed.size === 'string') {
                 const sizeMatch = parsed.size.match(/^\s*(\d+)\s*[xX*]\s*(\d+)\s*$/);
+                const keyword = parsed.size.trim().toLowerCase();
                 if (sizeMatch) {
                     paramOverrides.width = Number(sizeMatch[1]);
                     paramOverrides.height = Number(sizeMatch[2]);
                     consumed = true;
+                } else if (keyword === 'portrait' || keyword === 'landscape' || keyword === 'square') {
+                    // D3: orientation keyword. The numeric pair depends on
+                    // the profile, which is not known here — compile()
+                    // (index.js) resolves it AFTER the profile is picked.
+                    // A numeric "WxH" from another trigger beats the keyword.
+                    paramOverrides.sizeKeyword = keyword;
+                    consumed = true;
                 } else {
-                    console.warn(`[IF Image] Ignoring invalid "size" trigger value "${parsed.size}" (expected "WxH").`);
+                    console.warn(`[IF Image] Ignoring invalid "size" trigger value "${parsed.size}" (expected "WxH" or portrait/landscape/square).`);
                 }
             }
             if (parsed.steps !== undefined) {

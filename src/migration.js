@@ -138,6 +138,29 @@ export const migrators = [
             s.generation.checkpoint = typeof a1111.checkpoint === 'string' ? a1111.checkpoint : '';
         }
     },
+
+    // 6 -> 7 (Phase D): every new Phase D settings key in ONE migrator.
+    // - generation.llmSize: how an LLM <size> hint interacts with a marker
+    //   JSON size — 'auto' (current behavior: LLM wins), 'ignore' (LLM size
+    //   discarded), 'force' (LLM wins even over marker size; equals 'auto'
+    //   today, kept distinct so 'auto' can later mean "only when the marker
+    //   has no size").
+    // - cache: image-store housekeeping; 0 = feature off for each knob
+    //   (ttlDays prune-by-age, maxMB prune-by-size, jpegQuality convert
+    //   new saves to JPEG when > 0).
+    // - backends.nai.variety: NAI Variety+ toggle (skip_cfg_above_sigma).
+    (s) => {
+        if (!s.generation) s.generation = {};
+        if (s.generation.llmSize === undefined) s.generation.llmSize = 'auto';
+        if (!s.cache || typeof s.cache !== 'object') {
+            s.cache = { ttlDays: 0, maxMB: 0, jpegQuality: 0 };
+        }
+        if (!s.backends) s.backends = {};
+        if (!s.backends.nai || typeof s.backends.nai !== 'object') {
+            s.backends.nai = { apiKey: '', model: 'nai-diffusion-4-5-full' };
+        }
+        if (s.backends.nai.variety === undefined) s.backends.nai.variety = false;
+    },
 ];
 
 /** Current schema version = number of migrators applied from zero. */

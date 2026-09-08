@@ -663,6 +663,37 @@ test('D2: onRepro is absent when the record has no usable seed', async () => {
     assert.equal(frameActions.onRepro, undefined, 'seed -1 record gets no Repro');
 });
 
+// ---- D3: generation.llmSize gates the LLM <size> override --------------------
+test('D3: llmSize "ignore" discards the LLM width/height but keeps the negative', async () => {
+    const { pipeline, queue } = makePipeline({
+        settings: {
+            enabled: true,
+            generation: { enabled: true, mode: 'direct', startTag: 'image###', endTag: '###', llmSize: 'ignore' },
+        },
+    });
+    await pipeline.onMarker({ ...marker, overrides: { width: 512, height: 768, negative: 'extra neg' } });
+    assert.equal(queue._tasks.size, 1);
+    const task = [...queue._tasks.values()][0];
+    assert.equal(task.prompt.params.width, undefined, 'LLM width discarded');
+    assert.equal(task.prompt.params.height, undefined, 'LLM height discarded');
+    assert.match(task.prompt.negative, /extra neg/, 'negative override still applies');
+});
+
+test('D3: llmSize "auto" (and unset) applies the LLM width/height', async () => {
+    for (const llmSize of ['auto', undefined]) {
+        const { pipeline, queue } = makePipeline({
+            settings: {
+                enabled: true,
+                generation: { enabled: true, mode: 'direct', startTag: 'image###', endTag: '###', llmSize },
+            },
+        });
+        await pipeline.onMarker({ ...marker, overrides: { width: 512, height: 768 } });
+        const task = [...queue._tasks.values()][0];
+        assert.equal(task.prompt.params.width, 512, `width applied for llmSize=${llmSize}`);
+        assert.equal(task.prompt.params.height, 768, `height applied for llmSize=${llmSize}`);
+    }
+});
+
 // ---- Snapshot never contains credentials -----------------------------------
 test('task snapshot never contains API keys or auth strings', async () => {
     const { pipeline, queue } = makePipeline({});

@@ -14,6 +14,8 @@ export const defaultSettings = {
         nai: {
             apiKey: '',
             model: 'nai-diffusion-4-5-full',
+            // Phase D5: Variety+ (skip_cfg_above_sigma) toggle.
+            variety: false,
         },
         comfy: {
             // 'legacy_proxy' = user's own comfy-cloud-forge-proxy (username/
@@ -72,6 +74,15 @@ export const defaultSettings = {
             anima: {},
             illustrious: {},
         },
+        // Phase D3: LLM <size> hint policy — 'auto' | 'ignore' | 'force'
+        // ('auto' currently equals 'force'; see migrator v7 note).
+        llmSize: 'auto',
+    },
+    // Phase D6: image-store housekeeping (0 = off per knob).
+    cache: {
+        ttlDays: 0,
+        maxMB: 0,
+        jpegQuality: 0,
     },
     test: {
         prompt: '',
