@@ -187,6 +187,7 @@ export function createMarkerPipeline(deps) {
                     const remaining = records.filter(r => !deletedIds.has(r.id) && r.blob);
                     if (remaining.length) {
                         entry.recordId = remaining[0].id;
+                        if (Number.isInteger(remaining[0].seed)) entry.lastSeed = remaining[0].seed;
                         showImage(entry, remaining[0].blob);
                         return;
                     }
@@ -207,6 +208,12 @@ export function createMarkerPipeline(deps) {
             onView: openView,
             onRegen: () => regenerate(entry),
         };
+        // D2: Repro = regenerate with the SHOWN image's actual seed (known
+        // from the saved record / task result). Hidden when seed is unknown
+        // or random (-1) — reproducing a random seed is meaningless.
+        if (Number.isInteger(entry.lastSeed) && entry.lastSeed >= 0) {
+            actions.onRepro = () => regenerate(entry, { seed: entry.lastSeed });
+        }
         // Delete only when the record id is known and a delete backend was
         // injected — restored frames and fresh saves both stamp recordId.
         if (deleteImageRecord && entry.recordId) {
@@ -228,14 +235,21 @@ export function createMarkerPipeline(deps) {
         return actions;
     }
 
-    async function regenerate(entry) {
+    /**
+     * Re-enqueue an entry's envelope. Default (Regen) uses seed -1; D2's
+     * Repro passes { seed: record.seed } to reproduce the exact image —
+     * that path also skips the assist/full LLM variation rewrite, because a
+     * different prompt would defeat reproduction.
+     * @param {{seed?: number}} [options]
+     */
+    async function regenerate(entry, { seed = -1 } = {}) {
         if (!entry?.envelope) return;
         releaseUrl(entry); // closes any open lightbox for this entry first (FIX 4)
         // Assist/Full: re-call the LLM with previous_prompt + a variation
         // hint so the regeneration is a genuine new take, not the same
         // prompt with a new seed. Direct mode keeps prompt/params, seed -1.
         const mode = getSettings().generation?.mode ?? 'direct';
-        if ((mode === 'assist' || mode === 'full') && typeof rewrite === 'function') {
+        if (seed < 0 && (mode === 'assist' || mode === 'full') && typeof rewrite === 'function') {
             entry.rewriting = true;
             if (entry.slot) renderSlotState(entry.slot, { status: 'running' }, doc);
             try {
@@ -256,7 +270,7 @@ export function createMarkerPipeline(deps) {
                 console.warn('[IF Image] Regenerate rewrite failed; reusing previous prompt:', err?.message ?? err);
             }
         }
-        const envelope = { ...entry.envelope, params: { ...entry.envelope.params, seed: -1 } };
+        const envelope = { ...entry.envelope, params: { ...entry.envelope.params, seed } };
         entry.envelope = envelope;
         const id = enqueue(entry, envelope);
         if (id && entry.slot) renderSlotState(entry.slot, { status: 'queued' }, doc);
@@ -279,6 +293,9 @@ export function createMarkerPipeline(deps) {
 
         if (snapshot.status === 'succeeded' && snapshot.result?.blob) {
             const result = snapshot.result;
+            // D2: remember the actual seed so the overlay's Repro can
+            // reproduce this exact image.
+            if (Number.isInteger(result.seed)) entry.lastSeed = result.seed;
             try {
                 entry.recordId = await saveImageRecord({
                     chatId: entry.chatId,
@@ -756,6 +773,8 @@ export function createMarkerPipeline(deps) {
                 }
             }
             entry.recordId = record.id;
+            // D2: the record's seed backs the overlay's Repro action.
+            if (Number.isInteger(record.seed)) entry.lastSeed = record.seed;
             showImage(entry, record.blob);
         }
     }

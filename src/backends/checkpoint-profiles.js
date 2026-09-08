@@ -129,6 +129,8 @@ export function mergeParams({ profileKey, checkpointTitle, settings, markerOverr
         if (cfg !== undefined) params.cfg = cfg;
         if (typeof layer.sampler === 'string' && layer.sampler) params.sampler = layer.sampler;
         if (typeof layer.scheduler === 'string' && layer.scheduler) params.scheduler = layer.scheduler;
+        // D2: seed override (marker JSON layer); integer >= -1, no clamping.
+        if (Number.isInteger(layer.seed) && layer.seed >= -1) params.seed = layer.seed;
     };
     applyLayer(settings?.generation?.params?.[profileKey], false);
     if (checkpointTitle) {

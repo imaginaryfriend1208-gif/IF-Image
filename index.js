@@ -18,7 +18,7 @@ import { getAllStyles, getAllPersonas, getReplaceRules } from './src/storage/pre
 import { getAllOutfits } from './src/storage/outfits.js';
 import { resolveActiveCharacters } from './src/prompt/binding.js';
 import { parseTriggers } from './src/prompt/triggers.js';
-import { assemblePrompt, resolveProfileKey, mergeProfileParams, applyMarkerParamOverrides } from './src/prompt/render.js';
+import { assemblePrompt, resolveProfileKey, mergeProfileParams, applyMarkerParamOverrides, resolveLockedSeed } from './src/prompt/render.js';
 import { resolveCheckpointProfile, mergeParams } from './src/backends/checkpoint-profiles.js';
 import { cleanupEnvelope } from './src/prompt/cleanup.js';
 import { applyReplaceRules } from './src/prompt/replace.js';
@@ -158,6 +158,10 @@ jQuery(async () => {
         envelope = applyReplaceRules(envelope, rules, 'final', ruleCtx);
 
         const params = { ...envelope.params, seed: -1 };
+        // D2: character seed lock (single resolved character only; marker
+        // JSON seed beats the lock) — logic lives in render.js for testing.
+        const lockedSeed = resolveLockedSeed(parsed.characters, parsed.paramOverrides);
+        if (lockedSeed !== undefined) params.seed = lockedSeed;
         if (backendKind === 'a1111' && checkpointTitle) {
             // R2: five-layer numeric precedence (PROFILES < settings params
             // < checkpoint profile < marker JSON; LLM <size> is applied
@@ -294,11 +298,16 @@ jQuery(async () => {
     // content lineage as the source record — so it restores in-chat like any
     // other generation for that marker.
     // ------------------------------------------------------------------
-    async function regenerateImageRecord(record) {
+    /**
+     * Re-enqueue a gallery record and save the result as a NEW record.
+     * D2: options.seed — pass record.seed to reproduce the exact image
+     * (gallery "Repro"); default -1 keeps the classic random regenerate.
+     */
+    async function regenerateImageRecord(record, { seed = -1 } = {}) {
         if (!record) throw new Error('regenerateImageRecord: record is required.');
         const backendKind = record.backend || defaultBackendKind();
         const profileKey = record.profileKey || defaultProfileKey();
-        const params = { ...(record.params || {}), seed: -1 };
+        const params = { ...(record.params || {}), seed };
         // R2: a regenerated image must use the same model as the original.
         // Fall back to the current selection only when the record has none
         // (pre-R2 records).

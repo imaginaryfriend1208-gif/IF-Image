@@ -3,7 +3,7 @@
 // Run: node scripts/test-params.mjs
 import assert from 'node:assert/strict';
 import { parseTriggers } from '../src/prompt/triggers.js';
-import { assemblePrompt, mergeProfileParams, applyMarkerParamOverrides, clampDim, clampSteps, clampCfg } from '../src/prompt/render.js';
+import { assemblePrompt, mergeProfileParams, applyMarkerParamOverrides, clampDim, clampSteps, clampCfg, resolveLockedSeed } from '../src/prompt/render.js';
 import { PROFILES } from '../src/profiles.js';
 import { inferProfileKey, seedCheckpointProfiles, resolveCheckpointProfile, mergeParams } from '../src/backends/checkpoint-profiles.js';
 
@@ -242,6 +242,57 @@ test('mergeParams: C0 clamps hold on every layer; lone marker width is ignored',
     assert.equal(p.steps, 150);           // clamped
     assert.equal(p.cfg, 30);              // checkpoint cfg clamped
     assert.equal(p.height, PROFILES.anima.height); // untouched inherits profile
+});
+
+// --- D2: marker seed + character seed lock ---------------------------------
+test('D2: ${seed:7} parses into paramOverrides.seed and reaches params', () => {
+    const parsed = parseTriggers('${seed: 7} a scene');
+    assert.equal(parsed.paramOverrides.seed, 7);
+    const params = { width: 832, height: 1216, steps: 20, cfg: 5, seed: -1 };
+    applyMarkerParamOverrides(params, parsed.paramOverrides);
+    assert.equal(params.seed, 7);
+});
+
+test('D2: invalid seed values are ignored (float, below -1, non-numeric)', () => {
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+        for (const bad of ['1.5', '-2', '"abc"']) {
+            const parsed = parseTriggers(`\${seed: ${bad}} x`);
+            assert.equal(parsed.paramOverrides.seed, undefined, `seed ${bad} must be dropped`);
+        }
+        // -1 (explicit random) is valid.
+        assert.equal(parseTriggers('${seed: -1} x').paramOverrides.seed, -1);
+    } finally { console.warn = warn; }
+});
+
+test('D2: mergeParams carries a marker seed through the a1111 layer chain', () => {
+    const settings = { generation: { params: {} }, backends: { a1111: { checkpointProfiles: { M: { profile: 'anima' } } } } };
+    const p = mergeParams({ profileKey: 'anima', checkpointTitle: 'M', settings, markerOverrides: { seed: 1234 } });
+    assert.equal(p.seed, 1234);
+    const p2 = mergeParams({ profileKey: 'anima', checkpointTitle: 'M', settings, markerOverrides: {} });
+    assert.equal(p2.seed, undefined, 'no marker seed -> merge adds none');
+});
+
+test('D2: resolveLockedSeed applies for exactly one character', () => {
+    const locked = { char: { lock: { seed: 42, params: null } } };
+    assert.equal(resolveLockedSeed([locked], {}), 42);
+    assert.equal(resolveLockedSeed([locked], undefined), 42);
+});
+
+test('D2: resolveLockedSeed never applies for two+ characters or unlocked chars', () => {
+    const locked = { char: { lock: { seed: 42, params: null } } };
+    const other = { char: { lock: { seed: 7, params: null } } };
+    assert.equal(resolveLockedSeed([locked, other], {}), undefined, 'two chars -> no lock');
+    assert.equal(resolveLockedSeed([], {}), undefined, 'no chars -> no lock');
+    assert.equal(resolveLockedSeed([{ char: { lock: { seed: -1, params: null } } }], {}), undefined, 'lock -1 = unlocked');
+    assert.equal(resolveLockedSeed([{ isPersona: true, persona: {} }], {}), undefined, 'persona entry has no char.lock');
+});
+
+test('D2: marker seed beats the character lock', () => {
+    const locked = { char: { lock: { seed: 42, params: null } } };
+    assert.equal(resolveLockedSeed([locked], { seed: 7 }), undefined, 'marker seed present -> lock skipped');
+    assert.equal(resolveLockedSeed([locked], { seed: -1 }), undefined, 'explicit random marker seed also beats the lock');
 });
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`);

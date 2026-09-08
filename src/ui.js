@@ -709,8 +709,18 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 <div class="if-image-row" style="gap:6px;">
                     <a id="if_gallery_detail_download" class="menu_button" download="if-image.png">Download</a>
                     <button id="if_gallery_detail_regen" class="menu_button">Regenerate</button>
+                    <button id="if_gallery_detail_repro" class="menu_button" title="Regenerate with this image's exact seed">Repro</button>
                     <button id="if_gallery_detail_delete" class="menu_button" style="background:#552222;">Delete</button>
                     <button id="if_gallery_detail_close" class="menu_button">Close</button>
+                </div>
+                <div class="if-image-row">
+                    <label for="if_gallery_lock_char">Lock seed to character</label>
+                    <div style="display:flex; gap:6px;">
+                        <select id="if_gallery_lock_char" class="text_pole" style="flex:1;">
+                            <option value="">-- select character --</option>
+                        </select>
+                        <button id="if_gallery_lock_apply" class="menu_button">Lock</button>
+                    </div>
                 </div>
                 <div id="if_gallery_detail_status" class="if-image-result"></div>
             </div>
@@ -2031,6 +2041,9 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     const galleryDetailMeta = $('if_gallery_detail_meta');
     const galleryDetailDownload = $('if_gallery_detail_download');
     const galleryDetailRegen = $('if_gallery_detail_regen');
+    const galleryDetailRepro = $('if_gallery_detail_repro');
+    const galleryLockChar = $('if_gallery_lock_char');
+    const galleryLockApply = $('if_gallery_lock_apply');
     const galleryDetailDelete = $('if_gallery_detail_delete');
     const galleryDetailClose = $('if_gallery_detail_close');
     const galleryDetailStatus = $('if_gallery_detail_status');
@@ -2116,8 +2129,65 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             `<span class="k">prompt:</span> ${escapeHtml(record.prompt || '')}`,
         ].join('<br>');
         showResult(galleryDetailStatus, '', false);
+        // D2: Repro/Lock need a concrete non-random seed to be meaningful.
+        const hasSeed = Number.isInteger(record.seed) && record.seed >= 0;
+        galleryDetailRepro.disabled = !hasSeed;
+        galleryLockApply.disabled = !hasSeed;
+        populateGalleryLockSelect();
         galleryDetail.style.display = '';
     }
+
+    // D2: roster select for "Lock seed to character". Loaded on each detail
+    // open so it reflects characters added since the drawer mounted.
+    async function populateGalleryLockSelect() {
+        try {
+            const chars = await getAllCharacters();
+            galleryLockChar.innerHTML = '<option value="">-- select character --</option>' +
+                chars.map(c => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name)}</option>`).join('');
+        } catch (e) {
+            console.warn('[IF Image] Lock-seed roster load failed:', e);
+        }
+    }
+
+    galleryLockApply.addEventListener('click', async () => {
+        if (!galleryDetailId || !galleryLockChar.value) return;
+        const record = galleryItems.find(r => r.id === galleryDetailId);
+        if (!record || !Number.isInteger(record.seed) || record.seed < 0) return;
+        try {
+            const chars = await getAllCharacters();
+            const target = chars.find(c => c.id === galleryLockChar.value);
+            if (!target) { showResult(galleryDetailStatus, 'Character not found.', true); return; }
+            target.lock = { seed: record.seed, params: target.lock?.params ?? null };
+            await saveCharacter(target);
+            showResult(galleryDetailStatus, `Locked seed ${record.seed} to ${target.name}.`, false);
+            // Refresh the character editor if that character is open there.
+            if (activeCharId === target.id) {
+                await loadCharactersList();
+                charLockSeed.checked = true;
+                charLockSeedValue.value = String(record.seed);
+            }
+        } catch (e) {
+            showResult(galleryDetailStatus, e.message, true);
+        }
+    });
+
+    galleryDetailRepro.addEventListener('click', async () => {
+        if (!galleryDetailId) return;
+        const record = galleryItems.find(r => r.id === galleryDetailId);
+        if (!record || typeof regenerateImage !== 'function') return;
+        galleryDetailRepro.disabled = true;
+        showResult(galleryDetailStatus, `Reproducing with seed ${record.seed}...`, false);
+        try {
+            await regenerateImage(record, { seed: record.seed });
+            showResult(galleryDetailStatus, 'Reproduced — a new record was saved.', false);
+            galleryPage = 0;
+            await loadGalleryPage();
+        } catch (e) {
+            showResult(galleryDetailStatus, e.message, true);
+        } finally {
+            galleryDetailRepro.disabled = false;
+        }
+    });
 
     galleryPrevBtn.addEventListener('click', () => {
         if (galleryPage <= 0) return;

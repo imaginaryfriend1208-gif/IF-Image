@@ -203,6 +203,12 @@ export function parseTriggers(input, context = {}) {
                 if (Number.isFinite(n)) { paramOverrides.cfg = n; consumed = true; }
                 else console.warn('[IF Image] Ignoring invalid "cfg" trigger value (not a number).');
             }
+            // D2: marker-level seed override — integer >= -1 (-1 = random).
+            if (parsed.seed !== undefined) {
+                const n = Number(parsed.seed);
+                if (Number.isInteger(n) && n >= -1) { paramOverrides.seed = n; consumed = true; }
+                else console.warn('[IF Image] Ignoring invalid "seed" trigger value (expected an integer >= -1).');
+            }
             if (consumed) return '';
         } catch {
             // Ignore parse errors, keep literal

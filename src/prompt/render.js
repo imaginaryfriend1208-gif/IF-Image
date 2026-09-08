@@ -86,6 +86,25 @@ export function applyMarkerParamOverrides(params, overrides) {
     if (steps !== undefined) params.steps = steps;
     const cfg = clampCfg(overrides.cfg);
     if (cfg !== undefined) params.cfg = cfg;
+    // D2: marker seed (already validated as integer >= -1 by parseTriggers).
+    if (Number.isInteger(overrides.seed) && overrides.seed >= -1) params.seed = overrides.seed;
+}
+
+/**
+ * D2: character seed lock. Returns the locked seed to use, or undefined.
+ * Applies ONLY when exactly one character resolved (with two or more, the
+ * locks would fight), that character's lock.seed is a non-negative integer,
+ * and the marker did not set its own seed (marker JSON beats the lock).
+ * @param {Array<{char?: {lock?: {seed?: number}}}>} characters parseTriggers().characters
+ * @param {object} [markerOverrides] parseTriggers().paramOverrides
+ * @returns {number|undefined}
+ */
+export function resolveLockedSeed(characters, markerOverrides) {
+    if (Number.isInteger(markerOverrides?.seed) && markerOverrides.seed >= -1) return undefined;
+    const list = Array.isArray(characters) ? characters : [];
+    if (list.length !== 1) return undefined;
+    const lockSeed = list[0]?.char?.lock?.seed;
+    return (Number.isInteger(lockSeed) && lockSeed >= 0) ? lockSeed : undefined;
 }
 
 /**

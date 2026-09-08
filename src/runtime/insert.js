@@ -286,6 +286,7 @@ export function renderImageFrame(slot, doc, objectUrl, actions = {}) {
     const overlayActions = [
         ['View', actions.onView],
         ['Regen', actions.onRegen],
+        ['Repro', actions.onRepro], // D2: regenerate with the record's seed
         ['Delete', actions.onDelete],
     ].filter(([, handler]) => typeof handler === 'function');
     if (overlayActions.length) {

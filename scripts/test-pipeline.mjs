@@ -572,6 +572,97 @@ test('R3: cancellation is NOT persisted', async () => {
     assert.equal(saved.length, 0, 'cancelled tasks leave no record');
 });
 
+// ---- D2: Repro (record seed) vs Regen (seed -1) ------------------------------
+test('D2: restored frame exposes onRepro with the record seed; Regen stays -1', async () => {
+    const record = {
+        id: 'rec-1', chatId: 'A', messageId: 0, swipeId: 0, occurrence: 0,
+        content: 'scene', prompt: 'p', negative: '', params: { width: 832 },
+        backend: 'a1111', profileKey: 'anima', checkpoint: 'saved-ckpt', seed: 777,
+        blob: new Blob(['x']),
+    };
+    const queue = makeQueue();
+    let frameActions = null;
+    const pipeline = createMarkerPipeline({
+        getQueue: () => queue,
+        setTimeoutImpl: (fn) => { fn(); return 0; },
+        compile: c => ({ profileKey: 'anima', envelope: { prompt: c, negative: '', params: { seed: -1 } } }),
+        getImagesForMessage: async () => [record],
+        saveImageRecord: async () => 'rec-2',
+        contentHash,
+        defaultBackendKind: () => 'a1111', defaultProfileKey: () => 'anima',
+        notify: () => {}, doc,
+        createSlotElement: (d, info) => {
+            const s = d.createElement('span');
+            s.dataset.ifimgOcc = String(info.occurrence);
+            return s;
+        },
+        renderSlotState: () => {},
+        renderImageFrame: (slot, d, url, actions) => { frameActions = actions; },
+        openLightbox: () => () => {},
+        replaceMarkers: (root, tags, onFound) => {
+            const slot = onFound({ occurrence: 0, content: 'scene' });
+            root.childNodes = [slot];
+            return 1;
+        },
+        getMessage: () => ({ swipe_id: 0 }),
+        getMessageElement: () => el('DIV', 'image### scene ###'),
+        getSettings: () => ({ enabled: true, generation: { enabled: true, mode: 'direct', startTag: 'image###', endTag: '###' } }),
+        getCurrentChatId: () => 'A',
+    });
+    await pipeline.onMarker(marker);
+    await new Promise(r => setTimeout(r, 10)); // restoreImages settles
+    assert.ok(frameActions, 'restored frame rendered');
+    assert.equal(typeof frameActions.onRepro, 'function', 'record with a real seed exposes Repro');
+    await frameActions.onRepro();
+    let task = [...queue._tasks.values()].at(-1);
+    assert.equal(task.prompt.params.seed, 777, 'Repro reuses the record seed');
+    assert.equal(task.prompt.params.checkpoint, 'saved-ckpt', 'Repro keeps the record checkpoint');
+    await frameActions.onRegen();
+    task = [...queue._tasks.values()].at(-1);
+    assert.equal(task.prompt.params.seed, -1, 'Regen still randomizes');
+});
+
+test('D2: onRepro is absent when the record has no usable seed', async () => {
+    const record = {
+        id: 'rec-1', chatId: 'A', messageId: 0, swipeId: 0, occurrence: 0,
+        content: 'scene', prompt: 'p', negative: '', params: {},
+        backend: 'a1111', profileKey: 'anima', seed: -1, blob: new Blob(['x']),
+    };
+    const queue = makeQueue();
+    let frameActions = null;
+    const pipeline = createMarkerPipeline({
+        getQueue: () => queue,
+        setTimeoutImpl: (fn) => { fn(); return 0; },
+        compile: c => ({ profileKey: 'anima', envelope: { prompt: c, negative: '', params: { seed: -1 } } }),
+        getImagesForMessage: async () => [record],
+        saveImageRecord: async () => 'rec-2',
+        contentHash,
+        defaultBackendKind: () => 'a1111', defaultProfileKey: () => 'anima',
+        notify: () => {}, doc,
+        createSlotElement: (d, info) => {
+            const s = d.createElement('span');
+            s.dataset.ifimgOcc = String(info.occurrence);
+            return s;
+        },
+        renderSlotState: () => {},
+        renderImageFrame: (slot, d, url, actions) => { frameActions = actions; },
+        openLightbox: () => () => {},
+        replaceMarkers: (root, tags, onFound) => {
+            const slot = onFound({ occurrence: 0, content: 'scene' });
+            root.childNodes = [slot];
+            return 1;
+        },
+        getMessage: () => ({ swipe_id: 0 }),
+        getMessageElement: () => el('DIV', 'image### scene ###'),
+        getSettings: () => ({ enabled: true, generation: { enabled: true, mode: 'direct', startTag: 'image###', endTag: '###' } }),
+        getCurrentChatId: () => 'A',
+    });
+    await pipeline.onMarker(marker);
+    await new Promise(r => setTimeout(r, 10));
+    assert.ok(frameActions);
+    assert.equal(frameActions.onRepro, undefined, 'seed -1 record gets no Repro');
+});
+
 // ---- Snapshot never contains credentials -----------------------------------
 test('task snapshot never contains API keys or auth strings', async () => {
     const { pipeline, queue } = makePipeline({});
