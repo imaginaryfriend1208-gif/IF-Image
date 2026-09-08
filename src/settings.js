@@ -32,6 +32,11 @@ export const defaultSettings = {
         a1111: {
             baseUrl: '',
             auth: '',
+            // 'st-relay': requests go through SillyTavern's own /api/sd/*
+            // server endpoints (no CORS needed on the backend — the same
+            // path ST's Image Generation extension uses). 'direct': the
+            // browser calls the backend itself (backend must send CORS).
+            transport: 'st-relay',
             // Discovered checkpoint title; set explicitly via Refresh Models.
             checkpoint: '',
             // Phase R1: persisted discovery cache ({at: 0} = never ran).

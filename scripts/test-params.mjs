@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { parseTriggers } from '../src/prompt/triggers.js';
 import { assemblePrompt, mergeProfileParams, applyMarkerParamOverrides, clampDim, clampSteps, clampCfg, resolveLockedSeed, resolveSizeKeyword } from '../src/prompt/render.js';
 import { PROFILES } from '../src/profiles.js';
-import { inferProfileKey, seedCheckpointProfiles, resolveCheckpointProfile, mergeParams } from '../src/backends/checkpoint-profiles.js';
+import { inferProfileKey, seedCheckpointProfiles, resolveCheckpointProfile, mergeParams, matchDiscoveredName, alignCheckpointProfileNames } from '../src/backends/checkpoint-profiles.js';
 
 let passed = 0;
 let failed = 0;
@@ -327,6 +327,60 @@ test('D3: numeric WxH beats the keyword; input never mutated; no keyword = passt
     assert.equal(both.sizeKeyword, 'square', 'input object untouched');
     const plain = { steps: 10 };
     assert.equal(resolveSizeKeyword(plain, 'anima'), plain, 'no keyword returns the same object');
+});
+
+test('matchDiscoveredName: aligns ComfyUI-style ids with the server spelling; keeps unknowns verbatim', () => {
+    const samplers = ['Euler', 'Euler a', 'DPM++ 2M', 'DPM++ 2M SDE', 'DPM++ 2M SDE Karras'];
+    assert.equal(matchDiscoveredName('euler', samplers), 'Euler');
+    assert.equal(matchDiscoveredName('Euler', samplers), 'Euler', 'exact match wins');
+    assert.equal(matchDiscoveredName('euler_ancestral', samplers), 'Euler a');
+    assert.equal(matchDiscoveredName('euler a', samplers), 'Euler a');
+    assert.equal(matchDiscoveredName('dpmpp_2m', samplers), 'DPM++ 2M');
+    assert.equal(matchDiscoveredName('dpmpp_2m_sde', samplers), 'DPM++ 2M SDE');
+    assert.equal(matchDiscoveredName('dpmpp_2m_sde_karras', samplers), 'DPM++ 2M SDE Karras');
+    assert.equal(matchDiscoveredName('uni_pc', samplers), 'uni_pc', 'no match: original kept');
+    assert.equal(matchDiscoveredName('euler', []), 'euler', 'empty list: original kept');
+    assert.equal(matchDiscoveredName('euler', undefined), 'euler');
+    assert.equal(matchDiscoveredName('', samplers), '');
+    assert.equal(matchDiscoveredName('sgm_uniform', ['Automatic', 'simple', 'sgm_uniform']), 'sgm_uniform');
+    assert.equal(matchDiscoveredName('SGM Uniform', ['Automatic', 'simple', 'sgm_uniform']), 'sgm_uniform');
+});
+
+test('seedCheckpointProfiles: default sampler/scheduler are aligned to the discovered lists', () => {
+    const models = [{ title: 'Krea 2 | X', family: 'krea2', defaults: { steps: 8, sampler: 'euler', scheduler: 'simple' } }];
+    const discovered = { samplers: ['Euler', 'Euler a'], schedulers: ['Automatic', 'simple'] };
+    const seeded = seedCheckpointProfiles({}, models, 'anima', discovered);
+    assert.deepEqual(seeded['Krea 2 | X'], { profile: 'krea2', steps: 8, sampler: 'Euler', scheduler: 'simple' });
+    // Without discovered lists (4th arg omitted) the names pass through untouched.
+    const plainSeed = seedCheckpointProfiles({}, models, 'anima');
+    assert.equal(plainSeed['Krea 2 | X'].sampler, 'euler');
+    // Existing rows are never rewritten by alignment.
+    const existing = { 'Krea 2 | X': { profile: 'krea2', sampler: 'euler' } };
+    const again = seedCheckpointProfiles(existing, models, 'anima', discovered);
+    assert.deepEqual(again['Krea 2 | X'], { profile: 'krea2', sampler: 'euler' });
+});
+
+test('alignCheckpointProfileNames: spelling-only rewrite of existing rows; unknowns and malformed entries untouched', () => {
+    const profiles = {
+        'A': { profile: 'krea2', sampler: 'euler', scheduler: 'sgm_uniform', steps: 8 },
+        'B': { profile: 'anima', sampler: 'Euler a' },            // already canonical
+        'C': { profile: 'anima', sampler: 'uni_pc' },             // no match: kept verbatim
+        'D': { profile: 'illustrious' },                          // no names at all
+        'E': 'garbage',                                           // malformed persisted value
+    };
+    const discovered = { samplers: ['Euler', 'Euler a', 'DPM++ 2M'], schedulers: ['Automatic', 'simple', 'sgm_uniform'] };
+    const { profiles: out, changed } = alignCheckpointProfileNames(profiles, discovered);
+    assert.equal(changed, 1);
+    assert.notEqual(out, profiles, 'new object');
+    assert.deepEqual(out.A, { profile: 'krea2', sampler: 'Euler', scheduler: 'sgm_uniform', steps: 8 });
+    assert.deepEqual(profiles.A, { profile: 'krea2', sampler: 'euler', scheduler: 'sgm_uniform', steps: 8 }, 'input not mutated');
+    assert.equal(out.B, profiles.B, 'unchanged rows are shared, not cloned');
+    assert.equal(out.C, profiles.C);
+    assert.equal(out.D, profiles.D);
+    assert.equal(out.E, 'garbage');
+    // Empty discovery: nothing changes.
+    assert.equal(alignCheckpointProfileNames(profiles, {}).changed, 0);
+    assert.deepEqual(alignCheckpointProfileNames(undefined, discovered), { profiles: {}, changed: 0 });
 });
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`);

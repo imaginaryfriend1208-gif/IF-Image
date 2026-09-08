@@ -39,24 +39,73 @@
 }
 
 /* R4: per-checkpoint profile table (Backends tab, A1111 block). */
+/* Checkpoint-profile table: horizontal scroll on narrow drawers instead of
+   squeezing numeric inputs until their digits are clipped. */
+.if-image-cp-scroll {
+    width: 100%;
+    overflow-x: auto;
+}
+
 .if-image-cp-table {
     width: 100%;
+    min-width: 760px;
     border-collapse: collapse;
     font-size: 0.85em;
 }
 
 .if-image-cp-table th,
 .if-image-cp-table td {
-    padding: 2px 4px;
+    padding: 3px 4px;
     text-align: left;
+    vertical-align: middle;
     border-bottom: 1px solid var(--SmartThemeBorderColor, #3b4261);
+    white-space: nowrap;
+}
+
+.if-image-cp-table td.if-image-cp-title {
+    white-space: normal;
+    min-width: 160px;
+    max-width: 260px;
+    overflow-wrap: anywhere;
 }
 
 .if-image-cp-table input,
 .if-image-cp-table select {
     width: 100%;
-    min-width: 52px;
     box-sizing: border-box;
+    margin: 0;
+}
+
+.if-image-cp-table input[type="number"] {
+    min-width: 72px;
+}
+
+.if-image-cp-table select {
+    min-width: 96px;
+}
+
+.if-image-cp-table select[data-cp-field="profile"] {
+    min-width: 110px;
+}
+
+.if-image-cp-table td.if-image-cp-actions .menu_button {
+    margin: 0;
+    padding: 2px 8px;
+}
+
+.if-image-cp-table tr.if-image-cp-stale td {
+    opacity: 0.7;
+}
+
+.if-image-cp-badge {
+    display: inline-block;
+    margin-left: 4px;
+    padding: 0 5px;
+    border-radius: 6px;
+    font-size: 0.8em;
+    background: #553333;
+    color: #f0d0d0;
+    vertical-align: middle;
 }
 
 .if-image-tab.active {

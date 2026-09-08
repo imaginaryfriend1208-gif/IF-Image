@@ -1,4 +1,9 @@
-// IF Image - AUTOMATIC1111-compatible API client (browser-direct).
+// IF Image - AUTOMATIC1111-compatible API client.
+// Two transports (cfg.getTransport):
+//   'st-relay' (default in settings): browser -> SillyTavern server
+//       (/api/sd/*) -> backend. Same path ST's own Image Generation
+//       extension uses; needs no CORS on the backend. See ST_RELAY_ROUTES.
+//   'direct': browser -> backend. Needs CORS on the backend.
 // Mirrors the SillyTavern "Stable Diffusion WebUI (AUTOMATIC1111)" source
 // contract, verified from D:/SillyTavern:
 //   src/util.js getBasicAuthHeader(auth) -> `Basic ${Buffer.from(auth).toString('base64')}`
@@ -199,12 +204,90 @@ export function summarizeValidationError(detailText) {
 // Client
 // ---------------------------------------------------------------------------
 
+/**
+ * Re-wrap a SillyTavern relay response body into the matching /sdapi/v1 JSON
+ * text. Returns null when the body is not what the relay endpoint promises.
+ *   options -> ST /get-model returns the bare checkpoint title (text or JSON
+ *              string) -> `{ sd_model_checkpoint }`
+ *   models  -> ST /models returns [{value,text}] -> [{title, model_name}]
+ *   names   -> ST /samplers,/schedulers return [string] -> [{name}]
+ *   raw     -> ST /generate forwards the txt2img JSON unchanged
+ * @param {'options'|'models'|'names'|'raw'} shape
+ * @param {string} text raw relay body
+ * @returns {string|null}
+ */
+export function reshapeRelayBody(shape, text) {
+    if (shape === 'raw') {
+        try { JSON.parse(text); } catch { return null; }
+        return text;
+    }
+    if (shape === 'options') {
+        let title = String(text ?? '');
+        try {
+            const parsed = JSON.parse(text);
+            if (typeof parsed === 'string') title = parsed;
+            else if (parsed && typeof parsed === 'object' && typeof parsed.sd_model_checkpoint === 'string') title = parsed.sd_model_checkpoint;
+            else title = '';
+        } catch { /* plain text title */ }
+        return JSON.stringify({ sd_model_checkpoint: title.trim() });
+    }
+    let data;
+    try { data = JSON.parse(text); } catch { return null; }
+    if (!Array.isArray(data)) return null;
+    if (shape === 'models') {
+        return JSON.stringify(data
+            .map(entry => {
+                if (typeof entry === 'string') return { title: entry, model_name: entry };
+                const title = entry && typeof entry.value === 'string' && entry.value
+                    ? entry.value
+                    : (entry && typeof entry.title === 'string' ? entry.title : '');
+                return title ? { title, model_name: title } : null;
+            })
+            .filter(Boolean));
+    }
+    if (shape === 'names') {
+        return JSON.stringify(data
+            .map(entry => (typeof entry === 'string' ? entry : (entry && typeof entry.name === 'string' ? entry.name : null)))
+            .filter(Boolean)
+            .map(name => ({ name })));
+    }
+    return null;
+}
+
+/**
+ * ST-relay route table: our /sdapi/v1 path -> SillyTavern's own server-side
+ * proxy endpoint (src/endpoints/stable-diffusion.js, mounted at /api/sd).
+ * Every relay endpoint is a POST whose JSON body carries { url, auth } plus,
+ * for generate, the txt2img payload; the ST server adds the Basic header and
+ * talks to the backend itself, so the browser never hits CORS.
+ * `shape` re-wraps the relay's trimmed responses into the /sdapi/v1 shapes
+ * the rest of this client already understands.
+ */
+export const ST_RELAY_ROUTES = {
+    '/sdapi/v1/options': { endpoint: '/api/sd/get-model', shape: 'options' },
+    '/sdapi/v1/sd-models': { endpoint: '/api/sd/models', shape: 'models' },
+    '/sdapi/v1/samplers': { endpoint: '/api/sd/samplers', shape: 'names' },
+    '/sdapi/v1/schedulers': { endpoint: '/api/sd/schedulers', shape: 'names' },
+    '/sdapi/v1/txt2img': { endpoint: '/api/sd/generate', shape: 'raw' },
+};
+
+/** Transport identifiers accepted by A1111Client. */
+export const A1111_TRANSPORTS = ['st-relay', 'direct'];
+
 export class A1111Client {
     /**
      * @param {{getBaseUrl: () => string, getAuth: () => string,
+     *          getTransport?: () => string,
+     *          getRequestHeaders?: () => object,
      *          fetchImpl?: typeof fetch, timeoutMs?: number}} cfg
      * fetchImpl is injectable for offline tests. timeoutMs (when set)
      * overrides the per-kind defaults for every request.
+     * getTransport returns 'direct' (browser -> backend, needs CORS on the
+     * backend) or 'st-relay' (browser -> SillyTavern server -> backend, the
+     * same path ST's own Image Generation extension uses). Default: direct
+     * when the getter is absent, so existing single-purpose callers/tests
+     * keep their behavior. getRequestHeaders supplies ST's CSRF headers for
+     * the relay (getContext().getRequestHeaders).
      */
     constructor(cfg) {
         if (!cfg || typeof cfg.getBaseUrl !== 'function' || typeof cfg.getAuth !== 'function') {
@@ -218,6 +301,13 @@ export class A1111Client {
         }
     }
 
+    /** Effective transport: 'st-relay' or 'direct'. Unknown values -> direct. */
+    transport() {
+        let value = '';
+        try { value = String(this.cfg.getTransport?.() ?? ''); } catch { value = ''; }
+        return value === 'st-relay' ? 'st-relay' : 'direct';
+    }
+
     /**
      * Core request runner: URL validation, exact ST Basic auth header,
      * redirect:'error' (credentials must never travel across redirects),
@@ -228,6 +318,9 @@ export class A1111Client {
         const base = normalizeBaseUrl(this.cfg.getBaseUrl());
         if (!base.ok) {
             throw new A1111Error('A1111_CONFIG', `Invalid AUTOMATIC1111 base URL: ${base.error}.`);
+        }
+        if (this.transport() === 'st-relay') {
+            return this._relayRequest(path, base.url, { body, signal, timeoutMs });
         }
         // The Authentication string is used exactly as configured: no trim,
         // no colon insertion, no Bearer fallback attempts.
@@ -302,6 +395,104 @@ export class A1111Client {
             throw new A1111Error('A1111_HTTP', `HTTP ${response.status} from ${path}${detail ? `: ${detail}` : '.'}`);
         }
         return response;
+    }
+
+    /**
+     * ST-relay transport. Posts { url, auth, ...payload } to SillyTavern's
+     * /api/sd/* endpoint for `path`; the ST server performs the backend call
+     * (server-side, so no CORS) and returns a trimmed body which is re-shaped
+     * here into a Response-like object whose text() yields the /sdapi/v1
+     * shape the normal parsers expect.
+     *
+     * Rules specific to this path:
+     * - The backend URL must be the FINAL https/http origin: Node drops the
+     *   Authorization header on a cross-origin redirect, so an http:// URL
+     *   that 301s to https fails with a bare relay 500.
+     * - txt2img is NEVER aborted mid-flight. ST's /api/sd/generate reacts to
+     *   a closed browser socket by POSTing /sdapi/v1/interrupt on the
+     *   backend, which on a shared host can kill another user's job. The
+     *   caller's signal is honored only BEFORE the request is sent; an abort
+     *   that arrives while it is in flight is surfaced as A1111_ABORTED
+     *   after the relay settles, and the result is discarded.
+     * - The relay collapses every failure into HTTP 500 with no detail. The
+     *   error text points at the ST server console, where the real backend
+     *   response is logged.
+     */
+    async _relayRequest(path, backendUrl, { body, signal, timeoutMs } = {}) {
+        const route = ST_RELAY_ROUTES[path];
+        if (!route) {
+            throw new A1111Error('A1111_CONFIG', `${path} is not available through the SillyTavern relay. Switch the connection to "Direct" for this call.`);
+        }
+        const auth = String(this.cfg.getAuth() ?? '');
+        let headers = {};
+        try {
+            const supplied = this.cfg.getRequestHeaders?.();
+            if (supplied && typeof supplied === 'object') headers = { ...supplied };
+        } catch { headers = {}; }
+        headers['Content-Type'] = 'application/json';
+        const isGenerate = path === '/sdapi/v1/txt2img';
+
+        if (signal?.aborted) {
+            throw new A1111Error('A1111_ABORTED', `Request to ${path} was cancelled before it started.`);
+        }
+        const controller = new AbortController();
+        let timedOut = false;
+        let userCancelled = false;
+        const onExternalAbort = () => {
+            userCancelled = true;
+            // Discovery calls are cheap and side-effect free: abort them.
+            // Generation must run to completion (see the interrupt note).
+            if (!isGenerate) controller.abort();
+        };
+        if (signal) signal.addEventListener('abort', onExternalAbort, { once: true });
+        const timeout = timeoutMs ?? this.timeoutMs ?? (isGenerate ? GENERATION_TIMEOUT_MS : DISCOVERY_TIMEOUT_MS);
+        // A timeout on generate would also close the socket -> interrupt.
+        // Discovery keeps its timeout; generation waits for the relay.
+        const timer = isGenerate ? null : setTimeout(() => { timedOut = true; controller.abort(); }, timeout);
+
+        let response;
+        try {
+            response = await this.fetchImpl(route.endpoint, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({ url: backendUrl, auth, ...(body && typeof body === 'object' ? body : {}) }),
+                signal: controller.signal,
+            });
+        } catch (error) {
+            if (timedOut) {
+                throw new A1111Error('A1111_TIMEOUT', `Relay request for ${path} timed out after ${timeout} ms.`);
+            }
+            if (userCancelled || error?.name === 'AbortError') {
+                throw new A1111Error('A1111_ABORTED', `Request to ${path} was cancelled.`);
+            }
+            throw new A1111Error('A1111_NETWORK', `Could not reach the SillyTavern server relay (${route.endpoint}): ${error?.message ?? error}.`);
+        } finally {
+            if (timer) clearTimeout(timer);
+            if (signal) signal.removeEventListener('abort', onExternalAbort);
+        }
+        if (userCancelled) {
+            // Generation finished on the server after the caller gave up:
+            // report the cancellation and drop the (already produced) image.
+            throw new A1111Error('A1111_ABORTED', `Request to ${path} was cancelled; the server job ran to completion and its result was discarded.`);
+        }
+        if (response.status === 401 || response.status === 403) {
+            throw new A1111Error('A1111_AUTH', `SillyTavern rejected the relay request (HTTP ${response.status}). Reload the page to refresh the session, then try again.`);
+        }
+        if (!response.ok) {
+            const hint = /^http:\/\//i.test(backendUrl)
+                ? ' The API base URL uses http:// — if the service redirects to https, the relay drops the credentials; enter the https:// URL directly.'
+                : '';
+            throw new A1111Error('A1111_HTTP', `The SillyTavern relay returned HTTP ${response.status} for ${path}. The backend answer (wrong URL, rejected key, or a generation failure) is logged in the SillyTavern server console.${hint}`);
+        }
+        let text = '';
+        try { text = await response.text(); } catch (error) {
+            throw new A1111Error('A1111_MALFORMED', `${path} (relay) returned an unreadable body (${error?.message ?? error}).`);
+        }
+        const reshaped = reshapeRelayBody(route.shape, text);
+        if (reshaped === null) {
+            throw new A1111Error('A1111_MALFORMED', `${path} (relay) did not return the expected JSON (first 120 chars: "${text.slice(0, 120)}").`);
+        }
+        return { ok: true, status: response.status, headers: { get: () => 'application/json' }, text: async () => reshaped };
     }
 
     /** Bounded, JSON-preferring, credential-redacted error detail. */

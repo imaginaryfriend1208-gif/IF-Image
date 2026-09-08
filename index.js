@@ -54,6 +54,11 @@ const comfy = new ComfyProxyClient({
 const a1111 = new A1111Client({
     getBaseUrl: () => settings.backends.a1111.baseUrl,
     getAuth: () => settings.backends.a1111.auth,
+    // 'st-relay' routes through SillyTavern's /api/sd/* like the built-in
+    // Image Generation extension (no backend CORS needed); 'direct' keeps
+    // the browser-to-backend path. Read live so the UI toggle applies at once.
+    getTransport: () => settings.backends.a1111.transport,
+    getRequestHeaders: () => getContext().getRequestHeaders(),
 });
 
 function notify(kind, message) {

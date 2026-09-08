@@ -29,9 +29,44 @@ export function inferProfileKey(model, fallbackKey) {
     return fallbackKey;
 }
 
+/**
+ * Canonical spelling key for sampler/scheduler names: lower-case, with
+ * spaces/underscores/"++" collapsed so ComfyUI-style ids ("dpmpp_2m_sde",
+ * "euler_ancestral") and A1111 display names ("DPM++ 2M SDE", "Euler a")
+ * fall on the same key.
+ */
+function nameKey(name) {
+    return String(name ?? '')
+        .toLowerCase()
+        .replace(/\+\+/g, 'pp')
+        .replace(/_ancestral\b|\bancestral\b/g, ' a')
+        .replace(/[\s_\-]+/g, '');
+}
+
+/**
+ * Map a sampler/scheduler name coming from an enrichment source (e.g. the
+ * proxy's /internal/models defaults, ComfyUI spelling) onto the name the
+ * server actually lists in /sdapi/v1/samplers or /schedulers. Exact match
+ * first, then the spelling-insensitive key. Returns the original string
+ * when the discovered list is empty or has no match, so a value is never
+ * silently dropped — the table shows it as "(not discovered)".
+ * @param {string} name
+ * @param {string[]} discovered
+ * @returns {string}
+ */
+export function matchDiscoveredName(name, discovered) {
+    if (typeof name !== 'string' || !name) return name;
+    const list = Array.isArray(discovered) ? discovered.filter(v => typeof v === 'string') : [];
+    if (list.includes(name)) return name;
+    const key = nameKey(name);
+    const hit = list.find(v => nameKey(v) === key);
+    return hit ?? name;
+}
+
 /** Map /internal/models-style defaults onto override field names, clamped
- *  with the C0 policies. Unknown/invalid fields are simply absent. */
-function overridesFromDefaults(defaults) {
+ *  with the C0 policies. Unknown/invalid fields are simply absent. Sampler/
+ *  scheduler names are aligned with the discovered lists when given. */
+function overridesFromDefaults(defaults, { samplers, schedulers } = {}) {
     if (!defaults || typeof defaults !== 'object') return {};
     const out = {};
     const width = clampDim(defaults.width);
@@ -42,8 +77,8 @@ function overridesFromDefaults(defaults) {
     if (height !== undefined) out.height = height;
     if (steps !== undefined) out.steps = steps;
     if (cfg !== undefined) out.cfg = cfg;
-    if (typeof defaults.sampler === 'string' && defaults.sampler) out.sampler = defaults.sampler;
-    if (typeof defaults.scheduler === 'string' && defaults.scheduler) out.scheduler = defaults.scheduler;
+    if (typeof defaults.sampler === 'string' && defaults.sampler) out.sampler = matchDiscoveredName(defaults.sampler, samplers);
+    if (typeof defaults.scheduler === 'string' && defaults.scheduler) out.scheduler = matchDiscoveredName(defaults.scheduler, schedulers);
     return out;
 }
 
@@ -56,9 +91,12 @@ function overridesFromDefaults(defaults) {
  * @param {Record<string, object>} existing settings.backends.a1111.checkpointProfiles
  * @param {Array<{title: string, family?: string, defaults?: object}>} models
  * @param {string} fallbackKey profile key used when inference has no signal
+ * @param {{samplers?: string[], schedulers?: string[]}} [discovered] server
+ *   sampler/scheduler lists; default sampler/scheduler names are aligned to
+ *   these spellings (e.g. "euler" -> "Euler") when a match exists.
  * @returns {Record<string, object>}
  */
-export function seedCheckpointProfiles(existing, models, fallbackKey) {
+export function seedCheckpointProfiles(existing, models, fallbackKey, discovered = {}) {
     const base = existing && typeof existing === 'object' ? existing : {};
     const out = { ...base };
     for (const model of Array.isArray(models) ? models : []) {
@@ -66,10 +104,39 @@ export function seedCheckpointProfiles(existing, models, fallbackKey) {
         if (!title || out[title]) continue;
         out[title] = {
             profile: inferProfileKey(model, fallbackKey),
-            ...overridesFromDefaults(model.defaults),
+            ...overridesFromDefaults(model.defaults, discovered),
         };
     }
     return out;
+}
+
+/**
+ * Align the sampler/scheduler spelling of EXISTING checkpoint-profile rows
+ * with the server's discovered lists. Only rows whose current value is not
+ * in the list but has a spelling-insensitive match are rewritten (e.g. a row
+ * seeded before name matching existed with "euler" while the server lists
+ * "Euler"). Values with no match are left verbatim (they still show as
+ * "(not discovered)" in the table), so nothing the user typed is lost.
+ * Returns a NEW object; entries that need no change are shared as-is.
+ * @param {Record<string, object>} profiles settings.backends.a1111.checkpointProfiles
+ * @param {{samplers?: string[], schedulers?: string[]}} discovered
+ * @returns {{profiles: Record<string, object>, changed: number}}
+ */
+export function alignCheckpointProfileNames(profiles, { samplers, schedulers } = {}) {
+    const base = profiles && typeof profiles === 'object' ? profiles : {};
+    const out = {};
+    let changed = 0;
+    for (const [title, entry] of Object.entries(base)) {
+        if (!entry || typeof entry !== 'object') { out[title] = entry; continue; }
+        const sampler = typeof entry.sampler === 'string' && entry.sampler ? matchDiscoveredName(entry.sampler, samplers) : entry.sampler;
+        const scheduler = typeof entry.scheduler === 'string' && entry.scheduler ? matchDiscoveredName(entry.scheduler, schedulers) : entry.scheduler;
+        if (sampler === entry.sampler && scheduler === entry.scheduler) { out[title] = entry; continue; }
+        out[title] = { ...entry };
+        if (sampler !== entry.sampler) out[title].sampler = sampler;
+        if (scheduler !== entry.scheduler) out[title].scheduler = scheduler;
+        changed += 1;
+    }
+    return { profiles: out, changed };
 }
 
 /**

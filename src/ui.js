@@ -3,7 +3,7 @@
 
 import { NAI_MODELS } from './backends/nai.js';
 import { resolveCheckpoint } from './backends/a1111.js';
-import { resolveCheckpointProfile, mergeParams, seedCheckpointProfiles } from './backends/checkpoint-profiles.js';
+import { resolveCheckpointProfile, mergeParams, seedCheckpointProfiles, alignCheckpointProfileNames } from './backends/checkpoint-profiles.js';
 import { PROFILES, PROFILE_KEYS, applyProfile } from './profiles.js';
 import { getAllCharacters, saveCharacter, removeCharacter, createDefaultCharacter, emptyBooruDetail, applyCharMigrations } from './storage/chars.js';
 import { getAllPersonas, savePersona, removePersona, getAllStyles, saveStyle, removeStyle, createDefaultPersona, createDefaultStyle, getReplaceRules, saveReplaceRules } from './storage/presets.js';
@@ -342,9 +342,18 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             <!-- AUTOMATIC1111-compatible hosted API block -->
             <div data-if-conn="a1111" style="display:none;">
                 <div class="if-image-row">
+                    <label for="if_a1111_transport">Connect through</label>
+                    <select id="if_a1111_transport" class="text_pole">
+                        <option value="st-relay">SillyTavern server (recommended — no CORS needed)</option>
+                        <option value="direct">Browser directly (backend must allow CORS)</option>
+                    </select>
+                </div>
+                <div class="if-image-note">"SillyTavern server" uses the same /api/sd relay as SillyTavern's built-in Image Generation, so the backend only needs to accept the key. Enter the final https:// URL — a redirect drops the credentials.</div>
+                <div class="if-image-row">
                     <label for="if_a1111_url">API base URL</label>
                     <input id="if_a1111_url" type="text" class="text_pole textarea_compact" placeholder="https://your-host.example" value="">
                 </div>
+                <div class="if-image-note error" id="if_a1111_url_hint" style="display:none;"></div>
                 <div class="if-image-row">
                     <label for="if_a1111_auth">Authentication (as provided by the service)</label>
                     <input id="if_a1111_auth" type="password" class="text_pole textarea_compact" autocomplete="off" placeholder="user:password or the raw key string" value="">
@@ -365,7 +374,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
 
                 <hr class="if-image-sep"/>
                 <h3>Checkpoint profiles</h3>
-                <div class="if-image-note">Per-checkpoint prompt profile and generation defaults. Blank numeric fields inherit the profile / Generation Params values. Edits are kept across re-discovery; "Reset" re-infers the row from discovery.</div>
+                <div class="if-image-note">One row is created automatically for every checkpoint the server reports (Test Connection / Refresh Models); the prompt profile is inferred from the server's family hint or the checkpoint name. Blank numeric fields inherit the profile / Generation Params values. Your edits are kept across re-discovery; "Reset" re-infers the row from discovery. Rows marked <em>stale</em> are no longer offered by the server and can be removed.</div>
                 <div id="if_a1111_cp_table"></div>
             </div>
         </div>
@@ -948,12 +957,43 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     // insertion (ST getBasicAuthHeader encodes the raw string). Any URL or
     // auth change invalidates the discovered checkpoint list: a stale list
     // from the old endpoint must never drive generation on the new one.
+    // Transport (st-relay | direct). Changing it does not change the endpoint
+    // or the credentials, so the persisted discovery stays valid; only
+    // in-flight requests are dropped.
+    const a1111Transport = $('if_a1111_transport');
+    const a1111UrlHint = $('if_a1111_url_hint');
+    function syncA1111UrlHint() {
+        if (!a1111UrlHint) return;
+        const url = settings.backends.a1111.baseUrl || '';
+        const relay = settings.backends.a1111.transport !== 'direct';
+        const plainHttp = /^http:\/\//i.test(url) && !/^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/i.test(url);
+        if (plainHttp) {
+            a1111UrlHint.textContent = relay
+                ? 'This URL is http://. If the service redirects to https, the SillyTavern relay drops the credentials and the request fails with HTTP 500 — enter the https:// URL directly.'
+                : 'This URL is http://. If the service redirects to https, the browser blocks the redirected request — enter the https:// URL directly.';
+            a1111UrlHint.style.display = '';
+        } else {
+            a1111UrlHint.textContent = '';
+            a1111UrlHint.style.display = 'none';
+        }
+    }
+    if (a1111Transport) {
+        a1111Transport.value = settings.backends.a1111.transport === 'direct' ? 'direct' : 'st-relay';
+        a1111Transport.addEventListener('change', () => {
+            settings.backends.a1111.transport = a1111Transport.value === 'direct' ? 'direct' : 'st-relay';
+            invalidateA1111Discovery('Connection path changed — click Test Connection to verify.', { clearPersisted: false });
+            save();
+            syncA1111UrlHint();
+        });
+    }
     a1111Url.addEventListener('change', () => {
         settings.backends.a1111.baseUrl = a1111Url.value.trim();
         invalidateA1111Discovery('Base URL changed — model list invalidated. Click Refresh Models.');
         save();
+        syncA1111UrlHint();
         syncTestGenVisibility();
     });
+    syncA1111UrlHint();
     a1111Auth.addEventListener('change', () => {
         settings.backends.a1111.auth = a1111Auth.value;
         invalidateA1111Discovery('Authentication changed — model list invalidated. Click Refresh Models.');
@@ -1163,8 +1203,13 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             schedulers: discovery.schedulers,
         };
         const fallbackKey = settings.generation.profile || settings.backends.comfy.profile || 'anima';
+        const discoveredNames = { samplers: discovery.samplers, schedulers: discovery.schedulers };
         settings.backends.a1111.checkpointProfiles = seedCheckpointProfiles(
-            settings.backends.a1111.checkpointProfiles, discovery.models, fallbackKey);
+            settings.backends.a1111.checkpointProfiles, discovery.models, fallbackKey, discoveredNames);
+        // Spelling-only alignment of existing rows ("euler" -> "Euler") so
+        // the payload carries the name the server actually lists.
+        settings.backends.a1111.checkpointProfiles = alignCheckpointProfileNames(
+            settings.backends.a1111.checkpointProfiles, discoveredNames).profiles;
         a1111Models = discovery.models.map(m => ({ title: m.title, model_name: m.modelName ?? m.title, filename: null }));
         fillCheckpointSelect(a1111Checkpoint, a1111Models, settings.backends.a1111.checkpoint, '-- select a checkpoint --');
         if (!resolveCheckpoint(a1111Models, settings.backends.a1111.checkpoint)) {
@@ -1284,32 +1329,50 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             return;
         }
         const discovery = settings.backends.a1111.discovery ?? {};
-        cpTableBox.innerHTML = `<table class="if-image-cp-table"><thead><tr>
+        // A row is "stale" when a discovery has run and no longer lists its
+        // title (checkpoint removed server-side, or leftovers from another
+        // endpoint). Stale rows are kept (user data) but flagged + removable.
+        const discovered = new Set((discovery.models ?? []).map(m => m?.title).filter(Boolean));
+        const hasDiscovery = Number(discovery.at) > 0 && discovered.size > 0;
+        const numCell = (field, value, attrs) => {
+            const safe = Number.isFinite(Number(value)) && value !== '' && value !== null && value !== undefined ? Number(value) : '';
+            return `<td><input data-cp-field="${field}" type="number" ${attrs} class="text_pole" value="${safe}"></td>`;
+        };
+        cpTableBox.innerHTML = `<div class="if-image-cp-scroll"><table class="if-image-cp-table"><thead><tr>
             <th>Checkpoint</th><th>Profile</th><th>W</th><th>H</th><th>Steps</th><th>CFG</th>
             <th>Sampler</th><th>Scheduler</th><th></th>
         </tr></thead><tbody>` + titles.map((title, i) => {
-            const entry = profiles[title];
+            const raw = profiles[title];
+            const entry = raw && typeof raw === 'object' ? raw : {};
+            const stale = hasDiscovery && !discovered.has(title);
             const profileOpts = PROFILE_KEYS.map(k =>
                 `<option value="${k}"${k === entry.profile ? ' selected' : ''}>${escapeHtml(PROFILES[k].label)}</option>`).join('');
-            return `<tr data-cp-row="${i}">
-                <td title="${escapeHtml(title)}">${escapeHtml(title)}</td>
+            const sampler = typeof entry.sampler === 'string' ? entry.sampler : '';
+            const scheduler = typeof entry.scheduler === 'string' ? entry.scheduler : '';
+            return `<tr data-cp-row="${i}"${stale ? ' class="if-image-cp-stale"' : ''}>
+                <td class="if-image-cp-title" title="${escapeHtml(title)}${stale ? ' — not offered by the server any more' : ''}">${escapeHtml(title)}${stale ? ' <span class="if-image-cp-badge">stale</span>' : ''}</td>
                 <td><select data-cp-field="profile" class="text_pole">${profileOpts}</select></td>
-                <td><input data-cp-field="width" type="number" min="256" max="2048" step="64" class="text_pole" value="${entry.width ?? ''}"></td>
-                <td><input data-cp-field="height" type="number" min="256" max="2048" step="64" class="text_pole" value="${entry.height ?? ''}"></td>
-                <td><input data-cp-field="steps" type="number" min="1" max="150" class="text_pole" value="${entry.steps ?? ''}"></td>
-                <td><input data-cp-field="cfg" type="number" min="0" max="30" step="0.5" class="text_pole" value="${entry.cfg ?? ''}"></td>
-                <td><select data-cp-field="sampler" class="text_pole">${cpOptionList(discovery.samplers, entry.sampler ?? '')}</select></td>
-                <td><select data-cp-field="scheduler" class="text_pole">${cpOptionList(discovery.schedulers, entry.scheduler ?? '')}</select></td>
-                <td><button data-cp-reset class="menu_button" title="Re-infer profile and defaults from discovery">Reset</button></td>
+                ${numCell('width', entry.width, 'min="256" max="2048" step="64"')}
+                ${numCell('height', entry.height, 'min="256" max="2048" step="64"')}
+                ${numCell('steps', entry.steps, 'min="1" max="150"')}
+                ${numCell('cfg', entry.cfg, 'min="0" max="30" step="0.5"')}
+                <td><select data-cp-field="sampler" class="text_pole">${cpOptionList(discovery.samplers, sampler)}</select></td>
+                <td><select data-cp-field="scheduler" class="text_pole">${cpOptionList(discovery.schedulers, scheduler)}</select></td>
+                <td class="if-image-cp-actions">${stale
+                    ? '<button data-cp-remove class="menu_button" title="Remove this row (the checkpoint is no longer offered by the server)">Remove</button>'
+                    : '<button data-cp-reset class="menu_button" title="Re-infer profile and defaults from discovery">Reset</button>'}</td>
             </tr>`;
-        }).join('') + '</tbody></table>';
+        }).join('') + '</tbody></table></div>';
 
         cpTableBox.querySelectorAll('[data-cp-row]').forEach(row => {
             const title = titles[Number(row.dataset.cpRow)];
             row.querySelectorAll('[data-cp-field]').forEach(input => {
                 input.addEventListener('change', () => {
-                    const entry = settings.backends.a1111.checkpointProfiles[title];
-                    if (!entry) return;
+                    let entry = settings.backends.a1111.checkpointProfiles[title];
+                    if (!entry || typeof entry !== 'object') {
+                        // Malformed persisted value: replace it with a fresh row.
+                        entry = settings.backends.a1111.checkpointProfiles[title] = { profile: PROFILE_KEYS[0] };
+                    }
                     const field = input.dataset.cpField;
                     if (field === 'profile') {
                         entry.profile = PROFILES[input.value] ? input.value : entry.profile;
@@ -1326,12 +1389,26 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             });
             row.querySelector('[data-cp-reset]')?.addEventListener('click', () => {
                 const fallbackKey = settings.generation.profile || settings.backends.comfy.profile || 'anima';
-                const model = (settings.backends.a1111.discovery?.models ?? []).find(m => m.title === title) ?? { title };
+                const disc = settings.backends.a1111.discovery ?? {};
+                const model = (disc.models ?? []).find(m => m.title === title) ?? { title };
                 delete settings.backends.a1111.checkpointProfiles[title];
                 settings.backends.a1111.checkpointProfiles = seedCheckpointProfiles(
-                    settings.backends.a1111.checkpointProfiles, [model], fallbackKey);
+                    settings.backends.a1111.checkpointProfiles, [model], fallbackKey,
+                    { samplers: disc.samplers, schedulers: disc.schedulers });
                 save();
                 renderCheckpointProfilesTable();
+            });
+            row.querySelector('[data-cp-remove]')?.addEventListener('click', () => {
+                delete settings.backends.a1111.checkpointProfiles[title];
+                // A removed title cannot stay selected anywhere.
+                if (settings.generation.checkpoint === title) settings.generation.checkpoint = '';
+                if (settings.backends.a1111.checkpoint === title) settings.backends.a1111.checkpoint = '';
+                save();
+                syncMainCheckpoint();
+                fillCheckpointSelect(a1111Checkpoint, a1111Models, settings.backends.a1111.checkpoint,
+                    a1111Models.length ? '-- select a checkpoint --' : '-- Refresh Models to load --');
+                renderCheckpointProfilesTable();
+                syncTestGenVisibility();
             });
         });
     }
