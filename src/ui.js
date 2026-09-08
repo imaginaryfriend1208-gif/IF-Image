@@ -933,9 +933,11 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     });
     mainBackend.addEventListener('change', () => { settings.generation.backend = mainBackend.value; save(); });
     mainProfile.addEventListener('change', () => { settings.generation.profile = mainProfile.value; save(); });
-    // R4: default checkpoint for marker generation (generation.checkpoint).
-    // Options are (re)built by syncMainCheckpoint() from persisted discovery.
-    mainCheckpoint.addEventListener('change', () => { settings.generation.checkpoint = mainCheckpoint.value; save(); });
+    // R4/D11: default checkpoint for marker generation. The selection is
+    // SHARED with the Backends tab select — setA1111Checkpoint writes both
+    // persisted keys and re-syncs every dependent control. Options are
+    // (re)built by syncMainCheckpoint() from persisted discovery.
+    mainCheckpoint.addEventListener('change', () => setA1111Checkpoint(mainCheckpoint.value));
     mainMode.addEventListener('change', () => { settings.generation.mode = mainMode.value; save(); });
 
     // ================= Backends Tab Wiring =================
@@ -1254,7 +1256,9 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         a1111Models = discovery.models.map(m => ({ title: m.title, model_name: m.modelName ?? m.title, filename: null }));
         fillCheckpointSelect(a1111Checkpoint, a1111Models, settings.backends.a1111.checkpoint, '-- select a checkpoint --');
         if (!resolveCheckpoint(a1111Models, settings.backends.a1111.checkpoint)) {
+            // D11: both keys are one selection — clear them together.
             settings.backends.a1111.checkpoint = '';
+            settings.generation.checkpoint = '';
             a1111Checkpoint.value = '';
         }
         save();
@@ -1321,12 +1325,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         }
     });
 
-    a1111Checkpoint.addEventListener('change', () => {
-        settings.backends.a1111.checkpoint = a1111Checkpoint.value;
-        save();
-        syncCheckpointProfileEditor();
-        syncTestGenVisibility();
-    });
+    a1111Checkpoint.addEventListener('change', () => setA1111Checkpoint(a1111Checkpoint.value));
 
     // ---- R4: Main-tab checkpoint select (generation.checkpoint) -----------
     // Options come from the PERSISTED discovery so they survive reloads. A
@@ -1345,6 +1344,24 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     // Seed the Backends checkpoint select from the persisted discovery too.
     if (a1111Models.length) {
         fillCheckpointSelect(a1111Checkpoint, a1111Models, settings.backends.a1111.checkpoint, '-- select a checkpoint --');
+    }
+
+    // ---- D11: single writer for the A1111 checkpoint selection ------------
+    // The Main tab (generation.checkpoint) and the Backends tab
+    // (backends.a1111.checkpoint) used to be two independent keys with
+    // separate selects, so a checkpoint (and its saved profile) picked in
+    // Backends did not drive marker generation when Main pointed elsewhere.
+    // Every UI path now goes through this function: both keys always hold
+    // the same title, and every dependent control re-syncs.
+    function setA1111Checkpoint(title) {
+        settings.backends.a1111.checkpoint = title;
+        settings.generation.checkpoint = title;
+        save();
+        syncMainCheckpoint();
+        fillCheckpointSelect(a1111Checkpoint, a1111Models, title,
+            a1111Models.length ? '-- select a checkpoint --' : '-- Refresh Models to load --');
+        syncCheckpointProfileEditor();
+        syncTestGenVisibility();
     }
 
     // ---- D9: per-checkpoint profile editor ---------------------------------
@@ -1459,13 +1476,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         }).join('');
         cpList.querySelectorAll('[data-cp-item]').forEach(item => {
             const title = titles[Number(item.dataset.cpItem)];
-            item.querySelector('[data-cp-use]')?.addEventListener('click', () => {
-                settings.backends.a1111.checkpoint = title;
-                a1111Checkpoint.value = title;
-                save();
-                syncCheckpointProfileEditor();
-                syncTestGenVisibility();
-            });
+            item.querySelector('[data-cp-use]')?.addEventListener('click', () => setA1111Checkpoint(title));
             item.querySelector('[data-cp-del]')?.addEventListener('click', () => deleteCheckpointProfile(title));
         });
     }
@@ -1611,7 +1622,10 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
 
     testCheckpoint.addEventListener('change', () => {
         if (currentSdConnection() === 'a1111') {
-            settings.backends.a1111.checkpoint = testCheckpoint.value;
+            // D11: same single writer as Main/Backends, so a checkpoint
+            // picked for a test generation also drives marker generation.
+            setA1111Checkpoint(testCheckpoint.value);
+            testCheckpoint.value = settings.backends.a1111.checkpoint;
             // R2: prefill W/H/steps/cfg from the checkpoint's effective
             // params (PROFILES < settings params < checkpoint profile).
             // The user can still edit any field before Generate.

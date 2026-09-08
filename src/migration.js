@@ -177,6 +177,28 @@ export const migrators = [
         s.backends.a1111.checkpointProfiles = {};
         if (s.backends.a1111.transport !== 'direct') s.backends.a1111.transport = 'st-relay';
     },
+
+    // 8 -> 9 (D11): the A1111 checkpoint selection becomes ONE value.
+    // generation.checkpoint (Main tab, read first by compile()) and
+    // backends.a1111.checkpoint (Backends tab, written by Save profile /
+    // Use / Test Gen) were separate keys, so a checkpoint chosen in the
+    // Backends tab did not drive marker generation when the Main tab still
+    // pointed elsewhere. From v9 the UI writes both keys through a single
+    // setter; this migrator reconciles settings that already diverged. The
+    // Backends-tab value wins when present — it is where discovery,
+    // profile-saving, and test generation all operate.
+    (s) => {
+        if (!s.backends) s.backends = {};
+        if (!s.backends.a1111 || typeof s.backends.a1111 !== 'object') {
+            s.backends.a1111 = { baseUrl: '', auth: '', checkpoint: '' };
+        }
+        if (!s.generation) s.generation = {};
+        const backend = typeof s.backends.a1111.checkpoint === 'string' ? s.backends.a1111.checkpoint : '';
+        const main = typeof s.generation.checkpoint === 'string' ? s.generation.checkpoint : '';
+        const unified = backend || main;
+        s.backends.a1111.checkpoint = unified;
+        s.generation.checkpoint = unified;
+    },
 ];
 
 /** Current schema version = number of migrators applied from zero. */

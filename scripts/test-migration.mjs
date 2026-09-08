@@ -331,7 +331,7 @@ test('v5 → v6 with blank a1111.checkpoint stamps generation.checkpoint = ""', 
 });
 
 // --- Test 21: v6 fields already present are never overwritten ---
-test('existing v6 discovery/generation.checkpoint survive migration; pre-v8 checkpointProfiles are reset', () => {
+test('existing v6 discovery survives migration; pre-v8 checkpointProfiles are reset; v9 unifies the checkpoint', () => {
     const s = {
         settingsVersion: 5,
         generation: { checkpoint: 'User Choice' },
@@ -345,7 +345,9 @@ test('existing v6 discovery/generation.checkpoint survive migration; pre-v8 chec
         },
     };
     runMigrations(s);
-    assert.equal(s.generation.checkpoint, 'User Choice');
+    // v9 reconciles the two diverged checkpoint keys; the Backends-tab value wins.
+    assert.equal(s.generation.checkpoint, 'Old Field');
+    assert.equal(s.backends.a1111.checkpoint, 'Old Field');
     assert.equal(s.backends.a1111.discovery.at, 123);
     // v8 intentionally drops pre-v8 rows (they were auto-seeded, not user intent).
     assert.deepEqual(s.backends.a1111.checkpointProfiles, {});
@@ -437,6 +439,35 @@ test('v7 → v8 keeps an explicit direct transport and tolerates a missing a1111
     runMigrations(bare);
     assert.deepEqual(bare.backends.a1111.checkpointProfiles, {});
     assert.equal(bare.backends.a1111.transport, 'st-relay');
+    assert.equal(runMigrations(bare), false);
+});
+
+// --- Test 28 (v8 → v9): the two checkpoint keys are unified ---
+test('v8 → v9 unifies backends.a1111.checkpoint and generation.checkpoint (backend value wins)', () => {
+    const diverged = {
+        settingsVersion: 8,
+        backends: { a1111: { baseUrl: 'https://h', auth: 'k', checkpoint: 'Backends Pick', transport: 'st-relay', checkpointProfiles: {} } },
+        generation: { checkpoint: 'Main Pick' },
+    };
+    runMigrations(diverged);
+    assert.equal(diverged.backends.a1111.checkpoint, 'Backends Pick');
+    assert.equal(diverged.generation.checkpoint, 'Backends Pick');
+
+    // Backends blank, Main set: the Main value is kept (never lose a selection).
+    const mainOnly = {
+        settingsVersion: 8,
+        backends: { a1111: { baseUrl: '', auth: '', checkpoint: '', transport: 'st-relay', checkpointProfiles: {} } },
+        generation: { checkpoint: 'Main Pick' },
+    };
+    runMigrations(mainOnly);
+    assert.equal(mainOnly.backends.a1111.checkpoint, 'Main Pick');
+    assert.equal(mainOnly.generation.checkpoint, 'Main Pick');
+
+    // Bare object: both stamped to '' without throwing; idempotent re-run.
+    const bare = { settingsVersion: 8 };
+    runMigrations(bare);
+    assert.equal(bare.backends.a1111.checkpoint, '');
+    assert.equal(bare.generation.checkpoint, '');
     assert.equal(runMigrations(bare), false);
 });
 
