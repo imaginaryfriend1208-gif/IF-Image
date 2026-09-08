@@ -934,9 +934,14 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     // (settings.backends.a1111.discovery, migrator v6) so selects are usable
     // right after a reload without hitting the server. Generation still
     // re-validates against fresh /sdapi/v1/sd-models in the executor.
-    let a1111Models = Array.isArray(settings.backends.a1111.discovery?.models)
-        ? settings.backends.a1111.discovery.models.map(m => ({ title: m.title, model_name: m.modelName ?? m.title, filename: null }))
-        : [];
+    /** In-memory model list shape from the persisted discovery cache. */
+    function a1111ModelsFromPersisted() {
+        const models = settings.backends.a1111.discovery?.models;
+        return Array.isArray(models)
+            ? models.map(m => ({ title: m.title, model_name: m.modelName ?? m.title, filename: null }))
+            : [];
+    }
+    let a1111Models = a1111ModelsFromPersisted();
 
     // Epoch guards: bumping invalidates every in-flight discovery request,
     // so a late response from an old source/URL/auth can never populate the
@@ -970,13 +975,20 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         a1111DiscoveryEpoch += 1;
         a1111DiscoveryController?.abort();
         a1111DiscoveryController = null;
-        a1111Models = [];
         if (clearPersisted) {
+            a1111Models = [];
             settings.backends.a1111.discovery = { at: 0, models: [], samplers: [], schedulers: [] };
             syncMainCheckpoint();
             renderCheckpointProfilesTable();
+            fillCheckpointSelect(a1111Checkpoint, [], '', '-- Refresh Models to load --');
+        } else {
+            // Source switch: the persisted cache is still valid for this
+            // URL/auth, so the in-memory list is re-seeded from it (same as
+            // on load) instead of forcing another Refresh Models click.
+            a1111Models = a1111ModelsFromPersisted();
+            fillCheckpointSelect(a1111Checkpoint, a1111Models, settings.backends.a1111.checkpoint,
+                a1111Models.length ? '-- select a checkpoint --' : '-- Refresh Models to load --');
         }
-        fillCheckpointSelect(a1111Checkpoint, [], '', '-- Refresh Models to load --');
         if (reason) showResult(a1111Result, reason, false);
         abortInFlightGeneration('A1111 base URL or Authentication changed — generation aborted (browser request only; a started server job may still finish).');
     }
@@ -1383,6 +1395,9 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 testSteps.value = merged.steps;
                 testCfg.value = merged.cfg;
                 testProfile.value = cp.profileKey;
+                // The profile changed under the Test tab: re-sync dependent
+                // rows (Negative is hidden for negativeDisabled profiles).
+                syncBackendRadio();
             }
         } else {
             settings.backends.comfy.proxyModel = testCheckpoint.value;
