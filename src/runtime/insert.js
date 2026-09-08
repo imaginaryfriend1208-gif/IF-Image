@@ -368,27 +368,161 @@ export function renderIdleChip(slot, doc, { onGenerate, label } = {}) {
     return chip;
 }
 
+// D1: only one lightbox may exist at a time, enforced at module level so
+// even independent callers cannot stack overlays.
+let activeLightboxClose = null;
+
 /**
- * Full-size preview overlay. Click or Escape closes it. Returns a close()
- * function the caller may invoke early (e.g. on chat change).
+ * D1: full-size preview lightbox over a slot's saved image records (newest
+ * first). Features:
+ * - prev/next buttons and ArrowLeft/ArrowRight with wrap-around;
+ * - Escape and backdrop click close; clicking the image/content does NOT
+ *   (the inner container stops propagation);
+ * - Download link (a[download]) with a dedicated object URL;
+ * - Delete: awaits onDelete(record), removes it from the local array and
+ *   shows the next record (wraps); when the array empties, closes — the
+ *   caller collapses the slot from its own onDelete bookkeeping;
+ * - Regen: calls onRegenerate() then closes;
+ * - caption "seed · checkpoint · WxH · profile" (+ position when >1).
+ * Every object URL created here is revoked on navigation and on close;
+ * URLs returned by getObjectUrl belong to the caller and are never revoked.
+ * Opening a second lightbox closes the first. Returns close().
+ *
+ * @param {Document} doc
+ * @param {{records: Array<object>, index?: number,
+ *          onDelete?: (record: object) => Promise<void>|void,
+ *          onRegenerate?: () => void,
+ *          getObjectUrl?: (record: object) => string|null}} options
+ * @returns {() => void} close
  */
-export function openLightbox(doc, imgSrc) {
+export function openLightbox(doc, { records, index = 0, onDelete, onRegenerate, getObjectUrl } = {}) {
+    if (activeLightboxClose) activeLightboxClose();
+    const list = Array.isArray(records) ? records.filter(Boolean) : [];
+    if (!list.length) return () => {};
+    let i = Math.min(Math.max(index, 0), list.length - 1);
+    let closed = false;
+    const owned = []; // object URLs created HERE; revoked on navigation/close
+
     const overlay = doc.createElement('div');
     overlay.className = 'ifimg-lightbox';
+    const inner = doc.createElement('div');
+    inner.className = 'ifimg-lightbox-inner';
+    overlay.appendChild(inner);
+
+    const makeButton = (cls, label, handler) => {
+        const b = doc.createElement('button');
+        b.type = 'button';
+        b.className = cls;
+        b.textContent = label;
+        b.addEventListener('click', handler);
+        return b;
+    };
+
+    const stage = doc.createElement('div');
+    stage.className = 'ifimg-lb-stage';
+    const prevBtn = makeButton('ifimg-lb-prev menu_button', '‹', () => nav(-1));
     const img = doc.createElement('img');
-    img.src = imgSrc;
     img.alt = 'Generated image (full size)';
-    overlay.appendChild(img);
+    const nextBtn = makeButton('ifimg-lb-next menu_button', '›', () => nav(1));
+    stage.appendChild(prevBtn);
+    stage.appendChild(img);
+    stage.appendChild(nextBtn);
+    inner.appendChild(stage);
+
+    const caption = doc.createElement('div');
+    caption.className = 'ifimg-lb-caption';
+    inner.appendChild(caption);
+
+    const actions = doc.createElement('div');
+    actions.className = 'ifimg-lb-actions';
+    const downloadLink = doc.createElement('a');
+    downloadLink.className = 'ifimg-lb-download menu_button';
+    downloadLink.textContent = 'Download';
+    actions.appendChild(downloadLink);
+    if (typeof onRegenerate === 'function') {
+        actions.appendChild(makeButton('ifimg-lb-regen menu_button', 'Regen', () => {
+            onRegenerate();
+            close();
+        }));
+    }
+    if (typeof onDelete === 'function') {
+        actions.appendChild(makeButton('ifimg-lb-delete menu_button', 'Delete', async () => {
+            const record = list[i];
+            try {
+                await onDelete(record);
+            } catch {
+                return; // caller already notified; keep the record and stay open
+            }
+            if (closed) return;
+            list.splice(i, 1);
+            if (!list.length) { close(); return; }
+            if (i >= list.length) i = 0; // "next" wraps past the end
+            show();
+        }));
+    }
+    inner.appendChild(actions);
+
+    function revokeOwned() {
+        for (const url of owned) URL.revokeObjectURL(url);
+        owned.length = 0;
+    }
+
+    function show() {
+        revokeOwned();
+        const record = list[i];
+        let displayUrl = typeof getObjectUrl === 'function' ? getObjectUrl(record) : null;
+        if (!displayUrl && record.blob) {
+            displayUrl = URL.createObjectURL(record.blob);
+            owned.push(displayUrl);
+        }
+        img.src = displayUrl ?? '';
+        if (record.blob) {
+            // Dedicated download URL, revoked with the rest on nav/close.
+            const dl = URL.createObjectURL(record.blob);
+            owned.push(dl);
+            downloadLink.href = dl;
+            downloadLink.setAttribute('download', `ifimage-${record.id ?? 'live'}.png`);
+            downloadLink.hidden = false;
+        } else {
+            downloadLink.href = '';
+            downloadLink.hidden = true; // live-only view (record save failed)
+        }
+        const position = list.length > 1 ? ` · ${i + 1}/${list.length}` : '';
+        caption.textContent = [
+            `seed ${record.seed ?? '?'}`,
+            record.checkpoint || '(no checkpoint)',
+            `${record.width ?? '?'}x${record.height ?? '?'}`,
+            record.profileKey || '(no profile)',
+        ].join(' · ') + position;
+        prevBtn.hidden = list.length < 2;
+        nextBtn.hidden = list.length < 2;
+    }
+
+    function nav(delta) {
+        i = (i + delta + list.length) % list.length;
+        show();
+    }
+
     function onKey(event) {
         if (event.key === 'Escape') close();
+        else if (event.key === 'ArrowLeft') nav(-1);
+        else if (event.key === 'ArrowRight') nav(1);
     }
+
     function close() {
+        if (closed) return;
+        closed = true;
+        revokeOwned();
         overlay.remove();
         doc.removeEventListener('keydown', onKey);
+        if (activeLightboxClose === close) activeLightboxClose = null;
     }
+
+    inner.addEventListener('click', (event) => event.stopPropagation());
     overlay.addEventListener('click', close);
     doc.addEventListener('keydown', onKey);
-    const container = doc.body || doc;
-    container.appendChild(overlay);
+    (doc.body || doc).appendChild(overlay);
+    activeLightboxClose = close;
+    show();
     return close;
 }

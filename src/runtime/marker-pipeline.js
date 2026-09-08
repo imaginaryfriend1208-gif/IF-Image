@@ -29,7 +29,7 @@
  * @param {(doc, info) => Node} deps.createSlotElement
  * @param {(slot, snapshot, doc, actions?) => void} deps.renderSlotState
  * @param {(slot, doc, objectUrl, actions?) => Node} deps.renderImageFrame
- * @param {(doc, src) => () => void} deps.openLightbox
+ * @param {(doc, opts: {records, index?, onDelete?, onRegenerate?, getObjectUrl?}) => () => void} deps.openLightbox
  * @param {(root, tags, onFound) => number} deps.replaceMarkers
  * @param {(content: string) => Promise<{entries: Array<{profileKey, envelope}>}>} [deps.rewrite]
  *   Assist-mode LLM hook. Called AFTER the IDB restore check misses, with the
@@ -142,9 +142,61 @@ export function createMarkerPipeline(deps) {
     }
 
     function bindImageActions(entry) {
-        const openView = () => {
+        const openView = async () => {
             if (activeLightbox) activeLightbox.close();
-            const close = openLightbox(doc, entry.objectUrl);
+            // D1: the lightbox browses every persisted image for this slot
+            // (same occurrence + marker hash), newest first. IDB errors fall
+            // back to the live record so View still works.
+            let records = [];
+            try {
+                const all = await getImagesForMessage(entry.chatId, entry.messageId, entry.swipeId);
+                records = all.filter(r => r.blob && r.occurrence === entry.occurrence && contentHash(r.content) === entry.hash);
+            } catch (err) {
+                console.warn('[IF Image] Lightbox record fetch failed:', err?.message ?? err);
+            }
+            if (!records.length) {
+                // Live task result whose save failed: view the in-memory URL.
+                records = [{
+                    id: entry.recordId ?? null,
+                    seed: entry.envelope?.params?.seed,
+                    checkpoint: entry.envelope?.params?.checkpoint,
+                    width: entry.envelope?.params?.width,
+                    height: entry.envelope?.params?.height,
+                    profileKey: entry.profileKey,
+                    blob: null,
+                }];
+            }
+            const startIndex = Math.max(0, records.findIndex(r => r.id === entry.recordId));
+            const deletedIds = new Set(); // the lightbox splices its own copy
+            const close = openLightbox(doc, {
+                records,
+                index: startIndex,
+                getObjectUrl: (record) => (record.id === entry.recordId && entry.objectUrl) ? entry.objectUrl : null,
+                onRegenerate: () => regenerate(entry),
+                onDelete: deleteImageRecord ? async (record) => {
+                    try {
+                        await deleteImageRecord(record.id);
+                    } catch (err) {
+                        notify('error', `Delete failed: ${err?.message ?? err}`);
+                        throw err; // lightbox keeps the record on failure
+                    }
+                    deletedIds.add(record.id);
+                    if (record.id !== entry.recordId) return;
+                    // The slot's shown image was deleted. Swap the slot to
+                    // the newest remaining record, or collapse when none.
+                    const remaining = records.filter(r => !deletedIds.has(r.id) && r.blob);
+                    if (remaining.length) {
+                        entry.recordId = remaining[0].id;
+                        showImage(entry, remaining[0].blob);
+                        return;
+                    }
+                    entry.recordId = null;
+                    releaseUrl(entry);
+                    if (!entry.slot) return;
+                    if (renderRegenerateChip) renderRegenerateChip(entry.slot, doc, () => regenerate(entry));
+                    else { entry.slot.dataset.ifimgState = 'idle'; entry.slot.textContent = ''; }
+                } : undefined,
+            });
             activeLightbox = { close, entry };
         };
         const actions = {
