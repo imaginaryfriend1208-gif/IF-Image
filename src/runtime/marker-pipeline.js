@@ -191,6 +191,8 @@ export function createMarkerPipeline(deps) {
             } catch (err) {
                 console.warn('[IF Image] Lightbox record fetch failed:', err?.message ?? err);
             }
+            // The entry may have been forgotten (chat switch) during the await.
+            if (slots.get(entry.key) !== entry) return;
             if (!records.length) {
                 // Live task result whose save failed: view the in-memory URL.
                 records = [{
@@ -225,7 +227,14 @@ export function createMarkerPipeline(deps) {
                     if (remaining.length) {
                         entry.recordId = remaining[0].id;
                         if (Number.isInteger(remaining[0].seed)) entry.lastSeed = remaining[0].seed;
+                        // showImage() -> releaseUrl() would close the open
+                        // lightbox for this entry; the lightbox must stay open
+                        // and advance to the next record, so detach it while
+                        // the slot swaps its image, then reattach.
+                        const keepOpen = activeLightbox;
+                        activeLightbox = null;
                         showImage(entry, remaining[0].blob);
+                        activeLightbox = keepOpen;
                         return;
                     }
                     entry.recordId = null;

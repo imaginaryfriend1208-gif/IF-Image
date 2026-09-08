@@ -665,6 +665,68 @@ test('D2: onRepro is absent when the record has no usable seed', async () => {
     assert.equal(frameActions.onRepro, undefined, 'seed -1 record gets no Repro');
 });
 
+test('D1: deleting the shown record from the lightbox swaps the slot image and keeps the lightbox open', async () => {
+    const mk = (id, seed) => ({
+        id, chatId: 'A', messageId: 0, swipeId: 0, occurrence: 0,
+        content: 'scene', prompt: 'p', negative: '', params: {},
+        backend: 'a1111', profileKey: 'anima', seed, blob: new Blob([id]),
+        timestamp: seed,
+    });
+    const newest = mk('rec-new', 2);
+    const older = mk('rec-old', 1);
+    const queue = makeQueue();
+    let frameActions = null;
+    const frameUrls = [];
+    let lightboxOpts = null;
+    let lightboxCloses = 0;
+    const deleted = [];
+    const pipeline = createMarkerPipeline({
+        getQueue: () => queue,
+        setTimeoutImpl: (fn) => { fn(); return 0; },
+        compile: c => ({ profileKey: 'anima', envelope: { prompt: c, negative: '', params: { seed: -1 } } }),
+        getImagesForMessage: async () => [newest, older],
+        saveImageRecord: async () => 'rec-x',
+        deleteImageRecord: async (id) => { deleted.push(id); },
+        contentHash,
+        defaultBackendKind: () => 'a1111', defaultProfileKey: () => 'anima',
+        notify: () => {}, doc,
+        createSlotElement: (d, info) => {
+            const s = d.createElement('span');
+            s.dataset.ifimgOcc = String(info.occurrence);
+            return s;
+        },
+        renderSlotState: () => {},
+        renderImageFrame: (slot, d, url, actions) => { frameActions = actions; frameUrls.push(url); },
+        openLightbox: (d, opts) => { lightboxOpts = opts; return () => { lightboxCloses += 1; }; },
+        replaceMarkers: (root, tags, onFound) => {
+            const slot = onFound({ occurrence: 0, content: 'scene' });
+            root.childNodes = [slot];
+            return 1;
+        },
+        getMessage: () => ({ swipe_id: 0 }),
+        getMessageElement: () => el('DIV', 'image### scene ###'),
+        getSettings: () => ({ enabled: true, generation: { enabled: true, mode: 'direct', startTag: 'image###', endTag: '###' } }),
+        getCurrentChatId: () => 'A',
+    });
+    await pipeline.onMarker(marker);
+    await new Promise(r => setTimeout(r, 10));
+    assert.ok(frameActions, 'restored frame rendered');
+    await frameActions.onView();
+    assert.ok(lightboxOpts, 'lightbox opened');
+    assert.equal(lightboxOpts.records.length, 2);
+    assert.equal(lightboxOpts.index, 0, 'opens on the shown (newest) record');
+    // Delete the record the slot currently shows.
+    await lightboxOpts.onDelete(newest);
+    assert.deepEqual(deleted, ['rec-new']);
+    assert.equal(lightboxCloses, 0, 'lightbox stays open after deleting the shown record');
+    assert.equal(frameUrls.length, 2, 'slot re-rendered with the remaining record');
+    assert.equal(typeof frameActions.onRepro, 'function', 'remaining record seed backs Repro');
+    // Deleting the last record collapses the slot and closes the lightbox.
+    await lightboxOpts.onDelete(older);
+    assert.deepEqual(deleted, ['rec-new', 'rec-old']);
+    assert.equal(lightboxCloses, 1, 'lightbox closed once the slot has no record left');
+});
+
 // ---- D3: generation.llmSize gates the LLM <size> override --------------------
 test('D3: llmSize "ignore" discards the LLM width/height but keeps the negative', async () => {
     const { pipeline, queue } = makePipeline({
