@@ -326,8 +326,36 @@
     font-style: italic;
 }
 
+/* Chip + button slots (idle / failed / cancelled / deleted) lay out inline.
+   Chat text uses `overflow-wrap: anywhere`, and ST's .menu_button is
+   `display: flex; width: min-content` — together they shrink the button to
+   one character per line. Override both inside our slots only. */
+.ifimg-slot[data-ifimg-state="idle"],
+.ifimg-slot[data-ifimg-state="failed"],
+.ifimg-slot[data-ifimg-state="cancelled"] {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+}
+
+.ifimg-chip {
+    overflow-wrap: normal;
+    word-break: normal;
+}
+
+.ifimg-slot .ifimg-retry,
+.ifimg-slot .menu_button {
+    display: inline-flex;
+    width: auto;
+    white-space: nowrap;
+    overflow-wrap: normal;
+    word-break: normal;
+    margin: 0;
+    vertical-align: middle;
+}
+
 .ifimg-retry {
-    margin-left: 6px;
     font-size: 0.8em;
     padding: 1px 8px;
 }
