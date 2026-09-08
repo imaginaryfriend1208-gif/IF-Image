@@ -118,8 +118,12 @@ test('v2 → v3 adds a1111 backend and comfy.connection without touching legacy 
     const ran = runMigrations(v2);
     assert.equal(ran, true);
     assert.equal(v2.settingsVersion, CURRENT_VERSION);
-    // New a1111 section exists and starts blank.
-    assert.deepEqual(v2.backends.a1111, { baseUrl: '', auth: '', checkpoint: '' });
+    // New a1111 section exists and starts blank (v6 adds discovery fields).
+    assert.deepEqual(v2.backends.a1111, {
+        baseUrl: '', auth: '', checkpoint: '',
+        discovery: { at: 0, models: [], samplers: [], schedulers: [] },
+        checkpointProfiles: {},
+    });
     // Connection defaults to the legacy proxy.
     assert.equal(v2.backends.comfy.connection, 'legacy_proxy');
     // Legacy proxy URL/credentials survive byte-for-byte.
@@ -155,7 +159,11 @@ test('v0.1.0 legacy settings receive the a1111 section through full migration', 
         },
     };
     runMigrations(legacy);
-    assert.deepEqual(legacy.backends.a1111, { baseUrl: '', auth: '', checkpoint: '' });
+    assert.deepEqual(legacy.backends.a1111, {
+        baseUrl: '', auth: '', checkpoint: '',
+        discovery: { at: 0, models: [], samplers: [], schedulers: [] },
+        checkpointProfiles: {},
+    });
     assert.equal(legacy.backends.comfy.connection, 'legacy_proxy');
     assert.equal(legacy.backends.comfy.username, 'u');
     assert.equal(legacy.backends.comfy.password, 'p');
@@ -166,7 +174,187 @@ test('missing/corrupt comfy section is created without throwing', () => {
     const s = { settingsVersion: 2, backends: { nai: {} } };
     runMigrations(s);
     assert.equal(s.backends.comfy.connection, 'legacy_proxy');
-    assert.deepEqual(s.backends.a1111, { baseUrl: '', auth: '', checkpoint: '' });
+    assert.deepEqual(s.backends.a1111, {
+        baseUrl: '', auth: '', checkpoint: '',
+        discovery: { at: 0, models: [], samplers: [], schedulers: [] },
+        checkpointProfiles: {},
+    });
+});
+
+// --- Test 11: v3 → v4 promotes runtime defaults and adds Phase B LLM fields ---
+test('v3 settings migrate to v4 with generation defaults, llm fields, and proxyModel', () => {
+    const v3 = {
+        settingsVersion: 3,
+        enabled: true,
+        backends: {
+            nai: { apiKey: 'pst-keep', model: 'nai-diffusion-4-5-full' },
+            comfy: { baseUrl: 'http://localhost:7861', username: 'u', password: 'p', profile: 'anima', connection: 'legacy_proxy' },
+            a1111: { baseUrl: 'https://host', auth: 'k', checkpoint: 'ckpt' },
+        },
+    };
+    const ran = runMigrations(v3);
+    assert.equal(ran, true);
+    assert.equal(v3.settingsVersion, CURRENT_VERSION);
+    // generation defaults promoted (absent in v3)
+    assert.equal(v3.generation.backend, 'comfy');
+    assert.equal(v3.generation.profile, 'anima');
+    assert.equal(v3.generation.sceneWindow, 4);
+    assert.equal(v3.generation.logLimit, 50);
+    // proxyModel stamped
+    assert.equal(v3.backends.comfy.proxyModel, '');
+    // Phase B LLM fields added
+    assert.equal(v3.llm.defaultApiProfileId, '');
+    assert.equal(v3.llm.injectionStyle, 'compact');
+    // Existing values never overwritten
+    assert.equal(v3.backends.comfy.baseUrl, 'http://localhost:7861');
+    assert.equal(v3.backends.comfy.username, 'u');
+});
+
+// --- Test 12: existing v3 user values preserved ---
+test('v3 settings with user values preserved during v3→v4 migration', () => {
+    const v3 = {
+        settingsVersion: 3,
+        enabled: true,
+        generation: { mode: 'assist', startTag: 'img[[', endTag: ']]', enabled: true, backend: 'nai', profile: 'krea2', sceneWindow: 6, logLimit: 25 },
+        backends: { nai: {}, comfy: { connection: 'a1111', proxyModel: 'my_model.safetensors' }, a1111: {} },
+        llm: { apiProfiles: [], contextProfiles: [], requestMapping: {}, defaultMethod: 'st_proxy', defaultApiProfileId: 'prof-1', injectionStyle: 'xml' },
+    };
+    const ran = runMigrations(v3);
+    assert.equal(ran, true);
+    // User values survive
+    assert.equal(v3.generation.backend, 'nai');
+    assert.equal(v3.generation.profile, 'krea2');
+    assert.equal(v3.generation.sceneWindow, 6);
+    assert.equal(v3.generation.logLimit, 25);
+    assert.equal(v3.backends.comfy.proxyModel, 'my_model.safetensors');
+    assert.equal(v3.llm.defaultApiProfileId, 'prof-1');
+    assert.equal(v3.llm.injectionStyle, 'xml');
+    assert.equal(v3.llm.defaultMethod, 'st_proxy');
+});
+
+// --- Test 13: sceneWindow clamp in v4 migration ---
+test('v3 migration clamps out-of-range sceneWindow to 2–8', () => {
+    const s = { settingsVersion: 3, generation: { sceneWindow: 15 } };
+    runMigrations(s);
+    assert.equal(s.generation.sceneWindow, 8);
+    const s2 = { settingsVersion: 3, generation: { sceneWindow: 0 } };
+    runMigrations(s2);
+    assert.equal(s2.generation.sceneWindow, 2);
+});
+
+// --- Test 14: invalid injectionStyle falls back to compact ---
+test('v3 migration sanitizes invalid injectionStyle to compact', () => {
+    const s = { settingsVersion: 3, llm: { injectionStyle: 'bogus' } };
+    runMigrations(s);
+    assert.equal(s.llm.injectionStyle, 'compact');
+});
+
+// --- Test 15: v0.1.0 through full migration to v4 ---
+test('v0.1.0 legacy reaches v4 with all defaults', () => {
+    const legacy = { enabled: true, backends: { nai: { apiKey: 'pst-test' }, comfy: { baseUrl: 'http://x', username: 'u', password: 'p', profile: 'anima' } } };
+    runMigrations(legacy);
+    assert.equal(legacy.settingsVersion, CURRENT_VERSION);
+    assert.equal(legacy.generation.backend, 'comfy');
+    assert.equal(legacy.generation.profile, 'anima');
+    assert.equal(legacy.generation.sceneWindow, 4);
+    assert.equal(legacy.backends.comfy.proxyModel, '');
+    assert.equal(legacy.llm.injectionStyle, 'compact');
+});
+
+// --- Test 16 (v4 → v5): generation.params structure added (Phase C0) ---
+test('v4 settings migrate to v5 with an empty generation.params structure per profile', () => {
+    const v4 = {
+        settingsVersion: 4,
+        enabled: true,
+        generation: { mode: 'direct', startTag: 'image###', endTag: '###', enabled: true, backend: 'comfy', profile: 'anima', sceneWindow: 4, logLimit: 50, dryRun: false },
+        backends: { nai: {}, comfy: { connection: 'legacy_proxy', proxyModel: '' }, a1111: {} },
+        llm: { apiProfiles: [], contextProfiles: [], requestMapping: {}, defaultMethod: 'direct', defaultApiProfileId: '', injectionStyle: 'compact' },
+    };
+    const ran = runMigrations(v4);
+    assert.equal(ran, true);
+    assert.equal(v4.settingsVersion, CURRENT_VERSION);
+    assert.deepEqual(v4.generation.params, { krea2: {}, anima: {}, illustrious: {} });
+});
+
+// --- Test 17: existing generation.params values survive v4→v5 migration ---
+test('v4→v5 migration preserves existing generation.params overrides', () => {
+    const v4 = {
+        settingsVersion: 4,
+        generation: { mode: 'direct', params: { anima: { width: 1024, steps: 24 } } },
+    };
+    runMigrations(v4);
+    assert.equal(v4.generation.params.anima.width, 1024);
+    assert.equal(v4.generation.params.anima.steps, 24);
+    // Missing profile keys are still filled in as empty objects.
+    assert.deepEqual(v4.generation.params.krea2, {});
+    assert.deepEqual(v4.generation.params.illustrious, {});
+});
+
+// --- Test 18: v0.1.0 through full migration reaches v5 with generation.params ---
+test('v0.1.0 legacy reaches v5 with generation.params present', () => {
+    const legacy = { enabled: true, backends: { nai: { apiKey: 'pst-test' }, comfy: { baseUrl: 'http://x', username: 'u', password: 'p', profile: 'anima' } } };
+    runMigrations(legacy);
+    assert.equal(legacy.settingsVersion, CURRENT_VERSION);
+    assert.deepEqual(legacy.generation.params, { krea2: {}, anima: {}, illustrious: {} });
+});
+
+// --- Test 19 (v5 → v6): discovery cache, checkpointProfiles, generation.checkpoint ---
+test('v5 settings migrate to v6 with discovery cache, checkpointProfiles, and copied checkpoint', () => {
+    const v5 = {
+        settingsVersion: 5,
+        enabled: true,
+        generation: { mode: 'direct', backend: 'comfy', profile: 'anima', params: { krea2: {}, anima: {}, illustrious: {} } },
+        backends: {
+            nai: {},
+            comfy: { connection: 'a1111' },
+            a1111: { baseUrl: 'https://host.example', auth: 'k', checkpoint: 'Anima | RDBT Anima' },
+        },
+    };
+    const ran = runMigrations(v5);
+    assert.equal(ran, true);
+    assert.equal(v5.settingsVersion, CURRENT_VERSION);
+    assert.deepEqual(v5.backends.a1111.discovery, { at: 0, models: [], samplers: [], schedulers: [] });
+    assert.deepEqual(v5.backends.a1111.checkpointProfiles, {});
+    // generation.checkpoint copied from the old field; the old field survives.
+    assert.equal(v5.generation.checkpoint, 'Anima | RDBT Anima');
+    assert.equal(v5.backends.a1111.checkpoint, 'Anima | RDBT Anima');
+});
+
+// --- Test 20: v5 → v6 with no stored checkpoint copies an empty string ---
+test('v5 → v6 with blank a1111.checkpoint stamps generation.checkpoint = ""', () => {
+    const v5 = { settingsVersion: 5, backends: { nai: {}, comfy: {}, a1111: { baseUrl: '', auth: '', checkpoint: '' } }, generation: {} };
+    runMigrations(v5);
+    assert.equal(v5.generation.checkpoint, '');
+});
+
+// --- Test 21: v6 fields already present are never overwritten ---
+test('existing v6 discovery/checkpointProfiles/generation.checkpoint survive migration untouched', () => {
+    const s = {
+        settingsVersion: 5,
+        generation: { checkpoint: 'User Choice' },
+        backends: {
+            nai: {}, comfy: {},
+            a1111: {
+                checkpoint: 'Old Field',
+                discovery: { at: 123, models: [{ title: 'M' }], samplers: ['Euler a'], schedulers: ['Karras'] },
+                checkpointProfiles: { M: { profile: 'krea2', steps: 8 } },
+            },
+        },
+    };
+    runMigrations(s);
+    assert.equal(s.generation.checkpoint, 'User Choice');
+    assert.equal(s.backends.a1111.discovery.at, 123);
+    assert.deepEqual(s.backends.a1111.checkpointProfiles, { M: { profile: 'krea2', steps: 8 } });
+});
+
+// --- Test 22: v0.1.0 through full migration reaches v6 ---
+test('v0.1.0 legacy reaches v6 with all R1 fields present', () => {
+    const legacy = { enabled: true, backends: { nai: { apiKey: 'pst-test' }, comfy: { baseUrl: 'http://x', username: 'u', password: 'p', profile: 'anima' } } };
+    runMigrations(legacy);
+    assert.equal(legacy.settingsVersion, CURRENT_VERSION);
+    assert.deepEqual(legacy.backends.a1111.discovery, { at: 0, models: [], samplers: [], schedulers: [] });
+    assert.deepEqual(legacy.backends.a1111.checkpointProfiles, {});
+    assert.equal(legacy.generation.checkpoint, '');
 });
 
 // --- Summary ---

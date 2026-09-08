@@ -34,7 +34,29 @@
 
 .if-image-tabs {
     display: flex;
+    flex-wrap: wrap;
     gap: 4px;
+}
+
+/* R4: per-checkpoint profile table (Backends tab, A1111 block). */
+.if-image-cp-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85em;
+}
+
+.if-image-cp-table th,
+.if-image-cp-table td {
+    padding: 2px 4px;
+    text-align: left;
+    border-bottom: 1px solid var(--SmartThemeBorderColor, #3b4261);
+}
+
+.if-image-cp-table input,
+.if-image-cp-table select {
+    width: 100%;
+    min-width: 52px;
+    box-sizing: border-box;
 }
 
 .if-image-tab.active {
@@ -142,4 +164,216 @@
 
 .if-image-actions a {
     text-decoration: none;
+}
+
+.if-image-note {
+    font-size: 0.8em;
+    color: var(--ifi-dim);
+}
+
+.if-image-check {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 28px;
+    cursor: pointer;
+}
+
+.if-image-preview-block {
+    background: rgba(0, 0, 0, 0.3);
+    padding: 6px;
+    border-radius: 4px;
+}
+
+.if-image-preview-block.active {
+    outline: 1px solid var(--ifi-accent);
+}
+
+.if-image-matrix {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85em;
+    margin: 6px 0;
+}
+
+.if-image-matrix th,
+.if-image-matrix td {
+    border: 1px solid var(--ifi-border, rgba(255, 255, 255, 0.1));
+    padding: 3px 4px;
+}
+
+.if-image-matrix input {
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.if-image-gallery-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+    gap: 6px;
+    margin: 6px 0;
+}
+
+.if-image-gallery-thumb {
+    position: relative;
+    cursor: pointer;
+    border-radius: 4px;
+    overflow: hidden;
+    aspect-ratio: 1 / 1;
+    background: rgba(0, 0, 0, 0.3);
+}
+
+.if-image-gallery-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.if-image-frame-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    gap: 4px;
+    padding: 4px;
+    opacity: 0;
+    transition: opacity 0.15s;
+    background: linear-gradient(to top, rgba(0, 0, 0, 0.6), transparent 60%);
+}
+
+.ifimg-frame:hover .if-image-frame-overlay,
+.if-image-gallery-thumb:hover .if-image-frame-overlay {
+    opacity: 1;
+}
+
+.if-image-frame-overlay button {
+    font-size: 0.75em;
+    padding: 2px 6px;
+}
+
+
+.if-image-preview-field {
+    font-size: 0.85em;
+    font-family: monospace;
+    margin-top: 2px;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.if-image-preview-field .k {
+    color: var(--ifi-dim);
+}
+
+/* ---- In-chat image slots (src/runtime/insert.js) ---- */
+
+.ifimg-slot {
+    display: inline-block;
+    vertical-align: middle;
+    max-width: 100%;
+    margin: 4px 0;
+}
+
+.ifimg-frame {
+    display: inline-block;
+    max-width: 100%;
+    cursor: zoom-in;
+}
+
+.ifimg-frame img {
+    max-width: 100%;
+    max-height: 70vh;
+    border-radius: 8px;
+    border: 1px solid var(--SmartThemeBorderColor, #3b4261);
+    display: block;
+}
+
+.ifimg-spinner {
+    display: inline-block;
+    width: 18px;
+    height: 18px;
+    border: 2px solid var(--SmartThemeBorderColor, #3b4261);
+    border-top-color: var(--SmartThemeQuoteColor, #7aa2f7);
+    border-radius: 50%;
+    animation: ifimg-spin 0.9s linear infinite;
+    vertical-align: middle;
+}
+
+@keyframes ifimg-spin {
+    to { transform: rotate(360deg); }
+}
+
+.ifimg-chip {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 10px;
+    font-size: 0.8em;
+    border: 1px solid var(--SmartThemeBorderColor, #3b4261);
+    color: var(--SmartThemeQuoteColor, #a9b1d6);
+    vertical-align: middle;
+}
+
+.ifimg-chip-failed {
+    color: var(--SmartThemeEmColor, #f7768e);
+    border-color: var(--SmartThemeEmColor, #f7768e);
+}
+
+/* R3: "Image not generated" chip — a marker slot with nothing persisted and
+   no live task stays visible instead of silently vanishing. */
+.ifimg-chip-idle {
+    opacity: 0.75;
+    font-style: italic;
+}
+
+/* Chip + button slots (idle / failed / cancelled / deleted) lay out inline.
+   Chat text uses `overflow-wrap: anywhere`, and ST's .menu_button is
+   `display: flex; width: min-content` — together they shrink the button to
+   one character per line. Override both inside our slots only. */
+.ifimg-slot[data-ifimg-state="idle"],
+.ifimg-slot[data-ifimg-state="failed"],
+.ifimg-slot[data-ifimg-state="cancelled"] {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+}
+
+.ifimg-chip {
+    overflow-wrap: normal;
+    word-break: normal;
+}
+
+.ifimg-slot .ifimg-retry,
+.ifimg-slot .menu_button {
+    display: inline-flex;
+    width: auto;
+    white-space: nowrap;
+    overflow-wrap: normal;
+    word-break: normal;
+    margin: 0;
+    vertical-align: middle;
+}
+
+.ifimg-retry {
+    font-size: 0.8em;
+    padding: 1px 8px;
+}
+
+.ifimg-lightbox {
+    position: fixed;
+    inset: 0;
+    z-index: 10000;
+    background: rgba(0, 0, 0, 0.85);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: zoom-out;
+}
+
+.ifimg-lightbox img {
+    max-width: 96vw;
+    max-height: 96vh;
+    object-fit: contain;
+    border-radius: 6px;
 }

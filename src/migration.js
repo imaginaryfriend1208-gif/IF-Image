@@ -58,6 +58,86 @@ export const migrators = [
             s.backends.comfy.connection = 'legacy_proxy';
         }
     },
+
+    // 3 → 4: promote runtime-only fields (written by the UI/pipeline in Phase
+    // A but absent from defaultSettings) into persisted defaults, and add the
+    // Phase B LLM settings. Non-destructive: existing user values always win,
+    // only missing keys are stamped.
+    (s) => {
+        // Generation runtime defaults promoted from index.js.
+        if (!s.generation) s.generation = {};
+        if (s.generation.backend === undefined) s.generation.backend = 'comfy';
+        if (s.generation.profile === undefined) s.generation.profile = 'anima';
+        if (s.generation.sceneWindow === undefined) s.generation.sceneWindow = 4;
+        else {
+            const n = Number(s.generation.sceneWindow);
+            s.generation.sceneWindow = Number.isFinite(n) ? Math.min(8, Math.max(2, n)) : 4;
+        }
+        if (s.generation.logLimit === undefined) s.generation.logLimit = 50;
+        else {
+            const n = Number(s.generation.logLimit);
+            s.generation.logLimit = Number.isFinite(n) ? Math.max(1, n) : 50;
+        }
+        if (s.generation.dryRun === undefined) s.generation.dryRun = false;
+        if (s.backends?.comfy && s.backends.comfy.proxyModel === undefined) {
+            s.backends.comfy.proxyModel = '';
+        }
+        // Phase B LLM settings.
+        if (!s.llm) {
+            s.llm = {
+                apiProfiles: [],
+                contextProfiles: [],
+                requestMapping: {},
+                defaultMethod: 'direct',
+            };
+        }
+        if (s.llm.defaultApiProfileId === undefined) s.llm.defaultApiProfileId = '';
+        if (s.llm.injectionStyle === undefined) s.llm.injectionStyle = 'compact';
+        else if (!['compact', 'xml', 'full'].includes(s.llm.injectionStyle)) s.llm.injectionStyle = 'compact';
+    },
+
+    // 4 -> 5: add the Phase C0 per-profile generation param overrides
+    // structure. Values are clamped on read (never here) so this migrator
+    // stays a pure structural stamp — see src/settings.js's comment.
+    (s) => {
+        if (!s.generation) s.generation = {};
+        if (!s.generation.params || typeof s.generation.params !== 'object') {
+            s.generation.params = { krea2: {}, anima: {}, illustrious: {} };
+        } else {
+            for (const key of ['krea2', 'anima', 'illustrious']) {
+                if (!s.generation.params[key] || typeof s.generation.params[key] !== 'object') {
+                    s.generation.params[key] = {};
+                }
+            }
+        }
+    },
+
+    // 5 -> 6 (Phase R1): persisted A1111 discovery cache + per-checkpoint
+    // profile map, and the generation-level checkpoint selection.
+    // - discovery: last successful discover() result ({at: 0} = never ran);
+    //   cleared on URL/auth change, so it is a cache, not configuration.
+    // - checkpointProfiles: title -> { profile, width?, height?, steps?,
+    //   cfg?, sampler?, scheduler? }; user edits live here and survive
+    //   re-discovery (seedCheckpointProfiles only adds missing titles).
+    // - generation.checkpoint: copied from backends.a1111.checkpoint; the
+    //   old field is kept as-is (executor fallback + rollback safety).
+    (s) => {
+        if (!s.backends) s.backends = {};
+        if (!s.backends.a1111 || typeof s.backends.a1111 !== 'object') {
+            s.backends.a1111 = { baseUrl: '', auth: '', checkpoint: '' };
+        }
+        const a1111 = s.backends.a1111;
+        if (!a1111.discovery || typeof a1111.discovery !== 'object') {
+            a1111.discovery = { at: 0, models: [], samplers: [], schedulers: [] };
+        }
+        if (!a1111.checkpointProfiles || typeof a1111.checkpointProfiles !== 'object') {
+            a1111.checkpointProfiles = {};
+        }
+        if (!s.generation) s.generation = {};
+        if (s.generation.checkpoint === undefined) {
+            s.generation.checkpoint = typeof a1111.checkpoint === 'string' ? a1111.checkpoint : '';
+        }
+    },
 ];
 
 /** Current schema version = number of migrators applied from zero. */

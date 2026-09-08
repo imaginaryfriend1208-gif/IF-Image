@@ -25,6 +25,20 @@ function calculateSkipCfgAboveSigma(width, height, model) {
 }
 
 /**
+ * Phase C8: horizontal center positions for N characters. 2 characters
+ * spread to 0.3/0.7 (a comfortable two-shot); 3+ spread evenly across the
+ * frame. A single character has no meaningful "center" (the whole frame is
+ * theirs), but a value is still returned for callers that index by count.
+ * @param {number} n
+ * @returns {Array<{x: number, y: number}>}
+ */
+export function computeCharacterCenters(n) {
+    if (n <= 1) return [{ x: 0.5, y: 0.5 }];
+    if (n === 2) return [{ x: 0.3, y: 0.5 }, { x: 0.7, y: 0.5 }];
+    return Array.from({ length: n }, (_, i) => ({ x: (i + 1) / (n + 1), y: 0.5 }));
+}
+
+/**
  * Extract the first .png entry from a NovelAI response ZIP (ArrayBuffer),
  * fully in the browser with no external library.
  * Supports stored (method 0) and deflate (method 8) entries.
@@ -133,7 +147,11 @@ export class NaiClient {
      * Generate one image. Mirrors ST src/endpoints/novelai.js request body.
      * @param {{model: string, prompt: string, negative: string, width: number, height: number,
      *          steps: number, scale: number, seed: number,
-     *          sampler?: string, scheduler?: string, signal?: AbortSignal}} opts
+     *          sampler?: string, scheduler?: string, signal?: AbortSignal,
+     *          characters?: string[]}} opts - `characters`: Phase C8 per-character
+     *          prompt strings for a multi-character marker (≥2 entries). Absent
+     *          or fewer than 2 entries produces the exact single-character
+     *          payload shape used before Phase C8.
      * @returns {Promise<Blob>} PNG blob
      */
     async generate(opts) {
@@ -142,6 +160,20 @@ export class NaiClient {
         const height = Math.trunc(Number(opts.height) || 1216);
         // NAI accepts seeds up to 4294967295; `| 0` would wrap anything over 2^31 - 1.
         const seed = opts.seed >= 0 ? Math.trunc(Number(opts.seed)) : Math.floor(Math.random() * 9999999999);
+
+        const characters = Array.isArray(opts.characters) ? opts.characters.filter(Boolean) : [];
+        const isMultiChar = characters.length >= 2;
+        const centers = isMultiChar ? computeCharacterCenters(characters.length) : [];
+        const characterPrompts = isMultiChar
+            ? characters.map((text, i) => ({ prompt: text, uc: opts.negative ?? '', center: centers[i], enabled: true }))
+            : [];
+        const charCaptions = isMultiChar
+            ? characters.map((text, i) => ({ char_caption: text, centers: [centers[i]] }))
+            : [];
+        const negCharCaptions = isMultiChar
+            ? characters.map((_, i) => ({ char_caption: opts.negative ?? '', centers: [centers[i]] }))
+            : [];
+
         const body = {
             action: 'generate',
             input: opts.prompt ?? '',
@@ -171,23 +203,23 @@ export class NaiClient {
                 sm_dyn: false,
                 uncond_scale: 1,
                 skip_cfg_above_sigma: null,
-                use_coords: false,
-                characterPrompts: [],
+                use_coords: isMultiChar,
+                characterPrompts,
                 reference_image_multiple: [],
                 reference_information_extracted_multiple: [],
                 reference_strength_multiple: [],
                 v4_negative_prompt: {
                     caption: {
                         base_caption: opts.negative ?? '',
-                        char_captions: [],
+                        char_captions: negCharCaptions,
                     },
                 },
                 v4_prompt: {
                     caption: {
                         base_caption: opts.prompt ?? '',
-                        char_captions: [],
+                        char_captions: charCaptions,
                     },
-                    use_coords: false,
+                    use_coords: isMultiChar,
                     use_order: true,
                 },
             },

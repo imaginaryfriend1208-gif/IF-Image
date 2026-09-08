@@ -4,7 +4,7 @@
 
 import assert from 'node:assert/strict';
 import { parseTriggers, matchCharacter, normalizeName } from '../src/prompt/triggers.js';
-import { renderCharacterForDialect, assemblePrompt } from '../src/prompt/render.js';
+import { renderCharacterForDialect, assemblePrompt, resolveProfileKey } from '../src/prompt/render.js';
 import { normalizeBooruTags, deduplicateTags } from '../src/prompt/dialects.js';
 import { PROFILES } from '../src/profiles.js';
 
@@ -142,6 +142,42 @@ test('Persona hidden POV generates solo looking at viewer', () => {
     const parsed = parseTriggers(input, { roster, styles, defaultPersona });
     const illusOut = assemblePrompt(parsed, 'illus', PROFILES.illustrious);
     assert.ok(illusOut.prompt.includes('solo, looking at viewer'));
+});
+
+// 8. B1 regression: JSON trigger modifiers must be a string[] like $Name:mods
+test('JSON trigger ${char: Lyna, view: back, nsfw: true} renders back/nsfw variants', () => {
+    const parsed = parseTriggers('${char: "Lyna", view: "back", nsfw: true, outfit: "casual"} at a bar', { roster, styles });
+    assert.equal(parsed.characters.length, 1);
+    assert.deepEqual(parsed.characters[0].modifiers, ['back', 'nsfw']);
+    assert.equal(parsed.characters[0].outfit, 'casual');
+    assert.equal(parsed.residualPrompt, 'at a bar');
+    const viaColon = parseTriggers('$Lyna:back|nsfw at a bar', { roster, styles });
+    assert.deepEqual(viaColon.characters[0].modifiers, parsed.characters[0].modifiers);
+    const illus = assemblePrompt(parsed, 'illus', PROFILES.illustrious);
+    assert.ok(illus.prompt.includes('from behind, looking back'));
+    assert.ok(illus.prompt.includes('cleavage'));
+    const krea = assemblePrompt(parsed, 'krea', PROFILES.krea2);
+    assert.ok(krea.prompt.includes('seen from behind'));
+});
+
+// 9. B2: dialectOverride is parsed and maps to a profile key
+test('dialectOverride maps krea/anima/illus to profile keys; unknown falls back', () => {
+    const parsed = parseTriggers('{{dialect: illus}} $Lyna city', { roster, styles });
+    assert.equal(parsed.dialectOverride, 'illus');
+    assert.equal(parsed.residualPrompt, 'city');
+    assert.deepEqual(resolveProfileKey('illus', 'anima'), { profileKey: 'illustrious', usedOverride: true });
+    assert.deepEqual(resolveProfileKey('krea', 'anima'), { profileKey: 'krea2', usedOverride: true });
+    assert.deepEqual(resolveProfileKey('anima', 'krea2'), { profileKey: 'anima', usedOverride: true });
+    const warn = console.warn;
+    let warned = 0;
+    console.warn = () => { warned += 1; };
+    try {
+        assert.deepEqual(resolveProfileKey('bogus', 'anima'), { profileKey: 'anima', usedOverride: false });
+    } finally {
+        console.warn = warn;
+    }
+    assert.equal(warned, 1);
+    assert.deepEqual(resolveProfileKey(null, 'anima'), { profileKey: 'anima', usedOverride: false });
 });
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`);

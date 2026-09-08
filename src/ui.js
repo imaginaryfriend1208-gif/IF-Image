@@ -1,13 +1,24 @@
-// IF Image - Drawer UI with 5 Tabs: Backends, Test Generate, Characters, Persona & Styles, Test Render.
+// IF Image - Drawer UI with 6 Tabs: Main, Backends, Test Generate, Characters, Persona & Styles, Test Render.
 // Template literals mounted into #extensions_settings2 by index.js.
 
 import { NAI_MODELS } from './backends/nai.js';
 import { resolveCheckpoint } from './backends/a1111.js';
+import { resolveCheckpointProfile, mergeParams, seedCheckpointProfiles } from './backends/checkpoint-profiles.js';
 import { PROFILES, PROFILE_KEYS, applyProfile } from './profiles.js';
-import { getAllCharacters, saveCharacter, removeCharacter, createDefaultCharacter } from './storage/chars.js';
-import { getAllPersonas, savePersona, getAllStyles, saveStyle, createDefaultPersona, createDefaultStyle } from './storage/presets.js';
+import { getAllCharacters, saveCharacter, removeCharacter, createDefaultCharacter, emptyBooruDetail } from './storage/chars.js';
+import { getAllPersonas, savePersona, removePersona, getAllStyles, saveStyle, removeStyle, createDefaultPersona, createDefaultStyle, getReplaceRules, saveReplaceRules } from './storage/presets.js';
+import { getOutfitsForCharacter, saveOutfit, removeOutfit, createDefaultOutfit } from './storage/outfits.js';
+import { listImages, countImages, deleteImageRecord } from './storage/images.js';
 import { parseTriggers } from './prompt/triggers.js';
-import { assemblePrompt } from './prompt/render.js';
+import { assemblePrompt, resolveProfileKey } from './prompt/render.js';
+import { cleanupEnvelope } from './prompt/cleanup.js';
+import { applyReplaceRules, parseCompactRule } from './prompt/replace.js';
+
+// Single source of truth for the displayed version. Keep in sync with
+// manifest.json (which cannot be imported from browser ESM without JSON
+// import attributes — unsupported on older Chromium, would hard-fail the
+// whole extension).
+export const EXTENSION_VERSION = '0.3.0';
 
 /**
  * @param {object} args
@@ -16,25 +27,240 @@ import { assemblePrompt } from './prompt/render.js';
  * @param {NaiClient} args.nai
  * @param {ComfyProxyClient} args.comfy legacy proxy client (connection 'legacy_proxy')
  * @param {A1111Client} args.a1111 AUTOMATIC1111-compatible API client (connection 'a1111')
+ * @param {Array} [args.genLog] - B7: ring buffer of pipeline/LLM events
+ * @param {() => object} [args.getQueue] - B7: live queue instance for task list
+ * @param {(record: object) => Promise<string>} [args.regenerateImage] - C10:
+ *   re-enqueue a gallery record through the existing queue/executor (seed -1)
+ *   and save the result as a new record.
+ * @param {() => string} [args.getCurrentChatId] - C10: current chat id, for
+ *   the Gallery tab's "current chat" filter.
  */
-export function renderDrawer({ settings, save, nai, comfy, a1111 }) {
+export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQueue, regenerateImage, getCurrentChatId }) {
     const html = `
     <div class="if-image-settings">
         <div class="if-image-title">
             <h2>IF Image</h2>
-            <span>v0.2.0 (Phase 1)</span>
+            <span>v${EXTENSION_VERSION}</span>
         </div>
 
         <div class="if-image-tabs">
-            <button class="if-image-tab menu_button active" data-if-tab="backends">Backends</button>
+            <button class="if-image-tab menu_button active" data-if-tab="main">Main</button>
+            <button class="if-image-tab menu_button" data-if-tab="llm">LLM</button>
+            <button class="if-image-tab menu_button" data-if-tab="backends">Backends</button>
             <button class="if-image-tab menu_button" data-if-tab="test">Test Gen</button>
+            <button class="if-image-tab menu_button" data-if-tab="log">Log</button>
             <button class="if-image-tab menu_button" data-if-tab="chars">Characters</button>
             <button class="if-image-tab menu_button" data-if-tab="presets">Persona & Style</button>
+            <button class="if-image-tab menu_button" data-if-tab="replace">Replace</button>
+            <button class="if-image-tab menu_button" data-if-tab="gallery">Gallery</button>
             <button class="if-image-tab menu_button" data-if-tab="render">3-Dialect Preview</button>
         </div>
 
+        <!-- ============ MAIN TAB ============ -->
+        <div class="if-image-panel" data-if-panel="main">
+            <h3>Generation</h3>
+            <div class="if-image-row">
+                <label class="if-image-check">
+                    <input type="checkbox" id="if_main_enabled"> Extension enabled
+                </label>
+            </div>
+            <div class="if-image-row">
+                <label class="if-image-check">
+                    <input type="checkbox" id="if_main_gen_enabled"> Marker detection enabled
+                </label>
+            </div>
+            <div class="if-image-row">
+                <label for="if_main_start">Start tag</label>
+                <input id="if_main_start" type="text" class="text_pole textarea_compact" value="image###">
+            </div>
+            <div class="if-image-row">
+                <label for="if_main_end">End tag</label>
+                <input id="if_main_end" type="text" class="text_pole textarea_compact" value="###">
+            </div>
+            <div class="if-image-note">Changing the tags affects marker detection in existing messages. Tags are matched literally (regex special characters are escaped).</div>
+            <div class="if-image-row">
+                <label for="if_main_backend">Default backend</label>
+                <select id="if_main_backend" class="text_pole">
+                    <option value="comfy">SD (A1111-compatible / Comfy proxy)</option>
+                    <option value="nai">NovelAI</option>
+                </select>
+            </div>
+            <div class="if-image-row">
+                <label for="if_main_profile">Default profile</label>
+                <select id="if_main_profile" class="text_pole">
+                    ${PROFILE_KEYS.map(k => `<option value="${k}">${PROFILES[k].label}</option>`).join('')}
+                </select>
+            </div>
+            <div class="if-image-row">
+                <label for="if_main_checkpoint">Checkpoint (A1111-compatible SD)</label>
+                <select id="if_main_checkpoint" class="text_pole">
+                    <option value="">-- none selected --</option>
+                </select>
+            </div>
+            <div class="if-image-note">Options come from the last Backends → Test connection / Refresh Models discovery. The checkpoint is re-validated against fresh discovery at generation time.</div>
+            <div class="if-image-row">
+                <label for="if_main_mode">Mode</label>
+                <select id="if_main_mode" class="text_pole">
+                    <option value="direct">Direct (marker → image)</option>
+                    <option value="assist">Assist (LLM rewrite)</option>
+                    <option value="full">Full (LLM replies)</option>
+                </select>
+            </div>
+            <div class="if-image-note">Direct compiles markers locally. Assist rewrites hand-typed markers through the LLM. Full also scans LLM chat replies for &lt;ifimage&gt; blocks.</div>
+            <div class="if-image-row">
+                <label class="if-image-check">
+                    <input type="checkbox" id="if_main_dryrun"> Dry-run (log envelope, no generation)
+                </label>
+            </div>
+
+            <hr class="if-image-sep"/>
+            <h3>Generation Params</h3>
+            <div class="if-image-note">Overrides the profile default for markers using this profile. Blank = inherit the profile default; a marker's own "size"/"steps"/"cfg" JSON trigger wins over this.</div>
+            <div class="if-image-row">
+                <label for="if_params_profile">Profile</label>
+                <select id="if_params_profile" class="text_pole">
+                    ${PROFILE_KEYS.map(k => `<option value="${k}">${PROFILES[k].label}</option>`).join('')}
+                </select>
+            </div>
+            <div class="if-image-grid">
+                <div class="if-image-row">
+                    <label for="if_params_width">Width</label>
+                    <input id="if_params_width" type="number" min="256" max="2048" step="64" class="text_pole">
+                </div>
+                <div class="if-image-row">
+                    <label for="if_params_height">Height</label>
+                    <input id="if_params_height" type="number" min="256" max="2048" step="64" class="text_pole">
+                </div>
+                <div class="if-image-row">
+                    <label for="if_params_steps">Steps</label>
+                    <input id="if_params_steps" type="number" min="1" max="150" class="text_pole">
+                </div>
+                <div class="if-image-row">
+                    <label for="if_params_cfg">CFG</label>
+                    <input id="if_params_cfg" type="number" min="0" max="30" step="0.5" class="text_pole">
+                </div>
+            </div>
+        </div>
+
+        <!-- ============ LLM TAB ============ -->
+        <div class="if-image-panel" data-if-panel="llm" style="display:none;">
+            <h3>LLM API Profiles</h3>
+            <div class="if-image-row">
+                <label for="if_llm_default_method">Default method</label>
+                <select id="if_llm_default_method" class="text_pole">
+                    <option value="direct">ST generateRaw (current connection)</option>
+                    <option value="st_connection_manager">ST Connection Manager profile</option>
+                    <option value="direct_fetch">Direct OpenAI-compatible endpoint</option>
+                </select>
+            </div>
+            <div class="if-image-row">
+                <label for="if_llm_default_profile">Default API profile</label>
+                <select id="if_llm_default_profile" class="text_pole">
+                    <option value="">-- none --</option>
+                </select>
+            </div>
+            <div class="if-image-row">
+                <label for="if_llm_injection">Character injection style</label>
+                <select id="if_llm_injection" class="text_pole">
+                    <option value="compact">Compact (one line per char)</option>
+                    <option value="xml">XML (structured tags)</option>
+                    <option value="full">Full (multi-line sheet)</option>
+                </select>
+            </div>
+
+            <hr class="if-image-sep"/>
+
+            <h3>API Profile Editor</h3>
+            <div class="if-image-row">
+                <label for="if_llm_profile_select">Profile</label>
+                <div style="display:flex; gap:6px;">
+                    <select id="if_llm_profile_select" class="text_pole" style="flex:1;">
+                        <option value="">-- New Profile --</option>
+                    </select>
+                    <button id="if_llm_profile_new" class="menu_button">+ New</button>
+                    <button id="if_llm_profile_del" class="menu_button" style="background:#552222;">Delete</button>
+                </div>
+            </div>
+            <div class="if-image-row">
+                <label for="if_llm_profile_name">Name</label>
+                <input id="if_llm_profile_name" type="text" class="text_pole">
+            </div>
+            <div class="if-image-row">
+                <label for="if_llm_profile_method">Method</label>
+                <select id="if_llm_profile_method" class="text_pole">
+                    <option value="generateRaw">ST generateRaw</option>
+                    <option value="connection_manager">ST Connection Manager</option>
+                    <option value="direct_fetch">Direct fetch</option>
+                </select>
+            </div>
+            <div class="if-image-row" data-if-llm-fetch>
+                <label for="if_llm_profile_baseurl">Base URL</label>
+                <input id="if_llm_profile_baseurl" type="text" class="text_pole" placeholder="https://api.example.com">
+            </div>
+            <div class="if-image-row" data-if-llm-fetch>
+                <label for="if_llm_profile_key">API key</label>
+                <input id="if_llm_profile_key" type="password" class="text_pole" autocomplete="off">
+            </div>
+            <div class="if-image-row" data-if-llm-fetch>
+                <label for="if_llm_profile_model">Model</label>
+                <input id="if_llm_profile_model" type="text" class="text_pole" placeholder="gpt-4o-mini">
+            </div>
+            <div class="if-image-row" data-if-llm-fetch>
+                <label for="if_llm_profile_temp">Temperature</label>
+                <input id="if_llm_profile_temp" type="number" min="0" max="2" step="0.1" class="text_pole">
+            </div>
+            <div class="if-image-row" data-if-llm-fetch>
+                <label for="if_llm_profile_maxtokens">Max tokens</label>
+                <input id="if_llm_profile_maxtokens" type="number" min="1" max="32768" class="text_pole">
+            </div>
+            <div style="display:flex; gap:6px; margin-top:4px;">
+                <button id="if_llm_profile_save" class="menu_button" style="flex:1;">Save Profile</button>
+                <button id="if_llm_test" class="menu_button">Test call</button>
+            </div>
+            <div class="if-image-result" id="if_llm_result"></div>
+
+            <hr class="if-image-sep"/>
+
+            <h3>Request Mapping</h3>
+            <div class="if-image-row">
+                <label for="if_llm_map_api">image_gen → API profile</label>
+                <select id="if_llm_map_api" class="text_pole">
+                    <option value="">-- none --</option>
+                </select>
+            </div>
+            <div class="if-image-row">
+                <label for="if_llm_map_ctx">image_gen → Context profile</label>
+                <select id="if_llm_map_ctx" class="text_pole">
+                    <option value="">-- none --</option>
+                </select>
+            </div>
+            <div class="if-image-note">Context profiles control the scene window and roster injection. More request types arrive in Phase C.</div>
+        </div>
+
+        <!-- ============ LOG TAB ============ -->
+        <div class="if-image-panel" data-if-panel="log" style="display:none;">
+            <h3>Generation Log</h3>
+            <div class="if-image-row">
+                <label for="if_log_limit">Log limit</label>
+                <input id="if_log_limit" type="number" min="1" max="500" class="text_pole">
+            </div>
+            <div class="if-image-row">
+                <button id="if_log_refresh" class="menu_button">Refresh</button>
+                <button id="if_log_clear" class="menu_button">Clear</button>
+            </div>
+            <div id="if_log_entries" class="if-image-log"></div>
+
+            <hr class="if-image-sep"/>
+
+            <h3>Live Tasks</h3>
+            <div class="if-image-row">
+                <button id="if_log_tasks_refresh" class="menu_button">Refresh tasks</button>
+            </div>
+            <div id="if_log_tasks" class="if-image-log"></div>
+        </div>
+
         <!-- ============ BACKENDS TAB ============ -->
-        <div class="if-image-panel" data-if-panel="backends">
+        <div class="if-image-panel" data-if-panel="backends" style="display:none;">
             <h3>NovelAI</h3>
             <div class="if-image-row">
                 <label for="if_nai_key">API token (pst-...)</label>
@@ -120,6 +346,11 @@ export function renderDrawer({ settings, save, nai, comfy, a1111 }) {
                     </select>
                 </div>
                 <div class="if-image-result" id="if_a1111_result"></div>
+
+                <hr class="if-image-sep"/>
+                <h3>Checkpoint profiles</h3>
+                <div class="if-image-note">Per-checkpoint prompt profile and generation defaults. Blank numeric fields inherit the profile / Generation Params values. Edits are kept across re-discovery; "Reset" re-infers the row from discovery.</div>
+                <div id="if_a1111_cp_table"></div>
             </div>
         </div>
 
@@ -128,7 +359,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111 }) {
             <div class="if-image-row">
                 <label>Backend</label>
                 <div class="if-image-radios">
-                    <label><input type="radio" name="if_test_backend" value="comfy"> SD backend (connection type from Backends)</label>
+                    <label><input type="radio" name="if_test_backend" value="comfy"> SD (A1111-compatible / Comfy proxy)</label>
                     <label><input type="radio" name="if_test_backend" value="nai"> NovelAI</label>
                 </div>
             </div>
@@ -234,6 +465,59 @@ export function renderDrawer({ settings, save, nai, comfy, a1111 }) {
                 <label for="if_char_facts">Neutral Facts (Core traits)</label>
                 <textarea id="if_char_facts" class="text_pole textarea_compact" rows="2" placeholder="Age 24, archer, wears leather tunic"></textarea>
             </div>
+            <div class="if-image-row">
+                <label for="if_char_views_back">View: Back (flat fallback, used when the matrix cell below is empty)</label>
+                <input id="if_char_views_back" type="text" class="text_pole" placeholder="e.g. long hair over back, viewed from behind">
+            </div>
+            <div class="if-image-row">
+                <label for="if_char_nsfw_extra">NSFW Extra (flat fallback)</label>
+                <textarea id="if_char_nsfw_extra" class="text_pole textarea_compact" rows="2"></textarea>
+            </div>
+            <div class="if-image-row">
+                <label for="if_char_negative">Character Negative</label>
+                <textarea id="if_char_negative" class="text_pole textarea_compact" rows="2" placeholder="tags to always exclude for this character"></textarea>
+            </div>
+            <div class="if-image-row">
+                <label class="if-image-check">
+                    <input type="checkbox" id="if_char_lock_seed"> Lock seed
+                </label>
+                <input id="if_char_lock_seed_value" type="number" class="text_pole" style="max-width:140px;" placeholder="-1">
+            </div>
+
+            <hr class="if-image-sep"/>
+            <h4>Booru Detail Matrix</h4>
+            <div class="if-image-note">Per region/rating/view detail tags. An empty cell falls back to the flat fields above (back/nsfw) or is simply omitted (front/lower have no legacy equivalent).</div>
+            <table class="if-image-matrix" id="if_char_matrix">
+                <thead><tr><th>Region</th><th>SFW front</th><th>SFW back</th><th>NSFW front</th><th>NSFW back</th></tr></thead>
+                <tbody>
+                    ${['face', 'upper', 'lower'].map(region => `
+                    <tr data-region="${region}">
+                        <td>${region}</td>
+                        <td><input type="text" class="text_pole" data-cell="sfw.front"></td>
+                        <td><input type="text" class="text_pole" data-cell="sfw.back"></td>
+                        <td><input type="text" class="text_pole" data-cell="nsfw.front"></td>
+                        <td><input type="text" class="text_pole" data-cell="nsfw.back"></td>
+                    </tr>`).join('')}
+                </tbody>
+            </table>
+
+            <hr class="if-image-sep"/>
+            <h4>Outfits</h4>
+            <div class="if-image-note">Outfits with no character assigned ("Common") are usable by every character via the same trigger token.</div>
+            <div id="if_char_outfits_list" class="if-image-log"></div>
+            <div class="if-image-row">
+                <input id="if_char_outfit_name" type="text" class="text_pole" placeholder="Outfit name (trigger: $Name:outfitName)">
+            </div>
+            <div class="if-image-row">
+                <input id="if_char_outfit_tags" type="text" class="text_pole" placeholder="tags appended when this outfit is triggered">
+            </div>
+            <div class="if-image-row">
+                <label class="if-image-check">
+                    <input type="checkbox" id="if_char_outfit_common"> Common (usable by any character)
+                </label>
+                <button id="if_char_outfit_add" class="menu_button">+ Add / Update Outfit</button>
+            </div>
+
             <div style="display:flex; gap:6px; margin-top:4px;">
                 <button id="if_char_save" class="menu_button" style="flex:1;">Save Character</button>
                 <button id="if_char_del" class="menu_button" style="background:#552222;">Delete</button>
@@ -245,8 +529,23 @@ export function renderDrawer({ settings, save, nai, comfy, a1111 }) {
         <div class="if-image-panel" data-if-panel="presets" style="display:none;">
             <h3>User Persona ($me)</h3>
             <div class="if-image-row">
+                <label for="if_per_select">Select Persona</label>
+                <div style="display:flex; gap:6px;">
+                    <select id="if_per_select" class="text_pole" style="flex:1;">
+                        <option value="">-- New Persona --</option>
+                    </select>
+                    <button id="if_per_new" class="menu_button">+ New</button>
+                    <button id="if_per_del" class="menu_button" style="background:#552222;">Delete</button>
+                </div>
+            </div>
+            <div class="if-image-row">
                 <label for="if_per_name">Persona Name</label>
                 <input id="if_per_name" type="text" class="text_pole" value="Default User">
+            </div>
+            <div class="if-image-row">
+                <label class="if-image-check">
+                    <input type="checkbox" id="if_per_default"> Default persona ($me resolves to this one)
+                </label>
             </div>
             <div class="if-image-row">
                 <label for="if_per_pov">Default POV Mode</label>
@@ -267,6 +566,14 @@ export function renderDrawer({ settings, save, nai, comfy, a1111 }) {
                 <input id="if_per_natural" type="text" class="text_pole" placeholder="a young man in casual attire">
             </div>
             <div class="if-image-row">
+                <label for="if_per_facts">Persona Facts</label>
+                <input id="if_per_facts" type="text" class="text_pole" placeholder="core traits, dialect-free text">
+            </div>
+            <div class="if-image-row">
+                <label for="if_per_avoid">Avoid Tags (comma separated, stripped by cleanup)</label>
+                <input id="if_per_avoid" type="text" class="text_pole" placeholder="e.g. beard, glasses">
+            </div>
+            <div class="if-image-row">
                 <button id="if_per_save" class="menu_button">Save Persona</button>
             </div>
 
@@ -274,16 +581,50 @@ export function renderDrawer({ settings, save, nai, comfy, a1111 }) {
 
             <h3>Style Preset</h3>
             <div class="if-image-row">
+                <label for="if_style_select">Select Style</label>
+                <div style="display:flex; gap:6px;">
+                    <select id="if_style_select" class="text_pole" style="flex:1;">
+                        <option value="">-- New Style --</option>
+                    </select>
+                    <button id="if_style_new" class="menu_button">+ New</button>
+                    <button id="if_style_del" class="menu_button" style="background:#552222;">Delete</button>
+                </div>
+            </div>
+            <div class="if-image-row">
                 <label for="if_style_name">Style Name ({{style: Name}})</label>
                 <input id="if_style_name" type="text" class="text_pole" placeholder="e.g. Cyberpunk">
             </div>
             <div class="if-image-row">
-                <label for="if_style_krea">Krea Style Phrase</label>
+                <label for="if_style_krea">Krea: Style Phrase</label>
                 <input id="if_style_krea" type="text" class="text_pole" placeholder="cyberpunk aesthetic, neon lighting, 35mm film">
             </div>
             <div class="if-image-row">
-                <label for="if_style_illus">Illustrious Artists / Tags</label>
+                <label for="if_style_krea_light">Krea: Lighting</label>
+                <input id="if_style_krea_light" type="text" class="text_pole">
+            </div>
+            <div class="if-image-row">
+                <label for="if_style_krea_cam">Krea: Camera</label>
+                <input id="if_style_krea_cam" type="text" class="text_pole">
+            </div>
+            <div class="if-image-row">
+                <label for="if_style_anima_tags">Anima: Booru Tags</label>
+                <input id="if_style_anima_tags" type="text" class="text_pole">
+            </div>
+            <div class="if-image-row">
+                <label for="if_style_anima_artists">Anima: Artists</label>
+                <input id="if_style_anima_artists" type="text" class="text_pole">
+            </div>
+            <div class="if-image-row">
+                <label for="if_style_illus">Illustrious: Artists / Tags</label>
                 <input id="if_style_illus" type="text" class="text_pole" placeholder="retro anime, 1990s (style), neon city">
+            </div>
+            <div class="if-image-row">
+                <label for="if_style_illus_quality">Illustrious: Quality Prefix</label>
+                <input id="if_style_illus_quality" type="text" class="text_pole">
+            </div>
+            <div class="if-image-row">
+                <label for="if_style_illus_neg">Illustrious: Negative Tags</label>
+                <input id="if_style_illus_neg" type="text" class="text_pole">
             </div>
             <div class="if-image-row">
                 <button id="if_style_save" class="menu_button">Save Style</button>
@@ -291,9 +632,102 @@ export function renderDrawer({ settings, save, nai, comfy, a1111 }) {
             <div id="if_presets_status" class="if-image-result"></div>
         </div>
 
+        <!-- ============ REPLACE TAB ============ -->
+        <div class="if-image-panel" data-if-panel="replace" style="display:none;">
+            <h3>Replace Rules</h3>
+            <div class="if-image-note">Trigger on a tag, then prefix/suffix/replace/delete it. Multi-trigger: "a|b". Condition: "@if dialect==illus", "@if nsfw", "@if !nsfw" (safe evaluator — no code execution). Pipeline order: compile &rarr; non-final rules &rarr; cleanup &rarr; final rules.</div>
+            <div id="if_replace_list" class="if-image-log"></div>
+
+            <div class="if-image-row">
+                <label for="if_replace_trigger">Trigger (a|b for multiple)</label>
+                <input id="if_replace_trigger" type="text" class="text_pole" placeholder="e.g. bad hands|bad fingers">
+            </div>
+            <div class="if-image-row">
+                <label for="if_replace_mode">Mode</label>
+                <select id="if_replace_mode" class="text_pole">
+                    <option value="replace">replace</option>
+                    <option value="prefix-head">prefix-head</option>
+                    <option value="prefix-tail">prefix-tail</option>
+                    <option value="suffix-head">suffix-head</option>
+                    <option value="suffix-tail">suffix-tail</option>
+                    <option value="delete">delete</option>
+                    <option value="final">final (runs after cleanup)</option>
+                </select>
+            </div>
+            <div class="if-image-row">
+                <label for="if_replace_replacement">Replacement</label>
+                <input id="if_replace_replacement" type="text" class="text_pole" placeholder="new tag text (ignored for delete)">
+            </div>
+            <div class="if-image-row">
+                <label for="if_replace_condition">Condition (optional)</label>
+                <input id="if_replace_condition" type="text" class="text_pole" placeholder="@if dialect==illus">
+            </div>
+            <div class="if-image-row">
+                <button id="if_replace_add" class="menu_button">+ Add Rule</button>
+            </div>
+
+            <div class="if-image-row">
+                <label for="if_replace_compact">Quick add (compact syntax: "a|b=replacement", mode=replace)</label>
+                <input id="if_replace_compact" type="text" class="text_pole" placeholder="bad hands|bad fingers=good hands">
+            </div>
+            <div class="if-image-row">
+                <button id="if_replace_compact_add" class="menu_button">+ Add from compact line</button>
+            </div>
+
+            <hr class="if-image-sep"/>
+            <h3>Dry-run Preview</h3>
+            <div class="if-image-note">Runs the current Test Gen prompt (Test Gen tab) through compile() including these rules.</div>
+            <div class="if-image-row">
+                <button id="if_replace_preview" class="menu_button">Preview against Test Gen prompt</button>
+            </div>
+            <div id="if_replace_preview_out" class="if-image-result"></div>
+        </div>
+
+        <!-- ============ GALLERY TAB ============ -->
+        <div class="if-image-panel" data-if-panel="gallery" style="display:none;">
+            <h3>Gallery</h3>
+            <div class="if-image-row">
+                <label class="if-image-check">
+                    <input type="radio" name="if_gallery_scope" id="if_gallery_scope_chat" value="chat" checked> Current chat
+                </label>
+                <label class="if-image-check">
+                    <input type="radio" name="if_gallery_scope" id="if_gallery_scope_all" value="all"> All chats
+                </label>
+            </div>
+            <div class="if-image-gallery-grid" id="if_gallery_grid"></div>
+            <div class="if-image-row" style="justify-content:center; gap:8px;">
+                <button id="if_gallery_prev" class="menu_button">&larr; Prev</button>
+                <span id="if_gallery_page_label"></span>
+                <button id="if_gallery_next" class="menu_button">Next &rarr;</button>
+            </div>
+
+            <hr class="if-image-sep"/>
+            <div id="if_gallery_detail" style="display:none;">
+                <h4>Image Detail</h4>
+                <img id="if_gallery_detail_img" style="max-width:100%; max-height:50vh; display:block; border-radius:8px;" alt="Selected generated image"/>
+                <div class="if-image-preview-field" id="if_gallery_detail_meta"></div>
+                <div class="if-image-row" style="gap:6px;">
+                    <a id="if_gallery_detail_download" class="menu_button" download="if-image.png">Download</a>
+                    <button id="if_gallery_detail_regen" class="menu_button">Regenerate</button>
+                    <button id="if_gallery_detail_delete" class="menu_button" style="background:#552222;">Delete</button>
+                    <button id="if_gallery_detail_close" class="menu_button">Close</button>
+                </div>
+                <div id="if_gallery_detail_status" class="if-image-result"></div>
+            </div>
+        </div>
+
         <!-- ============ 3-DIALECT PREVIEW TAB ============ -->
         <div class="if-image-panel" data-if-panel="render" style="display:none;">
             <h3>Test-Render (Offline Compiler)</h3>
+
+            <h4>Character Picker (C9)</h4>
+            <div class="if-image-note">Pick characters/persona and modifier toggles, then "Insert Tokens" to prepend the matching trigger syntax to the input below.</div>
+            <div id="if_render_picker" class="if-image-log"></div>
+            <div class="if-image-row">
+                <button id="if_render_insert" class="menu_button">Insert Selected as Tokens</button>
+                <button id="if_render_clear" class="menu_button">Clear Input</button>
+            </div>
+
             <div class="if-image-row">
                 <label for="if_render_input">Input with triggers ($Name, $me, {{style:}}, {{dialect:}})</label>
                 <textarea id="if_render_input" class="text_pole textarea_compact" rows="2" placeholder="e.g. $Lyna:back sitting at a bar, neon lights, {{style: Cyberpunk}}"></textarea>
@@ -303,17 +737,23 @@ export function renderDrawer({ settings, save, nai, comfy, a1111 }) {
             </div>
 
             <div id="if_render_results" style="display:flex; flex-direction:column; gap:8px; margin-top:6px;">
-                <div style="background:rgba(0,0,0,0.3); padding:6px; border-radius:4px;">
+                <div class="if-image-preview-block" data-if-dialect="krea">
                     <strong style="color:#7aa2f7;">1. Krea 2 (Prose):</strong>
-                    <div id="if_render_krea" style="font-size:0.85em; font-family:monospace; margin-top:2px;">(Click Compile)</div>
+                    <div class="if-image-preview-field if-render-prompt" data-dialect="krea"><span class="k">prompt:</span> (Click Compile)</div>
+                    <div class="if-image-preview-field if-render-negative" data-dialect="krea"><span class="k">negative:</span></div>
+                    <div class="if-image-preview-field if-render-params" data-dialect="krea"><span class="k">params:</span></div>
                 </div>
-                <div style="background:rgba(0,0,0,0.3); padding:6px; border-radius:4px;">
+                <div class="if-image-preview-block" data-if-dialect="anima">
                     <strong style="color:#bb9af7;">2. rdbt Anima (Hybrid):</strong>
-                    <div id="if_render_anima" style="font-size:0.85em; font-family:monospace; margin-top:2px;">(Click Compile)</div>
+                    <div class="if-image-preview-field if-render-prompt" data-dialect="anima"><span class="k">prompt:</span> (Click Compile)</div>
+                    <div class="if-image-preview-field if-render-negative" data-dialect="anima"><span class="k">negative:</span></div>
+                    <div class="if-image-preview-field if-render-params" data-dialect="anima"><span class="k">params:</span></div>
                 </div>
-                <div style="background:rgba(0,0,0,0.3); padding:6px; border-radius:4px;">
+                <div class="if-image-preview-block" data-if-dialect="illus">
                     <strong style="color:#7dcfff;">3. Illustrious (Booru):</strong>
-                    <div id="if_render_illus" style="font-size:0.85em; font-family:monospace; margin-top:2px;">(Click Compile)</div>
+                    <div class="if-image-preview-field if-render-prompt" data-dialect="illus"><span class="k">prompt:</span> (Click Compile)</div>
+                    <div class="if-image-preview-field if-render-negative" data-dialect="illus"><span class="k">negative:</span></div>
+                    <div class="if-image-preview-field if-render-params" data-dialect="illus"><span class="k">params:</span></div>
                 </div>
             </div>
         </div>
@@ -326,6 +766,12 @@ export function renderDrawer({ settings, save, nai, comfy, a1111 }) {
     // Element helpers
     const $ = id => el.querySelector('#' + id);
 
+    // Log/prompt/name text is user- or LLM-controlled: always escape before
+    // interpolating into innerHTML.
+    function escapeHtml(value) {
+        return String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+
     // ================= Tabs Switching =================
     el.querySelectorAll('.if-image-tab').forEach(btn => {
         btn.addEventListener('click', () => {
@@ -336,6 +782,57 @@ export function renderDrawer({ settings, save, nai, comfy, a1111 }) {
             });
         });
     });
+
+    // ================= Main Tab Wiring =================
+    const mainEnabled = $('if_main_enabled');
+    const mainGenEnabled = $('if_main_gen_enabled');
+    const mainStart = $('if_main_start');
+    const mainEnd = $('if_main_end');
+    const mainBackend = $('if_main_backend');
+    const mainProfile = $('if_main_profile');
+    const mainCheckpoint = $('if_main_checkpoint');
+    const mainMode = $('if_main_mode');
+
+    mainEnabled.checked = settings.enabled !== false;
+    mainGenEnabled.checked = settings.generation.enabled !== false;
+    mainStart.value = settings.generation.startTag || 'image###';
+    mainEnd.value = settings.generation.endTag || '###';
+    mainBackend.value = settings.generation.backend || 'comfy';
+    mainProfile.value = settings.generation.profile || settings.backends.comfy.profile || 'anima';
+    mainMode.value = settings.generation.mode || 'direct';
+
+    mainEnabled.addEventListener('change', () => { settings.enabled = mainEnabled.checked; save(); });
+    mainGenEnabled.addEventListener('change', () => { settings.generation.enabled = mainGenEnabled.checked; save(); });
+    mainStart.addEventListener('change', () => {
+        const value = mainStart.value.trim();
+        if (!value) {
+            mainStart.value = settings.generation.startTag || 'image###';
+            mainStart.setCustomValidity('Start tag cannot be empty.');
+            mainStart.reportValidity();
+            return;
+        }
+        mainStart.setCustomValidity('');
+        settings.generation.startTag = value;
+        save();
+    });
+    mainEnd.addEventListener('change', () => {
+        const value = mainEnd.value.trim();
+        if (!value) {
+            mainEnd.value = settings.generation.endTag || '###';
+            mainEnd.setCustomValidity('End tag cannot be empty.');
+            mainEnd.reportValidity();
+            return;
+        }
+        mainEnd.setCustomValidity('');
+        settings.generation.endTag = value;
+        save();
+    });
+    mainBackend.addEventListener('change', () => { settings.generation.backend = mainBackend.value; save(); });
+    mainProfile.addEventListener('change', () => { settings.generation.profile = mainProfile.value; save(); });
+    // R4: default checkpoint for marker generation (generation.checkpoint).
+    // Options are (re)built by syncMainCheckpoint() from persisted discovery.
+    mainCheckpoint.addEventListener('change', () => { settings.generation.checkpoint = mainCheckpoint.value; save(); });
+    mainMode.addEventListener('change', () => { settings.generation.mode = mainMode.value; save(); });
 
     // ================= Backends Tab Wiring =================
     const naiKey = $('if_nai_key');
@@ -433,7 +930,18 @@ export function renderDrawer({ settings, save, nai, comfy, a1111 }) {
     // clears the other source's UI state so stale models/checkpoints can
     // never leak into the new configuration.
     let comfyModels = [];
-    let a1111Models = [];
+    // R4: seed the A1111 model list from the last persisted discovery
+    // (settings.backends.a1111.discovery, migrator v6) so selects are usable
+    // right after a reload without hitting the server. Generation still
+    // re-validates against fresh /sdapi/v1/sd-models in the executor.
+    /** In-memory model list shape from the persisted discovery cache. */
+    function a1111ModelsFromPersisted() {
+        const models = settings.backends.a1111.discovery?.models;
+        return Array.isArray(models)
+            ? models.map(m => ({ title: m.title, model_name: m.modelName ?? m.title, filename: null }))
+            : [];
+    }
+    let a1111Models = a1111ModelsFromPersisted();
 
     // Epoch guards: bumping invalidates every in-flight discovery request,
     // so a late response from an old source/URL/auth can never populate the
@@ -454,19 +962,41 @@ export function renderDrawer({ settings, save, nai, comfy, a1111 }) {
         abortInFlightGeneration('Proxy URL or credentials changed — generation aborted (browser request only; a started proxy job may still finish).');
     }
 
-    function invalidateA1111Discovery(reason) {
+    /**
+     * @param {string} reason
+     * @param {{clearPersisted?: boolean}} [opts] clearPersisted=true (URL/auth
+     *   change): the stored discovery belongs to the old endpoint — wipe it.
+     *   false (connection-source switch): keep it; only in-flight requests and
+     *   the in-memory list are invalidated. checkpointProfiles are user data
+     *   keyed by title and are NEVER cleared here; re-discovery only ADDs
+     *   missing titles (seed semantics).
+     */
+    function invalidateA1111Discovery(reason, { clearPersisted = true } = {}) {
         a1111DiscoveryEpoch += 1;
         a1111DiscoveryController?.abort();
         a1111DiscoveryController = null;
-        a1111Models = [];
-        fillCheckpointSelect(a1111Checkpoint, [], '', '-- Refresh Models to load --');
+        if (clearPersisted) {
+            a1111Models = [];
+            settings.backends.a1111.discovery = { at: 0, models: [], samplers: [], schedulers: [] };
+            syncMainCheckpoint();
+            renderCheckpointProfilesTable();
+            fillCheckpointSelect(a1111Checkpoint, [], '', '-- Refresh Models to load --');
+        } else {
+            // Source switch: the persisted cache is still valid for this
+            // URL/auth, so the in-memory list is re-seeded from it (same as
+            // on load) instead of forcing another Refresh Models click.
+            a1111Models = a1111ModelsFromPersisted();
+            fillCheckpointSelect(a1111Checkpoint, a1111Models, settings.backends.a1111.checkpoint,
+                a1111Models.length ? '-- select a checkpoint --' : '-- Refresh Models to load --');
+        }
         if (reason) showResult(a1111Result, reason, false);
         abortInFlightGeneration('A1111 base URL or Authentication changed — generation aborted (browser request only; a started server job may still finish).');
     }
 
     function fillCheckpointSelect(select, models, selectedTitle, emptyLabel) {
-        select.innerHTML = `<option value="">${emptyLabel}</option>` +
-            models.map(m => `<option value="${m.title}">${m.title}</option>`).join('');
+        // R4: titles come from a remote server — escape before innerHTML.
+        select.innerHTML = `<option value="">${escapeHtml(emptyLabel)}</option>` +
+            models.map(m => `<option value="${escapeHtml(m.title)}">${escapeHtml(m.title)}</option>`).join('');
         select.value = models.some(m => m.title === selectedTitle) ? selectedTitle : '';
     }
 
@@ -485,7 +1015,9 @@ export function renderDrawer({ settings, save, nai, comfy, a1111 }) {
         if (sdConnection.value === 'a1111') {
             invalidateComfyDiscovery('');
         } else {
-            invalidateA1111Discovery('');
+            // Source switch only: URL/auth unchanged, so the persisted
+            // discovery stays valid for when the user switches back.
+            invalidateA1111Discovery('', { clearPersisted: false });
         }
         // A generation running against the previous source must not land
         // here either: abort it (browser request only).
@@ -564,29 +1096,52 @@ export function renderDrawer({ settings, save, nai, comfy, a1111 }) {
     });
 
     // ---- A1111: test + refresh models + checkpoint ------------------------
+    // R4: both buttons run the composite discover() (models required;
+    // samplers/schedulers/-/internal/models optional) and persist the result
+    // in settings.backends.a1111.discovery with a timestamp, then seed
+    // checkpointProfiles (ADD-only: user edits always survive).
+    function persistA1111Discovery(discovery) {
+        settings.backends.a1111.discovery = {
+            at: Date.now(),
+            models: discovery.models,
+            samplers: discovery.samplers,
+            schedulers: discovery.schedulers,
+        };
+        const fallbackKey = settings.generation.profile || settings.backends.comfy.profile || 'anima';
+        settings.backends.a1111.checkpointProfiles = seedCheckpointProfiles(
+            settings.backends.a1111.checkpointProfiles, discovery.models, fallbackKey);
+        a1111Models = discovery.models.map(m => ({ title: m.title, model_name: m.modelName ?? m.title, filename: null }));
+        fillCheckpointSelect(a1111Checkpoint, a1111Models, settings.backends.a1111.checkpoint, '-- select a checkpoint --');
+        if (!resolveCheckpoint(a1111Models, settings.backends.a1111.checkpoint)) {
+            settings.backends.a1111.checkpoint = '';
+            a1111Checkpoint.value = '';
+        }
+        save();
+        syncMainCheckpoint();
+        renderCheckpointProfilesTable();
+        syncTestGenVisibility();
+    }
+
     a1111Test.addEventListener('click', async () => {
         a1111Test.disabled = true;
-        a1111Result.textContent = 'Testing (GET options + models; nothing is written)...';
+        a1111Result.textContent = 'Testing (GET options + discovery; nothing is written to the server)...';
         a1111Result.classList.remove('error');
         a1111DiscoveryEpoch += 1;
         const epoch = a1111DiscoveryEpoch;
         a1111DiscoveryController = new AbortController();
         try {
-            const info = await a1111.testConnection({ signal: a1111DiscoveryController.signal });
+            const signal = a1111DiscoveryController.signal;
+            const options = await a1111.options({ signal }); // auth/connectivity check
+            const discovery = await a1111.discover({ signal });
             if (epoch !== a1111DiscoveryEpoch) return; // stale: URL/auth/source changed meanwhile
-            a1111Models = info.models;
-            fillCheckpointSelect(a1111Checkpoint, a1111Models, settings.backends.a1111.checkpoint, '-- select a checkpoint --');
-            if (!resolveCheckpoint(a1111Models, settings.backends.a1111.checkpoint)) {
-                settings.backends.a1111.checkpoint = '';
-                a1111Checkpoint.value = '';
-                save();
-            }
-            const parts = [`Connected. ${a1111Models.length} checkpoint(s).`];
-            parts.push(info.currentCheckpoint ? `Server default: ${info.currentCheckpoint}` : 'Server default: (none reported)');
-            if (info.samplers) parts.push(`${info.samplers.length} sampler(s).`);
-            if (info.samplersError) parts.push(`Samplers endpoint unavailable: ${info.samplersError}`);
+            persistA1111Discovery(discovery);
+            const current = typeof options.sd_model_checkpoint === 'string' && options.sd_model_checkpoint
+                ? options.sd_model_checkpoint : '(none reported)';
+            const parts = [`Connected. ${discovery.models.length} checkpoint(s).`];
+            parts.push(`Server default: ${current}`);
+            parts.push(`${discovery.samplers.length} sampler(s), ${discovery.schedulers.length} scheduler(s).`);
+            if (discovery.enrichment === 'internal') parts.push('Enriched via /internal/models.');
             showResult(a1111Result, parts.join(' · '), false);
-            syncTestGenVisibility();
         } catch (error) {
             if (epoch !== a1111DiscoveryEpoch) return; // stale error: swallow
             showResult(a1111Result, error.message, true);
@@ -607,17 +1162,10 @@ export function renderDrawer({ settings, save, nai, comfy, a1111 }) {
         const epoch = a1111DiscoveryEpoch;
         a1111DiscoveryController = new AbortController();
         try {
-            const models = await a1111.models({ signal: a1111DiscoveryController.signal });
+            const discovery = await a1111.discover({ signal: a1111DiscoveryController.signal });
             if (epoch !== a1111DiscoveryEpoch) return; // stale: URL/auth/source changed meanwhile
-            a1111Models = models;
-            fillCheckpointSelect(a1111Checkpoint, a1111Models, settings.backends.a1111.checkpoint, '-- select a checkpoint --');
-            if (!resolveCheckpoint(a1111Models, settings.backends.a1111.checkpoint)) {
-                settings.backends.a1111.checkpoint = '';
-                a1111Checkpoint.value = '';
-                save();
-            }
-            showResult(a1111Result, `${a1111Models.length} checkpoint(s) available.`, false);
-            syncTestGenVisibility();
+            persistA1111Discovery(discovery);
+            showResult(a1111Result, `${discovery.models.length} checkpoint(s), ${discovery.samplers.length} sampler(s), ${discovery.schedulers.length} scheduler(s).`, false);
         } catch (error) {
             if (epoch !== a1111DiscoveryEpoch) return; // stale error: swallow
             a1111Models = [];
@@ -637,6 +1185,102 @@ export function renderDrawer({ settings, save, nai, comfy, a1111 }) {
         save();
         syncTestGenVisibility();
     });
+
+    // ---- R4: Main-tab checkpoint select (generation.checkpoint) -----------
+    // Options come from the PERSISTED discovery so they survive reloads. A
+    // stored title missing from the list stays selectable but is labeled
+    // "(not discovered)" — the executor re-validates at generation time.
+    function syncMainCheckpoint() {
+        const models = settings.backends.a1111.discovery?.models ?? [];
+        const stored = settings.generation.checkpoint || '';
+        const missing = stored && !models.some(m => m.title === stored);
+        mainCheckpoint.innerHTML = '<option value="">-- none selected --</option>'
+            + models.map(m => `<option value="${escapeHtml(m.title)}">${escapeHtml(m.title)}</option>`).join('')
+            + (missing ? `<option value="${escapeHtml(stored)}">${escapeHtml(stored)} (not discovered)</option>` : '');
+        mainCheckpoint.value = stored;
+    }
+    syncMainCheckpoint();
+    // Seed the Backends checkpoint select from the persisted discovery too.
+    if (a1111Models.length) {
+        fillCheckpointSelect(a1111Checkpoint, a1111Models, settings.backends.a1111.checkpoint, '-- select a checkpoint --');
+    }
+
+    // ---- R4: per-checkpoint profile table ----------------------------------
+    // One row per checkpointProfiles entry (user data keyed by title; kept
+    // even when a title is missing from the current discovery). Blank numeric
+    // fields = inherit; every edit saves immediately. "Reset" re-seeds the
+    // row from the discovered model (inferred profile + discovery defaults).
+    const cpTableBox = $('if_a1111_cp_table');
+
+    function cpOptionList(values, selected) {
+        const list = Array.isArray(values) ? values : [];
+        const missing = selected && !list.includes(selected);
+        return '<option value="">(inherit)</option>'
+            + list.map(v => `<option value="${escapeHtml(v)}"${v === selected ? ' selected' : ''}>${escapeHtml(v)}</option>`).join('')
+            + (missing ? `<option value="${escapeHtml(selected)}" selected>${escapeHtml(selected)} (not discovered)</option>` : '');
+    }
+
+    function renderCheckpointProfilesTable() {
+        if (!cpTableBox) return;
+        const profiles = settings.backends.a1111.checkpointProfiles ?? {};
+        const titles = Object.keys(profiles);
+        if (!titles.length) {
+            cpTableBox.textContent = 'No checkpoints discovered yet — click Test connection or Refresh Models.';
+            return;
+        }
+        const discovery = settings.backends.a1111.discovery ?? {};
+        cpTableBox.innerHTML = `<table class="if-image-cp-table"><thead><tr>
+            <th>Checkpoint</th><th>Profile</th><th>W</th><th>H</th><th>Steps</th><th>CFG</th>
+            <th>Sampler</th><th>Scheduler</th><th></th>
+        </tr></thead><tbody>` + titles.map((title, i) => {
+            const entry = profiles[title];
+            const profileOpts = PROFILE_KEYS.map(k =>
+                `<option value="${k}"${k === entry.profile ? ' selected' : ''}>${escapeHtml(PROFILES[k].label)}</option>`).join('');
+            return `<tr data-cp-row="${i}">
+                <td title="${escapeHtml(title)}">${escapeHtml(title)}</td>
+                <td><select data-cp-field="profile" class="text_pole">${profileOpts}</select></td>
+                <td><input data-cp-field="width" type="number" min="256" max="2048" step="64" class="text_pole" value="${entry.width ?? ''}"></td>
+                <td><input data-cp-field="height" type="number" min="256" max="2048" step="64" class="text_pole" value="${entry.height ?? ''}"></td>
+                <td><input data-cp-field="steps" type="number" min="1" max="150" class="text_pole" value="${entry.steps ?? ''}"></td>
+                <td><input data-cp-field="cfg" type="number" min="0" max="30" step="0.5" class="text_pole" value="${entry.cfg ?? ''}"></td>
+                <td><select data-cp-field="sampler" class="text_pole">${cpOptionList(discovery.samplers, entry.sampler ?? '')}</select></td>
+                <td><select data-cp-field="scheduler" class="text_pole">${cpOptionList(discovery.schedulers, entry.scheduler ?? '')}</select></td>
+                <td><button data-cp-reset class="menu_button" title="Re-infer profile and defaults from discovery">Reset</button></td>
+            </tr>`;
+        }).join('') + '</tbody></table>';
+
+        cpTableBox.querySelectorAll('[data-cp-row]').forEach(row => {
+            const title = titles[Number(row.dataset.cpRow)];
+            row.querySelectorAll('[data-cp-field]').forEach(input => {
+                input.addEventListener('change', () => {
+                    const entry = settings.backends.a1111.checkpointProfiles[title];
+                    if (!entry) return;
+                    const field = input.dataset.cpField;
+                    if (field === 'profile') {
+                        entry.profile = PROFILES[input.value] ? input.value : entry.profile;
+                    } else if (input.type === 'number') {
+                        const num = Number(input.value);
+                        if (input.value === '' || !Number.isFinite(num)) delete entry[field];
+                        else entry[field] = num;
+                    } else {
+                        if (input.value) entry[field] = input.value;
+                        else delete entry[field];
+                    }
+                    save();
+                });
+            });
+            row.querySelector('[data-cp-reset]')?.addEventListener('click', () => {
+                const fallbackKey = settings.generation.profile || settings.backends.comfy.profile || 'anima';
+                const model = (settings.backends.a1111.discovery?.models ?? []).find(m => m.title === title) ?? { title };
+                delete settings.backends.a1111.checkpointProfiles[title];
+                settings.backends.a1111.checkpointProfiles = seedCheckpointProfiles(
+                    settings.backends.a1111.checkpointProfiles, [model], fallbackKey);
+                save();
+                renderCheckpointProfilesTable();
+            });
+        });
+    }
+    renderCheckpointProfilesTable();
 
     // ================= Test Gen Tab Wiring =================
     const testProfileRow = el.querySelector('[data-if-comfy-only]');
@@ -687,7 +1331,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111 }) {
         const { models, stored } = activeCheckpointOptions();
         const resolved = resolveCheckpoint(models, stored);
         testCheckpoint.innerHTML = models.length
-            ? models.map(m => `<option value="${m.title}">${m.title}</option>`).join('')
+            ? models.map(m => `<option value="${escapeHtml(m.title)}">${escapeHtml(m.title)}</option>`).join('')
             : '<option value="">-- none discovered (Backends → Refresh Models) --</option>';
         testCheckpoint.value = resolved ?? '';
     }
@@ -734,6 +1378,27 @@ export function renderDrawer({ settings, save, nai, comfy, a1111 }) {
     testCheckpoint.addEventListener('change', () => {
         if (currentSdConnection() === 'a1111') {
             settings.backends.a1111.checkpoint = testCheckpoint.value;
+            // R2: prefill W/H/steps/cfg from the checkpoint's effective
+            // params (PROFILES < settings params < checkpoint profile).
+            // The user can still edit any field before Generate.
+            const title = testCheckpoint.value;
+            const cp = title ? resolveCheckpointProfile(settings, title) : null;
+            if (cp) {
+                const merged = mergeParams({ profileKey: cp.profileKey, checkpointTitle: title, settings });
+                settings.test.width = merged.width;
+                settings.test.height = merged.height;
+                settings.test.steps = merged.steps;
+                settings.test.cfg = merged.cfg;
+                settings.test.profile = cp.profileKey;
+                testWidth.value = merged.width;
+                testHeight.value = merged.height;
+                testSteps.value = merged.steps;
+                testCfg.value = merged.cfg;
+                testProfile.value = cp.profileKey;
+                // The profile changed under the Test tab: re-sync dependent
+                // rows (Negative is hidden for negativeDisabled profiles).
+                syncBackendRadio();
+            }
         } else {
             settings.backends.comfy.proxyModel = testCheckpoint.value;
         }
@@ -866,24 +1531,131 @@ export function renderDrawer({ settings, save, nai, comfy, a1111 }) {
     const charBooru = $('if_char_booru');
     const charNatural = $('if_char_natural');
     const charFacts = $('if_char_facts');
+    const charViewsBack = $('if_char_views_back');
+    const charNsfwExtra = $('if_char_nsfw_extra');
+    const charNegative = $('if_char_negative');
+    const charLockSeed = $('if_char_lock_seed');
+    const charLockSeedValue = $('if_char_lock_seed_value');
+    const charMatrix = $('if_char_matrix');
+    const charOutfitsList = $('if_char_outfits_list');
+    const charOutfitName = $('if_char_outfit_name');
+    const charOutfitTags = $('if_char_outfit_tags');
+    const charOutfitCommon = $('if_char_outfit_common');
+    const charOutfitAdd = $('if_char_outfit_add');
     const charSaveBtn = $('if_char_save');
     const charDelBtn = $('if_char_del');
     const charStatus = $('if_char_status');
 
     let currentChars = [];
     let activeCharId = null;
+    let currentOutfits = []; // outfits for the active character (own + common)
+    let activeOutfitId = null;
 
     async function loadCharactersList() {
         try {
             currentChars = await getAllCharacters();
             charSelect.innerHTML = '<option value="">-- New Character --</option>' +
-                currentChars.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
+                currentChars.map(c => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name)}</option>`).join('');
             if (activeCharId) charSelect.value = activeCharId;
         } catch (e) {
             console.warn('[IF Image] Load characters failed:', e);
         }
     }
     loadCharactersList();
+
+    function matrixCells() {
+        return Array.from(charMatrix.querySelectorAll('tr[data-region]')).flatMap(row => {
+            const region = row.dataset.region;
+            return Array.from(row.querySelectorAll('input[data-cell]')).map(input => ({ region, path: input.dataset.cell, input }));
+        });
+    }
+
+    function populateMatrix(detail) {
+        const source = detail || emptyBooruDetail();
+        for (const { region, path, input } of matrixCells()) {
+            const [rating, view] = path.split('.');
+            input.value = source[region]?.[rating]?.[view] ?? '';
+        }
+    }
+
+    function readMatrix() {
+        const detail = emptyBooruDetail();
+        for (const { region, path, input } of matrixCells()) {
+            const [rating, view] = path.split('.');
+            detail[region][rating][view] = input.value.trim();
+        }
+        return detail;
+    }
+
+    async function loadOutfitsForActiveChar() {
+        activeOutfitId = null;
+        if (!activeCharId) { currentOutfits = []; renderOutfitsList(); return; }
+        try {
+            currentOutfits = await getOutfitsForCharacter(activeCharId);
+        } catch (e) {
+            console.warn('[IF Image] Load outfits failed:', e);
+            currentOutfits = [];
+        }
+        renderOutfitsList();
+    }
+
+    function renderOutfitsList() {
+        if (!currentOutfits.length) { charOutfitsList.textContent = 'No outfits yet.'; return; }
+        charOutfitsList.innerHTML = currentOutfits.map(o => `
+            <div class="if-image-log-entry" data-outfit-id="${escapeHtml(o.id)}">
+                <span class="if-image-log-type">${o.charId ? 'own' : 'common'}</span>
+                ${escapeHtml(o.name)}: ${escapeHtml(o.tags)}
+                <button class="ifimg-outfit-edit menu_button" data-outfit-id="${escapeHtml(o.id)}">Edit</button>
+                <button class="ifimg-outfit-del menu_button" data-outfit-id="${escapeHtml(o.id)}" style="background:#552222;">Delete</button>
+            </div>`).join('');
+        charOutfitsList.querySelectorAll('.ifimg-outfit-edit').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const outfit = currentOutfits.find(o => o.id === btn.dataset.outfitId);
+                if (!outfit) return;
+                activeOutfitId = outfit.id;
+                charOutfitName.value = outfit.name;
+                charOutfitTags.value = outfit.tags;
+                charOutfitCommon.checked = !outfit.charId;
+            });
+        });
+        charOutfitsList.querySelectorAll('.ifimg-outfit-del').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                try {
+                    await removeOutfit(btn.dataset.outfitId);
+                    await loadOutfitsForActiveChar();
+                    showResult(charStatus, 'Outfit deleted.', false);
+                } catch (e) {
+                    showResult(charStatus, e.message, true);
+                }
+            });
+        });
+    }
+
+    charOutfitAdd.addEventListener('click', async () => {
+        if (!activeCharId) {
+            showResult(charStatus, 'Save the character before adding outfits.', true);
+            return;
+        }
+        const name = charOutfitName.value.trim();
+        if (!name) { showResult(charStatus, 'Outfit name is required.', true); return; }
+        const outfit = activeOutfitId
+            ? currentOutfits.find(o => o.id === activeOutfitId) || createDefaultOutfit(name)
+            : createDefaultOutfit(name);
+        outfit.name = name;
+        outfit.tags = charOutfitTags.value.trim();
+        outfit.charId = charOutfitCommon.checked ? null : activeCharId;
+        try {
+            await saveOutfit(outfit);
+            activeOutfitId = null;
+            charOutfitName.value = '';
+            charOutfitTags.value = '';
+            charOutfitCommon.checked = false;
+            await loadOutfitsForActiveChar();
+            showResult(charStatus, `Outfit "${name}" saved.`, false);
+        } catch (e) {
+            showResult(charStatus, e.message, true);
+        }
+    });
 
     function populateCharForm(char) {
         if (!char) {
@@ -894,6 +1666,13 @@ export function renderDrawer({ settings, save, nai, comfy, a1111 }) {
             charBooru.value = '';
             charNatural.value = '';
             charFacts.value = '';
+            charViewsBack.value = '';
+            charNsfwExtra.value = '';
+            charNegative.value = '';
+            charLockSeed.checked = false;
+            charLockSeedValue.value = '-1';
+            populateMatrix(null);
+            loadOutfitsForActiveChar();
             return;
         }
         activeCharId = char.id;
@@ -903,6 +1682,13 @@ export function renderDrawer({ settings, save, nai, comfy, a1111 }) {
         charBooru.value = char.booru || '';
         charNatural.value = char.natural || '';
         charFacts.value = char.facts || '';
+        charViewsBack.value = char.views?.back || '';
+        charNsfwExtra.value = char.nsfwExtra || '';
+        charNegative.value = char.negative || '';
+        charLockSeed.checked = Number.isInteger(char.lock?.seed) && char.lock.seed >= 0;
+        charLockSeedValue.value = String(char.lock?.seed ?? -1);
+        populateMatrix(char.booruDetail);
+        loadOutfitsForActiveChar();
     }
 
     charSelect.addEventListener('change', () => {
@@ -931,11 +1717,18 @@ export function renderDrawer({ settings, save, nai, comfy, a1111 }) {
         target.booru = charBooru.value.trim();
         target.natural = charNatural.value.trim();
         target.facts = charFacts.value.trim();
+        target.views = { ...(target.views || {}), back: charViewsBack.value.trim() };
+        target.nsfwExtra = charNsfwExtra.value.trim();
+        target.negative = charNegative.value.trim();
+        const seedValue = Number(charLockSeedValue.value);
+        target.lock = { seed: charLockSeed.checked && Number.isFinite(seedValue) ? seedValue : -1, params: target.lock?.params ?? null };
+        target.booruDetail = readMatrix();
 
         try {
             await saveCharacter(target);
             activeCharId = target.id;
             await loadCharactersList();
+            await loadOutfitsForActiveChar();
             showResult(charStatus, `Character "${name}" saved!`, false);
         } catch (err) {
             showResult(charStatus, err.message, true);
@@ -956,53 +1749,158 @@ export function renderDrawer({ settings, save, nai, comfy, a1111 }) {
     });
 
     // ================= Persona & Style Wiring =================
+    const perSelect = $('if_per_select');
+    const perNewBtn = $('if_per_new');
+    const perDelBtn = $('if_per_del');
     const perName = $('if_per_name');
+    const perDefault = $('if_per_default');
     const perPov = $('if_per_pov');
     const perBooru = $('if_per_booru');
     const perNatural = $('if_per_natural');
+    const perFacts = $('if_per_facts');
+    const perAvoid = $('if_per_avoid');
     const perSaveBtn = $('if_per_save');
+
+    const styleSelect = $('if_style_select');
+    const styleNewBtn = $('if_style_new');
+    const styleDelBtn = $('if_style_del');
     const styleName = $('if_style_name');
     const styleKrea = $('if_style_krea');
+    const styleKreaLight = $('if_style_krea_light');
+    const styleKreaCam = $('if_style_krea_cam');
+    const styleAnimaTags = $('if_style_anima_tags');
+    const styleAnimaArtists = $('if_style_anima_artists');
     const styleIllus = $('if_style_illus');
+    const styleIllusQuality = $('if_style_illus_quality');
+    const styleIllusNeg = $('if_style_illus_neg');
     const styleSaveBtn = $('if_style_save');
     const presetsStatus = $('if_presets_status');
 
     let currentPersonas = [];
     let currentStyles = [];
+    let activePersonaId = null;
+    let activeStyleId = null;
+
+    function populatePersonaForm(p) {
+        activePersonaId = p?.id ?? null;
+        perName.value = p?.name ?? 'Default User';
+        perDefault.checked = Boolean(p?.isDefault);
+        perPov.value = p?.povMode ?? 'auto';
+        perBooru.value = p?.booru ?? '';
+        perNatural.value = p?.natural ?? '';
+        perFacts.value = p?.facts ?? '';
+        perAvoid.value = (p?.avoidTags || []).join(', ');
+    }
+
+    function populateStyleForm(s) {
+        activeStyleId = s?.id ?? null;
+        styleName.value = s?.name ?? '';
+        styleKrea.value = s?.dialectHints?.krea?.stylePhrase ?? '';
+        styleKreaLight.value = s?.dialectHints?.krea?.lighting ?? '';
+        styleKreaCam.value = s?.dialectHints?.krea?.camera ?? '';
+        styleAnimaTags.value = s?.dialectHints?.anima?.booruTags ?? '';
+        styleAnimaArtists.value = s?.dialectHints?.anima?.artists ?? '';
+        styleIllus.value = s?.dialectHints?.illus?.artists ?? '';
+        styleIllusQuality.value = s?.dialectHints?.illus?.qualityPrefix ?? '';
+        styleIllusNeg.value = s?.dialectHints?.illus?.negativeTags ?? '';
+    }
+
+    function refreshPersonaSelect() {
+        perSelect.innerHTML = '<option value="">-- New Persona --</option>' +
+            currentPersonas.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}${p.isDefault ? ' (default)' : ''}</option>`).join('');
+        if (activePersonaId) perSelect.value = activePersonaId;
+    }
+
+    function refreshStyleSelect() {
+        styleSelect.innerHTML = '<option value="">-- New Style --</option>' +
+            currentStyles.map(s => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.name)}</option>`).join('');
+        if (activeStyleId) styleSelect.value = activeStyleId;
+    }
 
     async function loadPresets() {
         try {
             currentPersonas = await getAllPersonas();
             currentStyles = await getAllStyles();
-            if (currentPersonas.length) {
-                const p = currentPersonas[0];
-                perName.value = p.name || 'Default User';
-                perPov.value = p.povMode || 'auto';
-                perBooru.value = p.booru || '';
-                perNatural.value = p.natural || '';
-            }
-            if (currentStyles.length) {
-                const s = currentStyles[0];
-                styleName.value = s.name || '';
-                styleKrea.value = s.dialectHints?.krea?.stylePhrase || '';
-                styleIllus.value = s.dialectHints?.illus?.artists || '';
-            }
+            refreshPersonaSelect();
+            refreshStyleSelect();
+            const activePersona = currentPersonas.find(p => p.id === activePersonaId)
+                ?? currentPersonas.find(p => p.isDefault)
+                ?? currentPersonas[0]
+                ?? null;
+            populatePersonaForm(activePersona);
+            refreshPersonaSelect();
+            const activeStyle = currentStyles.find(s => s.id === activeStyleId) ?? null;
+            populateStyleForm(activeStyle);
         } catch (e) {
             console.warn('[IF Image] Presets load error:', e);
         }
     }
     loadPresets();
 
-    perSaveBtn.addEventListener('click', async () => {
+    perSelect.addEventListener('change', () => {
+        populatePersonaForm(currentPersonas.find(p => p.id === perSelect.value) ?? null);
+    });
+    perNewBtn.addEventListener('click', () => {
+        perSelect.value = '';
+        populatePersonaForm(null);
+    });
+    perDelBtn.addEventListener('click', async () => {
+        if (!activePersonaId) return;
         try {
-            let p = currentPersonas[0] || createDefaultPersona(perName.value.trim());
-            p.name = perName.value.trim();
+            await removePersona(activePersonaId);
+            activePersonaId = null;
+            await loadPresets();
+            showResult(presetsStatus, 'Persona deleted.', false);
+        } catch (e) {
+            showResult(presetsStatus, e.message, true);
+        }
+    });
+
+    perSaveBtn.addEventListener('click', async () => {
+        const name = perName.value.trim();
+        if (!name) { showResult(presetsStatus, 'Persona name is required', true); return; }
+        try {
+            const existing = currentPersonas.find(p => p.id === activePersonaId);
+            const p = existing || createDefaultPersona(name);
+            p.name = name;
             p.povMode = perPov.value;
             p.booru = perBooru.value.trim();
             p.natural = perNatural.value.trim();
+            p.facts = perFacts.value.trim();
+            p.avoidTags = perAvoid.value.split(',').map(s => s.trim()).filter(Boolean);
+            p.isDefault = perDefault.checked;
             await savePersona(p);
+            // Only one persona may be default at a time.
+            if (p.isDefault) {
+                for (const other of currentPersonas) {
+                    if (other.id !== p.id && other.isDefault) {
+                        other.isDefault = false;
+                        await savePersona(other);
+                    }
+                }
+            }
+            activePersonaId = p.id;
             await loadPresets();
             showResult(presetsStatus, 'Persona saved!', false);
+        } catch (e) {
+            showResult(presetsStatus, e.message, true);
+        }
+    });
+
+    styleSelect.addEventListener('change', () => {
+        populateStyleForm(currentStyles.find(s => s.id === styleSelect.value) ?? null);
+    });
+    styleNewBtn.addEventListener('click', () => {
+        styleSelect.value = '';
+        populateStyleForm(null);
+    });
+    styleDelBtn.addEventListener('click', async () => {
+        if (!activeStyleId) return;
+        try {
+            await removeStyle(activeStyleId);
+            activeStyleId = null;
+            await loadPresets();
+            showResult(presetsStatus, 'Style deleted.', false);
         } catch (e) {
             showResult(presetsStatus, e.message, true);
         }
@@ -1015,11 +1913,19 @@ export function renderDrawer({ settings, save, nai, comfy, a1111 }) {
             return;
         }
         try {
-            let s = currentStyles.find(x => x.name === name) || createDefaultStyle(name);
+            const existing = currentStyles.find(s => s.id === activeStyleId);
+            const s = existing || createDefaultStyle(name);
             s.name = name;
             s.dialectHints.krea.stylePhrase = styleKrea.value.trim();
+            s.dialectHints.krea.lighting = styleKreaLight.value.trim();
+            s.dialectHints.krea.camera = styleKreaCam.value.trim();
+            s.dialectHints.anima.booruTags = styleAnimaTags.value.trim();
+            s.dialectHints.anima.artists = styleAnimaArtists.value.trim();
             s.dialectHints.illus.artists = styleIllus.value.trim();
+            s.dialectHints.illus.qualityPrefix = styleIllusQuality.value.trim();
+            s.dialectHints.illus.negativeTags = styleIllusNeg.value.trim();
             await saveStyle(s);
+            activeStyleId = s.id;
             await loadPresets();
             showResult(presetsStatus, `Style "${name}" saved!`, false);
         } catch (e) {
@@ -1027,40 +1933,679 @@ export function renderDrawer({ settings, save, nai, comfy, a1111 }) {
         }
     });
 
+
+    // ================= Replace Rules Wiring =================
+    const replaceList = $('if_replace_list');
+    const replaceTrigger = $('if_replace_trigger');
+    const replaceMode = $('if_replace_mode');
+    const replaceReplacement = $('if_replace_replacement');
+    const replaceCondition = $('if_replace_condition');
+    const replaceAdd = $('if_replace_add');
+    const replaceCompact = $('if_replace_compact');
+    const replaceCompactAdd = $('if_replace_compact_add');
+    const replacePreviewBtn = $('if_replace_preview');
+    const replacePreviewOut = $('if_replace_preview_out');
+
+    let currentRules = [];
+
+    async function loadReplaceRules() {
+        try {
+            currentRules = await getReplaceRules();
+        } catch (e) {
+            console.warn('[IF Image] Load replace rules failed:', e);
+            currentRules = [];
+        }
+        renderReplaceList();
+    }
+
+    function renderReplaceList() {
+        if (!currentRules.length) { replaceList.textContent = 'No rules yet.'; return; }
+        replaceList.innerHTML = currentRules.map((r, i) => `
+            <div class="if-image-log-entry">
+                <span class="if-image-log-type">${escapeHtml(r.mode)}</span>
+                "${escapeHtml(r.trigger)}" &rarr; "${escapeHtml(r.replacement ?? '')}"
+                ${r.condition ? ` [${escapeHtml(r.condition)}]` : ''}
+                <button class="ifimg-rule-del menu_button" data-idx="${i}" style="background:#552222;">Delete</button>
+            </div>`).join('');
+        replaceList.querySelectorAll('.ifimg-rule-del').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                currentRules.splice(Number(btn.dataset.idx), 1);
+                await saveReplaceRules(currentRules);
+                renderReplaceList();
+            });
+        });
+    }
+    loadReplaceRules();
+
+    replaceAdd.addEventListener('click', async () => {
+        const trigger = replaceTrigger.value.trim();
+        if (!trigger) return;
+        currentRules.push({
+            trigger,
+            mode: replaceMode.value,
+            replacement: replaceReplacement.value.trim(),
+            condition: replaceCondition.value.trim() || undefined,
+        });
+        await saveReplaceRules(currentRules);
+        replaceTrigger.value = '';
+        replaceReplacement.value = '';
+        replaceCondition.value = '';
+        renderReplaceList();
+    });
+
+    replaceCompactAdd.addEventListener('click', async () => {
+        const rule = parseCompactRule(replaceCompact.value);
+        if (!rule) return;
+        currentRules.push(rule);
+        await saveReplaceRules(currentRules);
+        replaceCompact.value = '';
+        renderReplaceList();
+    });
+
+    replacePreviewBtn.addEventListener('click', () => {
+        try {
+            const text = testPrompt.value.trim();
+            if (!text) { replacePreviewOut.textContent = 'Test Gen prompt is empty.'; return; }
+            const profileKey = testProfile.value || settings.generation.profile || 'anima';
+            const profile = PROFILES[profileKey] ?? PROFILES.anima;
+            const parsed = parseTriggers(text, {});
+            const assembled = assemblePrompt(parsed, profile.dialect, profile);
+            const ctx = { dialect: profile.dialect, nsfw: false, back: false, full: false };
+            let envelope = applyReplaceRules(assembled, currentRules, 'pre', ctx);
+            envelope = cleanupEnvelope(envelope, profile.dialect, { avoidTags: [], rating: 'nsfw' });
+            envelope = applyReplaceRules(envelope, currentRules, 'final', ctx);
+            replacePreviewOut.innerHTML = `<div><span class="k">before:</span> ${escapeHtml(assembled.prompt)}</div><div><span class="k">after:</span> ${escapeHtml(envelope.prompt)}</div>`;
+            replacePreviewOut.classList.remove('error');
+        } catch (e) {
+            showResult(replacePreviewOut, e.message, true);
+        }
+    });
+
+    // ================= Gallery Tab Wiring (C10) =================
+    const galleryGrid = $('if_gallery_grid');
+    const galleryPrevBtn = $('if_gallery_prev');
+    const galleryNextBtn = $('if_gallery_next');
+    const galleryPageLabel = $('if_gallery_page_label');
+    const galleryDetail = $('if_gallery_detail');
+    const galleryDetailImg = $('if_gallery_detail_img');
+    const galleryDetailMeta = $('if_gallery_detail_meta');
+    const galleryDetailDownload = $('if_gallery_detail_download');
+    const galleryDetailRegen = $('if_gallery_detail_regen');
+    const galleryDetailDelete = $('if_gallery_detail_delete');
+    const galleryDetailClose = $('if_gallery_detail_close');
+    const galleryDetailStatus = $('if_gallery_detail_status');
+
+    const GALLERY_PAGE_SIZE = 24;
+    let galleryPage = 0;
+    let galleryTotal = 0;
+    let galleryItems = [];
+    // Object URLs are created here for display only (listImages() itself
+    // never attaches one) and revoked on every reload/page change so a
+    // closed gallery tab never leaks blob URLs.
+    let galleryUrls = new Map(); // record id -> object URL
+    let galleryDetailId = null;
+
+    function galleryScope() {
+        return $('if_gallery_scope_all')?.checked ? 'all' : 'chat';
+    }
+
+    function revokeGalleryUrls() {
+        for (const url of galleryUrls.values()) URL.revokeObjectURL(url);
+        galleryUrls.clear();
+    }
+
+    function closeGalleryDetail() {
+        galleryDetailId = null;
+        galleryDetail.style.display = 'none';
+    }
+
+    async function loadGalleryPage() {
+        revokeGalleryUrls();
+        closeGalleryDetail();
+        const scope = galleryScope();
+        const chatId = scope === 'chat' && typeof getCurrentChatId === 'function' ? getCurrentChatId() : undefined;
+        try {
+            const [items, total] = await Promise.all([
+                listImages({ chatId, offset: galleryPage * GALLERY_PAGE_SIZE, limit: GALLERY_PAGE_SIZE }),
+                countImages({ chatId }),
+            ]);
+            galleryItems = items;
+            galleryTotal = total;
+            renderGalleryGrid();
+        } catch (e) {
+            galleryGrid.textContent = '';
+            console.warn('[IF Image] Gallery load failed:', e);
+        }
+    }
+
+    function renderGalleryGrid() {
+        for (const record of galleryItems) {
+            galleryUrls.set(record.id, URL.createObjectURL(record.blob));
+        }
+        // Blob URLs are browser-generated (opaque, no user-controlled
+        // characters) and safe to interpolate directly; every other field
+        // still goes through escapeHtml via data-record-id lookups below.
+        galleryGrid.innerHTML = galleryItems.map(record => `
+            <div class="if-image-gallery-thumb" data-record-id="${escapeHtml(record.id)}">
+                <img src="${galleryUrls.get(record.id)}" alt="Generated image">
+            </div>`).join('');
+        galleryGrid.querySelectorAll('[data-record-id]').forEach(node => {
+            node.addEventListener('click', () => {
+                const record = galleryItems.find(r => r.id === node.dataset.recordId);
+                if (record) openGalleryDetail(record);
+            });
+        });
+        const totalPages = Math.max(1, Math.ceil(galleryTotal / GALLERY_PAGE_SIZE));
+        galleryPageLabel.textContent = `Page ${galleryPage + 1} / ${totalPages} (${galleryTotal} image${galleryTotal === 1 ? '' : 's'})`;
+        galleryPrevBtn.disabled = galleryPage <= 0;
+        galleryNextBtn.disabled = (galleryPage + 1) * GALLERY_PAGE_SIZE >= galleryTotal;
+        if (!galleryItems.length) galleryGrid.textContent = 'No images yet.';
+    }
+
+    function openGalleryDetail(record) {
+        galleryDetailId = record.id;
+        const url = galleryUrls.get(record.id);
+        galleryDetailImg.src = url;
+        galleryDetailDownload.href = url;
+        const when = record.timestamp ? new Date(record.timestamp).toLocaleString() : '(unknown time)';
+        galleryDetailMeta.innerHTML = [
+            `<span class="k">when:</span> ${escapeHtml(when)}`,
+            `<span class="k">backend:</span> ${escapeHtml(record.backend || '(unknown)')}`,
+            `<span class="k">profile:</span> ${escapeHtml(record.profileKey || '(unknown)')}`,
+            `<span class="k">size:</span> ${record.width || '?'}x${record.height || '?'} · seed ${record.seed ?? '?'}`,
+            `<span class="k">prompt:</span> ${escapeHtml(record.prompt || '')}`,
+        ].join('<br>');
+        showResult(galleryDetailStatus, '', false);
+        galleryDetail.style.display = '';
+    }
+
+    galleryPrevBtn.addEventListener('click', () => {
+        if (galleryPage <= 0) return;
+        galleryPage -= 1;
+        loadGalleryPage();
+    });
+    galleryNextBtn.addEventListener('click', () => {
+        if ((galleryPage + 1) * GALLERY_PAGE_SIZE >= galleryTotal) return;
+        galleryPage += 1;
+        loadGalleryPage();
+    });
+    el.querySelectorAll('input[name="if_gallery_scope"]').forEach(radio => {
+        radio.addEventListener('change', () => {
+            galleryPage = 0;
+            loadGalleryPage();
+        });
+    });
+    galleryDetailClose.addEventListener('click', closeGalleryDetail);
+
+    galleryDetailDelete.addEventListener('click', async () => {
+        if (!galleryDetailId) return;
+        try {
+            await deleteImageRecord(galleryDetailId);
+            showResult(galleryDetailStatus, 'Deleted.', false);
+            await loadGalleryPage();
+        } catch (e) {
+            showResult(galleryDetailStatus, e.message, true);
+        }
+    });
+
+    galleryDetailRegen.addEventListener('click', async () => {
+        if (!galleryDetailId) return;
+        const record = galleryItems.find(r => r.id === galleryDetailId);
+        if (!record) return;
+        if (typeof regenerateImage !== 'function') {
+            showResult(galleryDetailStatus, 'Regenerate is unavailable in this context.', true);
+            return;
+        }
+        galleryDetailRegen.disabled = true;
+        showResult(galleryDetailStatus, 'Regenerating...', false);
+        try {
+            await regenerateImage(record);
+            showResult(galleryDetailStatus, 'Regenerated — a new image was added to the gallery.', false);
+            galleryPage = 0;
+            await loadGalleryPage();
+        } catch (e) {
+            showResult(galleryDetailStatus, e.message, true);
+        } finally {
+            galleryDetailRegen.disabled = false;
+        }
+    });
+
+    // Loaded lazily on first activation, not on drawer mount, so opening the
+    // extensions panel never triggers an IndexedDB round-trip for a tab the
+    // user hasn't looked at.
+    let galleryLoaded = false;
+    el.querySelector('[data-if-tab="gallery"]')?.addEventListener('click', () => {
+        if (galleryLoaded) return;
+        galleryLoaded = true;
+        loadGalleryPage();
+    });
+
+    // ================= 3-Dialect Preview: Character Picker (C9) =================
+    const renderPicker = $('if_render_picker');
+    const renderInsertBtn = $('if_render_insert');
+    const renderClearBtn = $('if_render_clear');
+
+    let pickerRoster = [];
+    let pickerOutfits = [];
+    let pickerHasPersona = false;
+
+    function pickerRowHtml(id, label, outfits) {
+        const outfitOptions = outfits.length
+            ? outfits.map(o => `<option value="${escapeHtml(o.name)}">${escapeHtml(o.name)}${o.charId ? '' : ' (common)'}</option>`).join('')
+            : '';
+        return `
+            <div class="if-image-log-entry" data-picker-id="${escapeHtml(id)}">
+                <label class="if-image-check"><input type="checkbox" class="if-picker-select"> ${escapeHtml(label)}</label>
+                <label class="if-image-check"><input type="checkbox" class="if-picker-back"> back</label>
+                <label class="if-image-check"><input type="checkbox" class="if-picker-full"> full</label>
+                <label class="if-image-check"><input type="checkbox" class="if-picker-nsfw"> nsfw</label>
+                ${outfits.length ? `<select class="if-picker-outfit text_pole"><option value="">-- outfit: none --</option>${outfitOptions}</select>` : ''}
+            </div>`;
+    }
+
+    async function loadCharPicker() {
+        try {
+            pickerRoster = await getAllCharacters();
+            const allOutfits = await (async () => {
+                try {
+                    const per = await Promise.all(pickerRoster.map(c => getOutfitsForCharacter(c.id)));
+                    return per;
+                } catch { return pickerRoster.map(() => []); }
+            })();
+            pickerOutfits = allOutfits;
+            const personas = await getAllPersonas();
+            pickerHasPersona = personas.length > 0;
+        } catch (e) {
+            console.warn('[IF Image] Character picker load failed:', e);
+            pickerRoster = [];
+            pickerOutfits = [];
+            pickerHasPersona = false;
+        }
+        renderCharPicker();
+    }
+
+    function renderCharPicker() {
+        if (!renderPicker) return;
+        const rows = pickerRoster.map((c, i) => pickerRowHtml(c.id, c.name, pickerOutfits[i] || []));
+        if (pickerHasPersona) rows.push(pickerRowHtml('__persona__', '$me (Persona)', []));
+        renderPicker.innerHTML = rows.length ? rows.join('') : 'No characters yet — add some in the Characters tab.';
+    }
+
+    function pickerTokens() {
+        if (!renderPicker) return [];
+        const tokens = [];
+        renderPicker.querySelectorAll('[data-picker-id]').forEach(row => {
+            if (!row.querySelector('.if-picker-select')?.checked) return;
+            const mods = [];
+            if (row.querySelector('.if-picker-back')?.checked) mods.push('back');
+            if (row.querySelector('.if-picker-full')?.checked) mods.push('full');
+            if (row.querySelector('.if-picker-nsfw')?.checked) mods.push('nsfw');
+            const outfit = row.querySelector('.if-picker-outfit')?.value;
+            if (outfit) mods.push(outfit);
+            const id = row.dataset.pickerId;
+            if (id === '__persona__') {
+                tokens.push(mods.length ? `$me:${mods.join('|')}` : '$me');
+                return;
+            }
+            const char = pickerRoster.find(c => c.id === id);
+            if (!char) return;
+            tokens.push(mods.length ? `$${char.name}:${mods.join('|')}` : `$${char.name}`);
+        });
+        return tokens;
+    }
+
+    if (renderInsertBtn) renderInsertBtn.addEventListener('click', () => {
+        const tokens = pickerTokens();
+        if (!tokens.length) return;
+        const current = renderInput.value.trim();
+        renderInput.value = current ? `${tokens.join(' ')} ${current}` : tokens.join(' ');
+    });
+    if (renderClearBtn) renderClearBtn.addEventListener('click', () => { renderInput.value = ''; });
+
+    loadCharPicker();
+
     // ================= 3-Dialect Preview Wiring =================
     const renderInput = $('if_render_input');
     const renderBtn = $('if_render_btn');
-    const renderKrea = $('if_render_krea');
-    const renderAnima = $('if_render_anima');
-    const renderIllus = $('if_render_illus');
+
+    function renderPreviewBlock(dialect, output, active) {
+        const block = el.querySelector(`[data-if-dialect="${dialect}"]`);
+        if (!block) return;
+        block.classList.toggle('active', active);
+        const promptEl = block.querySelector('.if-render-prompt');
+        const negEl = block.querySelector('.if-render-negative');
+        const paramsEl = block.querySelector('.if-render-params');
+        // R4: prompt/negative are user-typed trigger text — escape them.
+        if (promptEl) promptEl.innerHTML = `<span class="k">prompt:</span> ${escapeHtml(output.prompt || '(empty)')}`;
+        if (negEl) negEl.innerHTML = `<span class="k">negative:</span> ${escapeHtml(output.negative || '(none)')}`;
+        if (paramsEl) paramsEl.innerHTML = `<span class="k">params:</span> W=${escapeHtml(output.params.width)} H=${escapeHtml(output.params.height)} steps=${escapeHtml(output.params.steps)} cfg=${escapeHtml(output.params.cfg)}`;
+    }
 
     renderBtn.addEventListener('click', async () => {
         const text = renderInput.value.trim();
         if (!text) return;
-
         try {
             const roster = await getAllCharacters();
             const styles = await getAllStyles();
             const personas = await getAllPersonas();
-            const context = {
+            const parsed = parseTriggers(text, {
                 roster,
                 styles,
                 defaultPersona: personas[0] || createDefaultPersona(),
-            };
+            });
 
-            const parsed = parseTriggers(text, context);
-
-            const outKrea = assemblePrompt(parsed, 'krea', PROFILES.krea2);
-            const outAnima = assemblePrompt(parsed, 'anima', PROFILES.anima);
-            const outIllus = assemblePrompt(parsed, 'illus', PROFILES.illustrious);
-
-            renderKrea.textContent = outKrea.prompt || '(empty)';
-            renderAnima.textContent = outAnima.prompt || '(empty)';
-            renderIllus.textContent = outIllus.prompt || '(empty)';
+            const dialects = [
+                { key: 'krea', profileKey: 'krea2' },
+                { key: 'anima', profileKey: 'anima' },
+                { key: 'illus', profileKey: 'illustrious' },
+            ];
+            // The pipeline's dialectOverride wins over the configured default
+            // profile; mark the dialect it resolves to as active.
+            const configured = settings.generation.profile || settings.backends.comfy.profile || 'anima';
+            const { profileKey: resolvedKey } = resolveProfileKey(parsed.dialectOverride, configured);
+            const activeDialect = PROFILES[resolvedKey]?.dialect ?? 'anima';
+            for (const d of dialects) {
+                const output = assemblePrompt(parsed, d.key, PROFILES[d.profileKey]);
+                renderPreviewBlock(d.key, output, d.key === activeDialect);
+            }
         } catch (err) {
-            renderKrea.textContent = `Error: ${err.message}`;
+            const kreaBlock = el.querySelector('[data-if-dialect="krea"]');
+            if (kreaBlock) {
+                const promptEl = kreaBlock.querySelector('.if-render-prompt');
+                if (promptEl) promptEl.innerHTML = `<span class="k">error:</span> ${escapeHtml(err.message)}`;
+            }
         }
     });
+
+    // ================= Main Tab: dry-run toggle =================
+    const dryRunEl = $('if_main_dryrun');
+    if (dryRunEl) {
+        dryRunEl.checked = settings.generation?.dryRun === true;
+        dryRunEl.addEventListener('change', () => { settings.generation.dryRun = dryRunEl.checked; save(); });
+    }
+
+    // ================= Main Tab: Generation Params (C0) =================
+    const paramsProfile = $('if_params_profile');
+    const paramsWidth = $('if_params_width');
+    const paramsHeight = $('if_params_height');
+    const paramsSteps = $('if_params_steps');
+    const paramsCfg = $('if_params_cfg');
+
+    function currentParamsOverride() {
+        if (!settings.generation.params) settings.generation.params = { krea2: {}, anima: {}, illustrious: {} };
+        const key = paramsProfile.value;
+        if (!settings.generation.params[key]) settings.generation.params[key] = {};
+        return settings.generation.params[key];
+    }
+
+    function syncParamsForm() {
+        const profile = PROFILES[paramsProfile.value];
+        const override = currentParamsOverride();
+        paramsWidth.value = override.width ?? '';
+        paramsWidth.placeholder = String(profile?.width ?? '');
+        paramsHeight.value = override.height ?? '';
+        paramsHeight.placeholder = String(profile?.height ?? '');
+        paramsSteps.value = override.steps ?? '';
+        paramsSteps.placeholder = String(profile?.steps ?? '');
+        paramsCfg.value = override.cfg ?? '';
+        paramsCfg.placeholder = String(profile?.cfg ?? '');
+    }
+    if (paramsProfile) {
+        paramsProfile.value = settings.generation.profile || 'anima';
+        syncParamsForm();
+        paramsProfile.addEventListener('change', syncParamsForm);
+
+        const bindParam = (input, key, parse) => {
+            input.addEventListener('change', () => {
+                const override = currentParamsOverride();
+                const raw = input.value.trim();
+                if (!raw) { delete override[key]; save(); return; }
+                const n = parse(raw);
+                if (!Number.isFinite(n)) { delete override[key]; save(); return; }
+                override[key] = n;
+                save();
+            });
+        };
+        bindParam(paramsWidth, 'width', Number);
+        bindParam(paramsHeight, 'height', Number);
+        bindParam(paramsSteps, 'steps', Number);
+        bindParam(paramsCfg, 'cfg', Number);
+    }
+
+    // ================= LLM Tab Wiring =================
+    const llmMethod = $('if_llm_default_method');
+    const llmProfileSelect = $('if_llm_default_profile');
+    const llmInjection = $('if_llm_injection');
+    const llmProfSel = $('if_llm_profile_select');
+    const llmProfNew = $('if_llm_profile_new');
+    const llmProfDel = $('if_llm_profile_del');
+    const llmProfName = $('if_llm_profile_name');
+    const llmProfMethod = $('if_llm_profile_method');
+    const llmProfUrl = $('if_llm_profile_baseurl');
+    const llmProfKey = $('if_llm_profile_key');
+    const llmProfModel = $('if_llm_profile_model');
+    const llmProfTemp = $('if_llm_profile_temp');
+    const llmProfMaxTok = $('if_llm_profile_maxtokens');
+    const llmProfSave = $('if_llm_profile_save');
+    const llmTestBtn = $('if_llm_test');
+    const llmResult = $('if_llm_result');
+    const llmMapApi = $('if_llm_map_api');
+    const llmMapCtx = $('if_llm_map_ctx');
+    const llmFetchRows = el.querySelectorAll('[data-if-llm-fetch]');
+
+    if (llmMethod) llmMethod.value = settings.llm?.defaultMethod ?? 'direct';
+    if (llmInjection) llmInjection.value = settings.llm?.injectionStyle ?? 'compact';
+
+    function refreshLlmProfileSelects() {
+        const profiles = settings.llm?.apiProfiles ?? [];
+        const options = profiles.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`).join('');
+        if (llmProfileSelect) llmProfileSelect.innerHTML = '<option value="">-- none --</option>' + options;
+        if (llmProfSel) llmProfSel.innerHTML = '<option value="">-- New Profile --</option>' + options;
+        if (llmMapApi) llmMapApi.innerHTML = '<option value="">-- none --</option>' + options;
+        if (llmProfileSelect) llmProfileSelect.value = settings.llm?.defaultApiProfileId ?? '';
+        if (llmMapApi) llmMapApi.value = settings.llm?.requestMapping?.image_gen?.apiProfileId ?? '';
+    }
+
+    function refreshContextProfileSelect() {
+        const profiles = settings.llm?.contextProfiles ?? [];
+        const options = profiles.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`).join('');
+        if (llmMapCtx) {
+            llmMapCtx.innerHTML = '<option value="">-- none --</option>' + options;
+            llmMapCtx.value = settings.llm?.requestMapping?.image_gen?.contextProfileId ?? '';
+        }
+    }
+
+    function syncLlmFetchRows() {
+        const show = llmProfMethod?.value === 'direct_fetch';
+        llmFetchRows.forEach(row => row.style.display = show ? '' : 'none');
+    }
+
+    if (llmMethod) llmMethod.addEventListener('change', () => { settings.llm.defaultMethod = llmMethod.value; save(); });
+    if (llmProfileSelect) llmProfileSelect.addEventListener('change', () => { settings.llm.defaultApiProfileId = llmProfileSelect.value; save(); });
+    if (llmInjection) llmInjection.addEventListener('change', () => { settings.llm.injectionStyle = llmInjection.value; save(); });
+
+    let activeLlmProfileId = null;
+    function populateLlmProfileForm(profile) {
+        activeLlmProfileId = profile?.id ?? null;
+        if (!profile) {
+            if (llmProfName) llmProfName.value = '';
+            if (llmProfMethod) llmProfMethod.value = 'generateRaw';
+            if (llmProfUrl) llmProfUrl.value = '';
+            if (llmProfKey) llmProfKey.value = '';
+            if (llmProfModel) llmProfModel.value = '';
+            if (llmProfTemp) llmProfTemp.value = '0.7';
+            if (llmProfMaxTok) llmProfMaxTok.value = '4096';
+            syncLlmFetchRows();
+            return;
+        }
+        if (llmProfName) llmProfName.value = profile.name ?? '';
+        if (llmProfMethod) llmProfMethod.value = profile.method ?? 'generateRaw';
+        if (llmProfUrl) llmProfUrl.value = profile.baseUrl ?? '';
+        if (llmProfKey) llmProfKey.value = profile.apiKey ?? '';
+        if (llmProfModel) llmProfModel.value = profile.model ?? '';
+        if (llmProfTemp) llmProfTemp.value = String(profile.temperature ?? 0.7);
+        if (llmProfMaxTok) llmProfMaxTok.value = String(profile.maxTokens ?? 4096);
+        syncLlmFetchRows();
+    }
+
+    if (llmProfSel) llmProfSel.addEventListener('change', () => {
+        const profiles = settings.llm?.apiProfiles ?? [];
+        const found = profiles.find(p => p.id === llmProfSel.value);
+        populateLlmProfileForm(found);
+    });
+    if (llmProfNew) llmProfNew.addEventListener('click', () => { llmProfSel.value = ''; populateLlmProfileForm(null); });
+    if (llmProfMethod) llmProfMethod.addEventListener('change', syncLlmFetchRows);
+
+    if (llmProfDel) llmProfDel.addEventListener('click', () => {
+        if (!activeLlmProfileId) return;
+        const deletedId = activeLlmProfileId;
+        const profiles = settings.llm?.apiProfiles ?? [];
+        settings.llm.apiProfiles = profiles.filter(p => p.id !== deletedId);
+        activeLlmProfileId = null;
+        // Clean up mapping and default references
+        for (const key of Object.keys(settings.llm.requestMapping ?? {})) {
+            if (settings.llm.requestMapping[key]?.apiProfileId === deletedId) {
+                settings.llm.requestMapping[key].apiProfileId = '';
+            }
+        }
+        if (settings.llm.defaultApiProfileId === deletedId) settings.llm.defaultApiProfileId = '';
+        refreshLlmProfileSelects();
+        populateLlmProfileForm(null);
+        save();
+    });
+
+    if (llmProfSave) llmProfSave.addEventListener('click', () => {
+        if (!settings.llm) settings.llm = {};
+        if (!Array.isArray(settings.llm.apiProfiles)) settings.llm.apiProfiles = [];
+        const name = llmProfName?.value?.trim();
+        if (!name) { showResult(llmResult, 'Profile name is required', true); return; }
+        const profile = {
+            id: activeLlmProfileId || (crypto.randomUUID ? crypto.randomUUID() : 'ap_' + Date.now()),
+            name,
+            method: llmProfMethod?.value ?? 'generateRaw',
+            baseUrl: llmProfUrl?.value?.trim() ?? '',
+            apiKey: llmProfKey?.value ?? '',
+            model: llmProfModel?.value?.trim() ?? '',
+            temperature: Number(llmProfTemp?.value) || 0.7,
+            maxTokens: Number(llmProfMaxTok?.value) || 4096,
+        };
+        const idx = settings.llm.apiProfiles.findIndex(p => p.id === profile.id);
+        if (idx >= 0) settings.llm.apiProfiles[idx] = profile;
+        else settings.llm.apiProfiles.push(profile);
+        activeLlmProfileId = profile.id;
+        refreshLlmProfileSelects();
+        save();
+        showResult(llmResult, `Profile "${name}" saved!`, false);
+    });
+
+    // LLM test call
+    if (llmTestBtn) llmTestBtn.addEventListener('click', async () => {
+        llmTestBtn.disabled = true;
+        showResult(llmResult, 'Testing...', false);
+        try {
+            // Lazy import: the module is always available since Phase B
+            const { createLlmClient } = await import('./llm/client.js');
+            const client = createLlmClient({
+                getSettings: () => settings,
+                getContext: () => (typeof SillyTavern !== 'undefined' && SillyTavern.getContext?.()) || {},
+            });
+            const result = await client.request({
+                type: 'image_gen',
+                systemPrompt: 'Reply with exactly one line: OK.',
+                userPrompt: 'Reply with: OK',
+                signal: AbortSignal.timeout(30000),
+            });
+            showResult(llmResult, `Test OK (${result.elapsedMs.toFixed(0)}ms): ${result.text.slice(0, 200)}`, false);
+        } catch (err) {
+            showResult(llmResult, `Test failed: ${err?.message ?? err}`, true);
+        } finally {
+            llmTestBtn.disabled = false;
+        }
+    });
+
+    // Request mapping
+    if (llmMapApi) llmMapApi.addEventListener('change', () => {
+        if (!settings.llm.requestMapping) settings.llm.requestMapping = {};
+        if (!settings.llm.requestMapping.image_gen) settings.llm.requestMapping.image_gen = {};
+        settings.llm.requestMapping.image_gen.apiProfileId = llmMapApi.value;
+        save();
+    });
+    if (llmMapCtx) llmMapCtx.addEventListener('change', () => {
+        if (!settings.llm.requestMapping) settings.llm.requestMapping = {};
+        if (!settings.llm.requestMapping.image_gen) settings.llm.requestMapping.image_gen = {};
+        settings.llm.requestMapping.image_gen.contextProfileId = llmMapCtx.value;
+        save();
+    });
+
+    refreshLlmProfileSelects();
+    refreshContextProfileSelect();
+    syncLlmFetchRows();
+
+    // ================= Log Tab Wiring =================
+    const logLimit = $('if_log_limit');
+    const logRefresh = $('if_log_refresh');
+    const logClear = $('if_log_clear');
+    const logEntries = $('if_log_entries');
+    const logTasksRefresh = $('if_log_tasks_refresh');
+    const logTasks = $('if_log_tasks');
+
+    if (logLimit) {
+        logLimit.value = settings.generation?.logLimit ?? 50;
+        logLimit.addEventListener('change', () => {
+            settings.generation.logLimit = Math.max(1, Number(logLimit.value) || 50);
+            save();
+        });
+    }
+
+
+    function renderLogEntries() {
+        if (!logEntries) return;
+        const log = genLog ?? [];
+        if (!log.length) { logEntries.textContent = 'No entries yet.'; return; }
+        logEntries.innerHTML = log.slice().reverse().map(e => {
+            const time = new Date(e.timestamp).toLocaleTimeString();
+            const body = e.content ?? e.prompt ?? '';
+            const detail = body ? `: ${escapeHtml(String(body).slice(0, 120))}` : '';
+            const method = e.method ? ` [${escapeHtml(e.method)}]` : '';
+            const error = e.error ? ` ⚠ ${escapeHtml(String(e.error).slice(0, 100))}` : '';
+            return `<div class="if-image-log-entry"><span class="if-image-log-time">${time}</span> <span class="if-image-log-type">${escapeHtml(e.type)}</span>${method}${detail}${error}</div>`;
+        }).join('');
+    }
+
+    if (logRefresh) logRefresh.addEventListener('click', renderLogEntries);
+    if (logClear) logClear.addEventListener('click', () => {
+        if (genLog) genLog.length = 0;
+        renderLogEntries();
+    });
+
+    function renderTaskList() {
+        if (!logTasks || !getQueue) return;
+        const queue = getQueue();
+        if (!queue || typeof queue.listTasks !== 'function') {
+            logTasks.textContent = 'Queue unavailable.';
+            return;
+        }
+        const tasks = queue.listTasks();
+        if (!tasks.length) { logTasks.textContent = 'No tasks.'; return; }
+        logTasks.innerHTML = tasks.map(t => {
+            const promptText = typeof t.prompt === 'object' && t.prompt?.prompt
+                ? String(t.prompt.prompt).slice(0, 80)
+                : String(t.prompt ?? '').slice(0, 80);
+            return `<div class="if-image-log-entry">
+                <span class="if-image-log-type">${escapeHtml(t.status)}</span> ${escapeHtml(t.id)}: ${escapeHtml(promptText)}
+                ${t.status === 'running' || t.status === 'queued' ? `<button class="ifimg-retry menu_button" data-task-id="${escapeHtml(t.id)}">Cancel</button>` : ''}
+            </div>`;
+        }).join('');
+        // Wire cancel buttons
+        logTasks.querySelectorAll('[data-task-id]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const id = btn.dataset.taskId;
+                queue.cancelTask(id);
+                renderTaskList();
+            });
+        });
+    }
+    if (logTasksRefresh) logTasksRefresh.addEventListener('click', renderTaskList);
 
     return el;
 }

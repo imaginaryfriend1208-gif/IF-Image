@@ -1,44 +1,7 @@
-// IF Image - Dialect definitions and rendering rules.
-// Conforms to PROMPT-SPEC §7.
-
-export const DIALECTS = {
-    krea: {
-        id: 'krea',
-        label: 'Krea 2 (Prose)',
-        format: 'prose',
-        defaultParams: {
-            steps: 8,
-            cfg: 1,
-            width: 1344,
-            height: 768,
-        },
-        hasNegative: false,
-    },
-    anima: {
-        id: 'anima',
-        label: 'rdbt Anima (Hybrid)',
-        format: 'hybrid',
-        defaultParams: {
-            steps: 16,
-            cfg: 2,
-            width: 832,
-            height: 1216,
-        },
-        hasNegative: true,
-    },
-    illus: {
-        id: 'illus',
-        label: 'Illustrious / NoobAI (Booru Tags)',
-        format: 'tags',
-        defaultParams: {
-            steps: 20,
-            cfg: 5,
-            width: 832,
-            height: 1216,
-        },
-        hasNegative: true,
-    },
-};
+// IF Image - Dialect helpers.
+// Conforms to PROMPT-SPEC §7. The DIALECTS table was removed: it duplicated
+// PROFILES in src/profiles.js and nothing imported it. Only the two helpers
+// below are used (by render.js and the offline tests).
 
 /**
  * Normalizes booru tags: replace underscores with spaces, trim, drop empty tags.
@@ -61,6 +24,11 @@ export function normalizeBooruTags(tagString) {
 
 /**
  * Deduplicates comma-separated tags while preserving order.
+ * Escaped-paren character groups (`\(...\)`, Phase C8 illus multi-char
+ * grouping) are preserved verbatim: any tag that opens, closes, or sits
+ * inside such a group is never deduplicated or dropped — deduping there
+ * would delete a group boundary (e.g. the second `\(1girl` opener) and
+ * corrupt the prompt.
  * @param {string} prompt
  * @returns {string}
  */
@@ -68,9 +36,18 @@ export function deduplicateTags(prompt) {
     if (!prompt || typeof prompt !== 'string') return '';
     const seen = new Set();
     const result = [];
+    let depth = 0;
     for (const raw of prompt.split(',')) {
         const item = raw.trim();
         if (!item) continue;
+        const opens = (item.match(/\\\(/g) || []).length;
+        const closes = (item.match(/\\\)/g) || []).length;
+        const inGroup = depth > 0 || opens > 0 || closes > 0;
+        depth = Math.max(0, depth + opens - closes);
+        if (inGroup) {
+            result.push(item);
+            continue;
+        }
         const lower = item.toLowerCase();
         if (!seen.has(lower)) {
             seen.add(lower);
