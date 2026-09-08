@@ -38,7 +38,11 @@ import { getContext } from '../../../st-context.js';
 
 const settings = getSettings();
 
-const nai = new NaiClient(() => settings.backends.nai.apiKey);
+// D5: the second (optional) argument surfaces the Variety+ toggle live.
+const nai = new NaiClient(
+    () => settings.backends.nai.apiKey,
+    () => ({ variety: settings.backends.nai.variety === true }),
+);
 const comfy = new ComfyProxyClient({
     getBaseUrl: () => settings.backends.comfy.baseUrl,
     getUsername: () => settings.backends.comfy.username,

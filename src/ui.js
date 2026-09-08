@@ -282,6 +282,12 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 </select>
             </div>
             <div class="if-image-row">
+                <label for="if_nai_variety" class="checkbox_label">
+                    <input id="if_nai_variety" type="checkbox">
+                    <span>Variety+ (skip CFG above sigma — more varied compositions)</span>
+                </label>
+            </div>
+            <div class="if-image-row">
                 <button id="if_nai_test" class="menu_button">Test connection</button>
             </div>
             <div class="if-image-result" id="if_nai_result"></div>
@@ -878,6 +884,15 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
 
     naiKey.value = settings.backends.nai.apiKey;
     naiModel.value = settings.backends.nai.model;
+    // D5: Variety+ toggle (migrator v7 default: false).
+    const naiVariety = $('if_nai_variety');
+    if (naiVariety) {
+        naiVariety.checked = settings.backends.nai.variety === true;
+        naiVariety.addEventListener('change', () => {
+            settings.backends.nai.variety = naiVariety.checked;
+            save();
+        });
+    }
     comfyUrl.value = settings.backends.comfy.baseUrl;
     comfyUser.value = settings.backends.comfy.username;
     comfyPass.value = settings.backends.comfy.password;
