@@ -5,9 +5,10 @@ import { NAI_MODELS } from './backends/nai.js';
 import { resolveCheckpoint } from './backends/a1111.js';
 import { resolveCheckpointProfile, mergeParams, seedCheckpointProfiles } from './backends/checkpoint-profiles.js';
 import { PROFILES, PROFILE_KEYS, applyProfile } from './profiles.js';
-import { getAllCharacters, saveCharacter, removeCharacter, createDefaultCharacter, emptyBooruDetail } from './storage/chars.js';
+import { getAllCharacters, saveCharacter, removeCharacter, createDefaultCharacter, emptyBooruDetail, applyCharMigrations } from './storage/chars.js';
 import { getAllPersonas, savePersona, removePersona, getAllStyles, saveStyle, removeStyle, createDefaultPersona, createDefaultStyle, getReplaceRules, saveReplaceRules } from './storage/presets.js';
-import { getOutfitsForCharacter, saveOutfit, removeOutfit, createDefaultOutfit } from './storage/outfits.js';
+import { getOutfitsForCharacter, getAllOutfits, saveOutfit, removeOutfit, createDefaultOutfit } from './storage/outfits.js';
+import { buildExport, validateImport, planMerge } from './storage/transfer.js';
 import { listImages, countImages, deleteImageRecord, getStorageStats, pruneImages } from './storage/images.js';
 import { parseTriggers } from './prompt/triggers.js';
 import { assemblePrompt, resolveProfileKey } from './prompt/render.js';
@@ -447,6 +448,16 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         <!-- ============ CHARACTERS TAB ============ -->
         <div class="if-image-panel" data-if-panel="chars" style="display:none;">
             <h3>Character Presets</h3>
+            <div class="if-image-row" style="gap:6px; flex-wrap:wrap;">
+                <button id="if_preset_export" class="menu_button">Export preset</button>
+                <button id="if_preset_import" class="menu_button">Import preset</button>
+                <select id="if_preset_import_mode" class="text_pole" style="width:auto;" title="Conflict handling for records that already exist (matched by id or name)">
+                    <option value="keep-mine" selected>Conflicts: keep mine</option>
+                    <option value="overwrite">Conflicts: overwrite</option>
+                </select>
+                <input id="if_preset_import_file" type="file" accept=".json,application/json" style="display:none;">
+            </div>
+            <div id="if_preset_status" class="if-image-result"></div>
             <div class="if-image-row">
                 <label for="if_char_select">Select Character</label>
                 <div style="display:flex; gap:6px;">
@@ -1606,6 +1617,85 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         }
     }
     loadCharactersList();
+
+    // ---- D7: preset export/import -----------------------------------------
+    const presetExportBtn = $('if_preset_export');
+    const presetImportBtn = $('if_preset_import');
+    const presetImportMode = $('if_preset_import_mode');
+    const presetImportFile = $('if_preset_import_file');
+    const presetStatus = $('if_preset_status');
+
+    if (presetExportBtn) presetExportBtn.addEventListener('click', async () => {
+        try {
+            const [characters, outfits, styles, personas, replaceRules] = await Promise.all([
+                getAllCharacters(), getAllOutfits(), getAllStyles(), getAllPersonas(), getReplaceRules(),
+            ]);
+            const doc = buildExport({
+                characters, outfits, styles, personas, replaceRules,
+                checkpointProfiles: settings.backends?.a1111?.checkpointProfiles ?? {},
+            });
+            const blob = new Blob([JSON.stringify(doc, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `if-image-preset-${new Date().toISOString().slice(0, 10)}.ifimage.json`;
+            a.click();
+            // Revoked after the click has handed the URL to the download.
+            setTimeout(() => URL.revokeObjectURL(url), 0);
+            showResult(presetStatus, `Exported ${characters.length} characters, ${outfits.length} outfits, ${styles.length} styles, ${personas.length} personas, ${replaceRules.length} rules.`, false);
+        } catch (e) {
+            showResult(presetStatus, `Export failed: ${e.message}`, true);
+        }
+    });
+
+    if (presetImportBtn) presetImportBtn.addEventListener('click', () => presetImportFile?.click());
+    if (presetImportFile) presetImportFile.addEventListener('change', async () => {
+        const file = presetImportFile.files?.[0];
+        presetImportFile.value = ''; // re-selecting the same file re-fires change
+        if (!file) return;
+        try {
+            const json = JSON.parse(await file.text());
+            const { ok, errors } = validateImport(json);
+            if (!ok) {
+                showResult(presetStatus, `Invalid preset: ${errors.slice(0, 3).join(' ')}`, true);
+                return;
+            }
+            const [characters, outfits, styles, personas, replaceRules] = await Promise.all([
+                getAllCharacters(), getAllOutfits(), getAllStyles(), getAllPersonas(), getReplaceRules(),
+            ]);
+            const mode = presetImportMode?.value === 'overwrite' ? 'overwrite' : 'keep-mine';
+            const plan = planMerge(
+                { characters, outfits, styles, personas, replaceRules, checkpointProfiles: settings.backends?.a1111?.checkpointProfiles ?? {} },
+                json, mode,
+            );
+            // Persist: characters run through CHAR_MIGRATORS before storing.
+            for (const c of [...plan.characters.add, ...plan.characters.overwrite]) await saveCharacter(applyCharMigrations(c));
+            for (const o of [...plan.outfits.add, ...plan.outfits.overwrite]) await saveOutfit(o);
+            for (const s of [...plan.styles.add, ...plan.styles.overwrite]) await saveStyle(s);
+            for (const p of [...plan.personas.add, ...plan.personas.overwrite]) await savePersona(p);
+            if (plan.replaceRules.add.length || plan.replaceRules.overwrite.length) {
+                const byTrigger = new Map(replaceRules.map(r => [String(r.trigger).trim().toLowerCase(), r]));
+                for (const rule of [...plan.replaceRules.add, ...plan.replaceRules.overwrite]) {
+                    byTrigger.set(String(rule.trigger).trim().toLowerCase(), rule);
+                }
+                await saveReplaceRules(Array.from(byTrigger.values()));
+            }
+            if (plan.checkpointProfiles.add.length || plan.checkpointProfiles.overwrite.length) {
+                const target = ((settings.backends.a1111.checkpointProfiles ??= {}));
+                for (const { title, entry } of [...plan.checkpointProfiles.add, ...plan.checkpointProfiles.overwrite]) {
+                    target[title] = entry;
+                }
+                save();
+            }
+            const added = Object.values(plan).reduce((n, p) => n + p.add.length, 0);
+            const overwritten = Object.values(plan).reduce((n, p) => n + p.overwrite.length, 0);
+            const skipped = Object.values(plan).reduce((n, p) => n + p.skip.length, 0);
+            showResult(presetStatus, `Import done: ${added} added, ${overwritten} overwritten, ${skipped} skipped (${mode}).`, false);
+            await loadCharactersList();
+        } catch (e) {
+            showResult(presetStatus, `Import failed: ${e.message}`, true);
+        }
+    });
 
     function matrixCells() {
         return Array.from(charMatrix.querySelectorAll('tr[data-region]')).flatMap(row => {
