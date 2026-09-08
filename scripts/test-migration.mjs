@@ -123,6 +123,7 @@ test('v2 → v3 adds a1111 backend and comfy.connection without touching legacy 
         baseUrl: '', auth: '', checkpoint: '',
         discovery: { at: 0, models: [], samplers: [], schedulers: [] },
         checkpointProfiles: {},
+        transport: 'st-relay',
     });
     // Connection defaults to the legacy proxy.
     assert.equal(v2.backends.comfy.connection, 'legacy_proxy');
@@ -163,6 +164,7 @@ test('v0.1.0 legacy settings receive the a1111 section through full migration', 
         baseUrl: '', auth: '', checkpoint: '',
         discovery: { at: 0, models: [], samplers: [], schedulers: [] },
         checkpointProfiles: {},
+        transport: 'st-relay',
     });
     assert.equal(legacy.backends.comfy.connection, 'legacy_proxy');
     assert.equal(legacy.backends.comfy.username, 'u');
@@ -178,6 +180,7 @@ test('missing/corrupt comfy section is created without throwing', () => {
         baseUrl: '', auth: '', checkpoint: '',
         discovery: { at: 0, models: [], samplers: [], schedulers: [] },
         checkpointProfiles: {},
+        transport: 'st-relay',
     });
 });
 
@@ -328,7 +331,7 @@ test('v5 → v6 with blank a1111.checkpoint stamps generation.checkpoint = ""', 
 });
 
 // --- Test 21: v6 fields already present are never overwritten ---
-test('existing v6 discovery/checkpointProfiles/generation.checkpoint survive migration untouched', () => {
+test('existing v6 discovery/generation.checkpoint survive migration; pre-v8 checkpointProfiles are reset', () => {
     const s = {
         settingsVersion: 5,
         generation: { checkpoint: 'User Choice' },
@@ -344,7 +347,8 @@ test('existing v6 discovery/checkpointProfiles/generation.checkpoint survive mig
     runMigrations(s);
     assert.equal(s.generation.checkpoint, 'User Choice');
     assert.equal(s.backends.a1111.discovery.at, 123);
-    assert.deepEqual(s.backends.a1111.checkpointProfiles, { M: { profile: 'krea2', steps: 8 } });
+    // v8 intentionally drops pre-v8 rows (they were auto-seeded, not user intent).
+    assert.deepEqual(s.backends.a1111.checkpointProfiles, {});
 });
 
 // --- Test 22: v0.1.0 through full migration reaches v6 ---
@@ -397,6 +401,43 @@ test('v0.1.0 legacy reaches v7 with llmSize/cache/variety present', () => {
     assert.equal(legacy.generation.llmSize, 'auto');
     assert.deepEqual(legacy.cache, { ttlDays: 0, maxMB: 0, jpegQuality: 0 });
     assert.equal(legacy.backends.nai.variety, false);
+});
+
+// --- Test 26: v7 → v8 drops auto-seeded checkpointProfiles, keeps checkpoint + discovery, stamps transport ---
+test('v7 → v8 clears checkpointProfiles, keeps checkpoint/discovery, stamps transport st-relay', () => {
+    const v7 = {
+        settingsVersion: 7,
+        backends: {
+            nai: {}, comfy: {},
+            a1111: {
+                baseUrl: 'https://host.example', auth: 'k', checkpoint: 'Krea 2 | A',
+                discovery: { at: 5, models: [{ title: 'Krea 2 | A' }], samplers: ['Euler'], schedulers: ['simple'] },
+                checkpointProfiles: { 'Krea 2 | A': { profile: 'krea2', steps: 8 }, 'Old': { profile: 'anima' } },
+            },
+        },
+        generation: { checkpoint: 'Krea 2 | A' },
+    };
+    const ran = runMigrations(v7);
+    assert.equal(ran, true);
+    assert.equal(v7.settingsVersion, CURRENT_VERSION);
+    assert.deepEqual(v7.backends.a1111.checkpointProfiles, {});
+    assert.equal(v7.backends.a1111.checkpoint, 'Krea 2 | A');
+    assert.equal(v7.generation.checkpoint, 'Krea 2 | A');
+    assert.equal(v7.backends.a1111.discovery.at, 5);
+    assert.equal(v7.backends.a1111.auth, 'k');
+    assert.equal(v7.backends.a1111.transport, 'st-relay');
+});
+
+test('v7 → v8 keeps an explicit direct transport and tolerates a missing a1111 section', () => {
+    const s = { settingsVersion: 7, backends: { a1111: { transport: 'direct', checkpointProfiles: { X: { profile: 'anima' } } } } };
+    runMigrations(s);
+    assert.equal(s.backends.a1111.transport, 'direct');
+    assert.deepEqual(s.backends.a1111.checkpointProfiles, {});
+    const bare = { settingsVersion: 7 };
+    runMigrations(bare);
+    assert.deepEqual(bare.backends.a1111.checkpointProfiles, {});
+    assert.equal(bare.backends.a1111.transport, 'st-relay');
+    assert.equal(runMigrations(bare), false);
 });
 
 // --- Summary ---

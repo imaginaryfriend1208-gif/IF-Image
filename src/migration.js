@@ -161,6 +161,22 @@ export const migrators = [
         }
         if (s.backends.nai.variety === undefined) s.backends.nai.variety = false;
     },
+
+    // 7 -> 8 (D9): checkpoint profiles become explicit. Up to v7 the
+    // Backends tab auto-seeded one checkpointProfiles row per discovered
+    // checkpoint (machine-generated from server hints), which made the map
+    // indistinguishable from user intent. From v8 a row exists only when the
+    // user clicked "Save profile", so the auto-seeded rows are dropped here;
+    // the checkpoint selection itself and the discovery cache are untouched.
+    // Also stamps backends.a1111.transport for pre-relay settings.
+    (s) => {
+        if (!s.backends) s.backends = {};
+        if (!s.backends.a1111 || typeof s.backends.a1111 !== 'object') {
+            s.backends.a1111 = { baseUrl: '', auth: '', checkpoint: '' };
+        }
+        s.backends.a1111.checkpointProfiles = {};
+        if (s.backends.a1111.transport !== 'direct') s.backends.a1111.transport = 'st-relay';
+    },
 ];
 
 /** Current schema version = number of migrators applied from zero. */

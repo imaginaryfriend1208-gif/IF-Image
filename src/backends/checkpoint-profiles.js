@@ -1,9 +1,12 @@
-// IF Image - checkpoint-profile model (Phase R1). Pure functions only: no
-// DOM, no fetch, no settings mutation — callers persist the returned values.
+// IF Image - checkpoint-profile model (Phase R1, reworked in D9). Pure
+// functions only: no DOM, no fetch, no settings mutation — callers persist
+// the returned values.
 //
 // A "checkpoint profile" binds a DISCOVERED checkpoint title to a prompt
-// profile key (krea2/anima/illustrious) plus optional per-checkpoint param
-// overrides. It changes prompt dialect and generation params only; the
+// profile key (krea2/anima/illustrious) plus per-checkpoint generation
+// params (size/steps/cfg/sampler/scheduler). Rows are created ONLY when the
+// user clicks "Save profile" in the Backends tab — discovery never seeds
+// them. A profile changes prompt dialect and generation params only; the
 // checkpoint actually sent to the server is always resolved separately via
 // resolveCheckpoint() against fresh /sdapi/v1/sd-models discovery — never
 // derived from a profile/family name.
@@ -83,30 +86,91 @@ function overridesFromDefaults(defaults, { samplers, schedulers } = {}) {
 }
 
 /**
- * Seed the checkpoint-profile map from a discovery result. Returns a NEW
- * object: every entry already in `existing` is kept untouched (user edits
- * always survive a re-seed); entries are ADDED only for titles missing from
- * `existing`, with the inferred profile and any discovery defaults mapped to
- * override fields.
- * @param {Record<string, object>} existing settings.backends.a1111.checkpointProfiles
- * @param {Array<{title: string, family?: string, defaults?: object}>} models
- * @param {string} fallbackKey profile key used when inference has no signal
- * @param {{samplers?: string[], schedulers?: string[]}} [discovered] server
- *   sampler/scheduler lists; default sampler/scheduler names are aligned to
- *   these spellings (e.g. "euler" -> "Euler") when a match exists.
- * @returns {Record<string, object>}
+ * Size presets offered by the checkpoint-profile editor. Every pair is a
+ * multiple of 64 inside the clampDim range. "custom" is implied for any
+ * width/height not listed here (see matchSizePreset).
+ * @type {ReadonlyArray<{key: string, label: string, width: number, height: number}>}
  */
-export function seedCheckpointProfiles(existing, models, fallbackKey, discovered = {}) {
-    const base = existing && typeof existing === 'object' ? existing : {};
-    const out = { ...base };
-    for (const model of Array.isArray(models) ? models : []) {
-        const title = model && typeof model.title === 'string' ? model.title : '';
-        if (!title || out[title]) continue;
-        out[title] = {
-            profile: inferProfileKey(model, fallbackKey),
-            ...overridesFromDefaults(model.defaults, discovered),
-        };
-    }
+export const SIZE_PRESETS = Object.freeze([
+    { key: 'portrait', label: 'Portrait 2:3 (832×1216)', width: 832, height: 1216 },
+    { key: 'landscape', label: 'Landscape 3:2 (1216×832)', width: 1216, height: 832 },
+    { key: 'square', label: 'Square (1024×1024)', width: 1024, height: 1024 },
+    { key: 'tall', label: 'Tall 9:16 (768×1344)', width: 768, height: 1344 },
+    { key: 'wide', label: 'Wide 16:9 (1344×768)', width: 1344, height: 768 },
+    { key: 'portrait_hd', label: 'Portrait HD (1024×1536)', width: 1024, height: 1536 },
+    { key: 'landscape_hd', label: 'Landscape HD (1536×1024)', width: 1536, height: 1024 },
+    { key: 'square_hd', label: 'Square HD (1536×1536)', width: 1536, height: 1536 },
+]);
+
+/**
+ * Find the preset key for a width/height pair, or 'custom' when no preset
+ * matches (including non-numeric input).
+ * @param {number} width
+ * @param {number} height
+ * @returns {string}
+ */
+export function matchSizePreset(width, height) {
+    const w = Number(width);
+    const h = Number(height);
+    const hit = SIZE_PRESETS.find(p => p.width === w && p.height === h);
+    return hit ? hit.key : 'custom';
+}
+
+/**
+ * Build a fully populated STARTING POINT for the checkpoint-profile editor
+ * when the checkpoint has no saved profile yet. Prompt style comes from the
+ * model's family hint or title; numeric fields come from the server's
+ * per-model defaults (when /internal/models enrichment ran) and otherwise
+ * from PROFILES[style]; sampler/scheduler are included only when the
+ * server suggested them. Nothing is persisted — the user still has to click
+ * "Save profile".
+ * @param {{title?: string, family?: string, defaults?: object} | null | undefined} model
+ * @param {string} fallbackKey profile key used when inference has no signal
+ * @param {{samplers?: string[], schedulers?: string[]}} [discovered]
+ * @returns {{profile: string, width: number, height: number, steps: number,
+ *            cfg: number, sampler?: string, scheduler?: string, source: 'server' | 'profile'}}
+ */
+export function suggestCheckpointProfile(model, fallbackKey, discovered = {}) {
+    const profileKey = inferProfileKey(model ?? {}, fallbackKey);
+    const base = PROFILES[profileKey] ?? PROFILES.anima;
+    const fromServer = overridesFromDefaults(model?.defaults, discovered);
+    const hasServerNumbers = ['width', 'height', 'steps', 'cfg'].some(k => fromServer[k] !== undefined);
+    const out = {
+        profile: profileKey,
+        width: fromServer.width ?? base.width,
+        height: fromServer.height ?? base.height,
+        steps: fromServer.steps ?? base.steps,
+        cfg: fromServer.cfg ?? base.cfg,
+        source: hasServerNumbers ? 'server' : 'profile',
+    };
+    if (fromServer.sampler) out.sampler = fromServer.sampler;
+    if (fromServer.scheduler) out.scheduler = fromServer.scheduler;
+    return out;
+}
+
+/**
+ * Normalize editor form values into the persisted checkpoint-profile row
+ * shape, or null when the row would be unusable (unknown profile key).
+ * Numeric fields are clamped with the C0 policies and dropped when invalid;
+ * blank sampler/scheduler are omitted (= let the server decide).
+ * @param {{profile?: string, width?: unknown, height?: unknown, steps?: unknown,
+ *          cfg?: unknown, sampler?: unknown, scheduler?: unknown}} form
+ * @returns {{profile: string, width?: number, height?: number, steps?: number,
+ *            cfg?: number, sampler?: string, scheduler?: string} | null}
+ */
+export function normalizeCheckpointProfile(form) {
+    if (!form || typeof form !== 'object' || !PROFILES[form.profile]) return null;
+    const out = { profile: form.profile };
+    const width = clampDim(form.width);
+    const height = clampDim(form.height);
+    const steps = clampSteps(form.steps);
+    const cfg = clampCfg(form.cfg);
+    if (width !== undefined) out.width = width;
+    if (height !== undefined) out.height = height;
+    if (steps !== undefined) out.steps = steps;
+    if (cfg !== undefined) out.cfg = cfg;
+    if (typeof form.sampler === 'string' && form.sampler) out.sampler = form.sampler;
+    if (typeof form.scheduler === 'string' && form.scheduler) out.scheduler = form.scheduler;
     return out;
 }
 

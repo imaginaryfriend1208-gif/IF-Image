@@ -3,7 +3,7 @@
 
 import { NAI_MODELS } from './backends/nai.js';
 import { resolveCheckpoint } from './backends/a1111.js';
-import { resolveCheckpointProfile, mergeParams, seedCheckpointProfiles, alignCheckpointProfileNames } from './backends/checkpoint-profiles.js';
+import { resolveCheckpointProfile, mergeParams, suggestCheckpointProfile, normalizeCheckpointProfile, SIZE_PRESETS, matchSizePreset } from './backends/checkpoint-profiles.js';
 import { PROFILES, PROFILE_KEYS, applyProfile } from './profiles.js';
 import { getAllCharacters, saveCharacter, removeCharacter, createDefaultCharacter, emptyBooruDetail, applyCharMigrations } from './storage/chars.js';
 import { getAllPersonas, savePersona, removePersona, getAllStyles, saveStyle, removeStyle, createDefaultPersona, createDefaultStyle, getReplaceRules, saveReplaceRules } from './storage/presets.js';
@@ -372,10 +372,59 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 </div>
                 <div class="if-image-result" id="if_a1111_result"></div>
 
-                <hr class="if-image-sep"/>
-                <h3>Checkpoint profiles</h3>
-                <div class="if-image-note">One row is created automatically for every checkpoint the server reports (Test Connection / Refresh Models); the prompt profile is inferred from the server's family hint or the checkpoint name. Blank numeric fields inherit the profile / Generation Params values. Your edits are kept across re-discovery; "Reset" re-infers the row from discovery. Rows marked <em>stale</em> are no longer offered by the server and can be removed.</div>
-                <div id="if_a1111_cp_table"></div>
+                <!-- D9: per-checkpoint profile editor. Shown once a checkpoint
+                     is selected above; nothing is stored until "Save profile". -->
+                <div id="if_a1111_cp_editor" class="if-image-cp-editor" style="display:none;">
+                    <h3>Checkpoint profile</h3>
+                    <div class="if-image-note" id="if_cp_status"></div>
+                    <div class="if-image-row">
+                        <label for="if_cp_profile">Prompt style</label>
+                        <select id="if_cp_profile" class="text_pole">
+                            ${PROFILE_KEYS.map(k => `<option value="${k}">${PROFILES[k].label}</option>`).join('')}
+                        </select>
+                    </div>
+                    <div class="if-image-row">
+                        <label for="if_cp_size">Size</label>
+                        <select id="if_cp_size" class="text_pole">
+                            ${SIZE_PRESETS.map(p => `<option value="${p.key}">${p.label}</option>`).join('')}
+                            <option value="custom">Custom…</option>
+                        </select>
+                    </div>
+                    <div class="if-image-grid">
+                        <div class="if-image-row">
+                            <label for="if_cp_width">Width</label>
+                            <input id="if_cp_width" type="number" min="256" max="2048" step="64" class="text_pole">
+                        </div>
+                        <div class="if-image-row">
+                            <label for="if_cp_height">Height</label>
+                            <input id="if_cp_height" type="number" min="256" max="2048" step="64" class="text_pole">
+                        </div>
+                        <div class="if-image-row">
+                            <label for="if_cp_steps">Steps</label>
+                            <input id="if_cp_steps" type="number" min="1" max="150" class="text_pole">
+                        </div>
+                        <div class="if-image-row">
+                            <label for="if_cp_cfg">CFG</label>
+                            <input id="if_cp_cfg" type="number" min="0" max="30" step="0.5" class="text_pole">
+                        </div>
+                        <div class="if-image-row">
+                            <label for="if_cp_sampler">Sampler</label>
+                            <select id="if_cp_sampler" class="text_pole"></select>
+                        </div>
+                        <div class="if-image-row">
+                            <label for="if_cp_scheduler">Scheduler</label>
+                            <select id="if_cp_scheduler" class="text_pole"></select>
+                        </div>
+                    </div>
+                    <div class="if-image-row">
+                        <div style="display:flex; gap:6px;">
+                            <button id="if_cp_save" class="menu_button">Save profile</button>
+                            <button id="if_cp_delete" class="menu_button" style="background:#552222; display:none;">Delete profile</button>
+                        </div>
+                    </div>
+                    <div class="if-image-note">A saved profile ties this checkpoint to a prompt style and generation params. Chat markers using the checkpoint pick them up automatically (marker JSON and LLM hints still override). Without a saved profile the default profile and its Generation Params apply.</div>
+                </div>
+                <div id="if_a1111_cp_list" class="if-image-cp-list"></div>
             </div>
         </div>
 
@@ -1074,8 +1123,8 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             a1111Models = [];
             settings.backends.a1111.discovery = { at: 0, models: [], samplers: [], schedulers: [] };
             syncMainCheckpoint();
-            renderCheckpointProfilesTable();
             fillCheckpointSelect(a1111Checkpoint, [], '', '-- Refresh Models to load --');
+            syncCheckpointProfileEditor();
         } else {
             // Source switch: the persisted cache is still valid for this
             // URL/auth, so the in-memory list is re-seeded from it (same as
@@ -1191,10 +1240,10 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     });
 
     // ---- A1111: test + refresh models + checkpoint ------------------------
-    // R4: both buttons run the composite discover() (models required;
+    // R4/D9: both buttons run the composite discover() (models required;
     // samplers/schedulers/-/internal/models optional) and persist the result
-    // in settings.backends.a1111.discovery with a timestamp, then seed
-    // checkpointProfiles (ADD-only: user edits always survive).
+    // in settings.backends.a1111.discovery with a timestamp. Discovery never
+    // writes checkpointProfiles — rows come only from "Save profile".
     function persistA1111Discovery(discovery) {
         settings.backends.a1111.discovery = {
             at: Date.now(),
@@ -1202,14 +1251,6 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             samplers: discovery.samplers,
             schedulers: discovery.schedulers,
         };
-        const fallbackKey = settings.generation.profile || settings.backends.comfy.profile || 'anima';
-        const discoveredNames = { samplers: discovery.samplers, schedulers: discovery.schedulers };
-        settings.backends.a1111.checkpointProfiles = seedCheckpointProfiles(
-            settings.backends.a1111.checkpointProfiles, discovery.models, fallbackKey, discoveredNames);
-        // Spelling-only alignment of existing rows ("euler" -> "Euler") so
-        // the payload carries the name the server actually lists.
-        settings.backends.a1111.checkpointProfiles = alignCheckpointProfileNames(
-            settings.backends.a1111.checkpointProfiles, discoveredNames).profiles;
         a1111Models = discovery.models.map(m => ({ title: m.title, model_name: m.modelName ?? m.title, filename: null }));
         fillCheckpointSelect(a1111Checkpoint, a1111Models, settings.backends.a1111.checkpoint, '-- select a checkpoint --');
         if (!resolveCheckpoint(a1111Models, settings.backends.a1111.checkpoint)) {
@@ -1218,7 +1259,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         }
         save();
         syncMainCheckpoint();
-        renderCheckpointProfilesTable();
+        syncCheckpointProfileEditor();
         syncTestGenVisibility();
     }
 
@@ -1283,6 +1324,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     a1111Checkpoint.addEventListener('change', () => {
         settings.backends.a1111.checkpoint = a1111Checkpoint.value;
         save();
+        syncCheckpointProfileEditor();
         syncTestGenVisibility();
     });
 
@@ -1305,114 +1347,174 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         fillCheckpointSelect(a1111Checkpoint, a1111Models, settings.backends.a1111.checkpoint, '-- select a checkpoint --');
     }
 
-    // ---- R4: per-checkpoint profile table ----------------------------------
-    // One row per checkpointProfiles entry (user data keyed by title; kept
-    // even when a title is missing from the current discovery). Blank numeric
-    // fields = inherit; every edit saves immediately. "Reset" re-seeds the
-    // row from the discovered model (inferred profile + discovery defaults).
-    const cpTableBox = $('if_a1111_cp_table');
+    // ---- D9: per-checkpoint profile editor ---------------------------------
+    // Shown for the checkpoint selected in the A1111 block. The form starts
+    // from the saved row when one exists, otherwise from a suggestion
+    // (server per-model defaults when /internal/models enrichment ran, else
+    // the inferred prompt profile's numbers). Nothing is persisted until
+    // "Save profile"; rows are keyed by checkpoint title and used by
+    // compile()/mergeParams exactly as before.
+    const cpEditor = $('if_a1111_cp_editor');
+    const cpStatus = $('if_cp_status');
+    const cpProfile = $('if_cp_profile');
+    const cpSize = $('if_cp_size');
+    const cpWidth = $('if_cp_width');
+    const cpHeight = $('if_cp_height');
+    const cpSteps = $('if_cp_steps');
+    const cpCfg = $('if_cp_cfg');
+    const cpSampler = $('if_cp_sampler');
+    const cpScheduler = $('if_cp_scheduler');
+    const cpSave = $('if_cp_save');
+    const cpDelete = $('if_cp_delete');
+    const cpList = $('if_a1111_cp_list');
 
     function cpOptionList(values, selected) {
-        const list = Array.isArray(values) ? values : [];
+        const list = Array.isArray(values) ? values.filter(v => typeof v === 'string' && v) : [];
         const missing = selected && !list.includes(selected);
-        return '<option value="">(inherit)</option>'
+        return '<option value="">(server default)</option>'
             + list.map(v => `<option value="${escapeHtml(v)}"${v === selected ? ' selected' : ''}>${escapeHtml(v)}</option>`).join('')
             + (missing ? `<option value="${escapeHtml(selected)}" selected>${escapeHtml(selected)} (not discovered)</option>` : '');
     }
 
-    function renderCheckpointProfilesTable() {
-        if (!cpTableBox) return;
+    /** Fill the editor form from a row-shaped object. */
+    function cpFillForm(values) {
+        if (!cpEditor) return;
+        cpProfile.value = PROFILES[values.profile] ? values.profile : PROFILE_KEYS[0];
+        cpWidth.value = values.width ?? '';
+        cpHeight.value = values.height ?? '';
+        cpSteps.value = values.steps ?? '';
+        cpCfg.value = values.cfg ?? '';
+        const disc = settings.backends.a1111.discovery ?? {};
+        cpSampler.innerHTML = cpOptionList(disc.samplers, values.sampler ?? '');
+        cpScheduler.innerHTML = cpOptionList(disc.schedulers, values.scheduler ?? '');
+        cpSyncSizePreset();
+    }
+
+    /** Keep the size preset select in step with the numeric fields. */
+    function cpSyncSizePreset() {
+        if (!cpSize) return;
+        cpSize.value = matchSizePreset(cpWidth.value, cpHeight.value);
+    }
+
+    /** Re-render editor + saved-profile list for the current checkpoint. */
+    function syncCheckpointProfileEditor() {
+        if (!cpEditor) return;
+        const title = settings.backends.a1111.checkpoint || '';
         const profiles = settings.backends.a1111.checkpointProfiles ?? {};
-        const titles = Object.keys(profiles);
+        if (!title) {
+            cpEditor.style.display = 'none';
+        } else {
+            cpEditor.style.display = '';
+            const saved = profiles[title];
+            if (saved && typeof saved === 'object' && PROFILES[saved.profile]) {
+                cpFillForm(saved);
+                cpStatus.textContent = `Saved profile for "${title}".`;
+                cpDelete.style.display = '';
+            } else {
+                const disc = settings.backends.a1111.discovery ?? {};
+                const model = (disc.models ?? []).find(m => m?.title === title) ?? { title };
+                const fallbackKey = settings.generation.profile || settings.backends.comfy.profile || 'anima';
+                const suggestion = suggestCheckpointProfile(model, fallbackKey, { samplers: disc.samplers, schedulers: disc.schedulers });
+                cpFillForm(suggestion);
+                cpStatus.textContent = suggestion.source === 'server'
+                    ? `No profile saved for "${title}" yet — values below are the server's suggestion for this checkpoint.`
+                    : `No profile saved for "${title}" yet — values below come from the ${PROFILES[suggestion.profile].label} defaults.`;
+                cpDelete.style.display = 'none';
+            }
+        }
+        renderCheckpointProfileList();
+    }
+
+    /** Compact list of every saved profile with a "use" + "delete" action. */
+    function renderCheckpointProfileList() {
+        if (!cpList) return;
+        const profiles = settings.backends.a1111.checkpointProfiles ?? {};
+        const titles = Object.keys(profiles).filter(t => profiles[t] && typeof profiles[t] === 'object');
         if (!titles.length) {
-            cpTableBox.textContent = 'No checkpoints discovered yet — click Test connection or Refresh Models.';
+            cpList.innerHTML = '';
             return;
         }
-        const discovery = settings.backends.a1111.discovery ?? {};
-        // A row is "stale" when a discovery has run and no longer lists its
-        // title (checkpoint removed server-side, or leftovers from another
-        // endpoint). Stale rows are kept (user data) but flagged + removable.
-        const discovered = new Set((discovery.models ?? []).map(m => m?.title).filter(Boolean));
-        const hasDiscovery = Number(discovery.at) > 0 && discovered.size > 0;
-        const numCell = (field, value, attrs) => {
-            const safe = Number.isFinite(Number(value)) && value !== '' && value !== null && value !== undefined ? Number(value) : '';
-            return `<td><input data-cp-field="${field}" type="number" ${attrs} class="text_pole" value="${safe}"></td>`;
-        };
-        cpTableBox.innerHTML = `<div class="if-image-cp-scroll"><table class="if-image-cp-table"><thead><tr>
-            <th>Checkpoint</th><th>Profile</th><th>W</th><th>H</th><th>Steps</th><th>CFG</th>
-            <th>Sampler</th><th>Scheduler</th><th></th>
-        </tr></thead><tbody>` + titles.map((title, i) => {
-            const raw = profiles[title];
-            const entry = raw && typeof raw === 'object' ? raw : {};
-            const stale = hasDiscovery && !discovered.has(title);
-            const profileOpts = PROFILE_KEYS.map(k =>
-                `<option value="${k}"${k === entry.profile ? ' selected' : ''}>${escapeHtml(PROFILES[k].label)}</option>`).join('');
-            const sampler = typeof entry.sampler === 'string' ? entry.sampler : '';
-            const scheduler = typeof entry.scheduler === 'string' ? entry.scheduler : '';
-            return `<tr data-cp-row="${i}"${stale ? ' class="if-image-cp-stale"' : ''}>
-                <td class="if-image-cp-title" title="${escapeHtml(title)}${stale ? ' — not offered by the server any more' : ''}">${escapeHtml(title)}${stale ? ' <span class="if-image-cp-badge">stale</span>' : ''}</td>
-                <td><select data-cp-field="profile" class="text_pole">${profileOpts}</select></td>
-                ${numCell('width', entry.width, 'min="256" max="2048" step="64"')}
-                ${numCell('height', entry.height, 'min="256" max="2048" step="64"')}
-                ${numCell('steps', entry.steps, 'min="1" max="150"')}
-                ${numCell('cfg', entry.cfg, 'min="0" max="30" step="0.5"')}
-                <td><select data-cp-field="sampler" class="text_pole">${cpOptionList(discovery.samplers, sampler)}</select></td>
-                <td><select data-cp-field="scheduler" class="text_pole">${cpOptionList(discovery.schedulers, scheduler)}</select></td>
-                <td class="if-image-cp-actions">${stale
-                    ? '<button data-cp-remove class="menu_button" title="Remove this row (the checkpoint is no longer offered by the server)">Remove</button>'
-                    : '<button data-cp-reset class="menu_button" title="Re-infer profile and defaults from discovery">Reset</button>'}</td>
-            </tr>`;
-        }).join('') + '</tbody></table></div>';
-
-        cpTableBox.querySelectorAll('[data-cp-row]').forEach(row => {
-            const title = titles[Number(row.dataset.cpRow)];
-            row.querySelectorAll('[data-cp-field]').forEach(input => {
-                input.addEventListener('change', () => {
-                    let entry = settings.backends.a1111.checkpointProfiles[title];
-                    if (!entry || typeof entry !== 'object') {
-                        // Malformed persisted value: replace it with a fresh row.
-                        entry = settings.backends.a1111.checkpointProfiles[title] = { profile: PROFILE_KEYS[0] };
-                    }
-                    const field = input.dataset.cpField;
-                    if (field === 'profile') {
-                        entry.profile = PROFILES[input.value] ? input.value : entry.profile;
-                    } else if (input.type === 'number') {
-                        const num = Number(input.value);
-                        if (input.value === '' || !Number.isFinite(num)) delete entry[field];
-                        else entry[field] = num;
-                    } else {
-                        if (input.value) entry[field] = input.value;
-                        else delete entry[field];
-                    }
-                    save();
-                });
-            });
-            row.querySelector('[data-cp-reset]')?.addEventListener('click', () => {
-                const fallbackKey = settings.generation.profile || settings.backends.comfy.profile || 'anima';
-                const disc = settings.backends.a1111.discovery ?? {};
-                const model = (disc.models ?? []).find(m => m.title === title) ?? { title };
-                delete settings.backends.a1111.checkpointProfiles[title];
-                settings.backends.a1111.checkpointProfiles = seedCheckpointProfiles(
-                    settings.backends.a1111.checkpointProfiles, [model], fallbackKey,
-                    { samplers: disc.samplers, schedulers: disc.schedulers });
+        const discovered = new Set((settings.backends.a1111.discovery?.models ?? []).map(m => m?.title).filter(Boolean));
+        cpList.innerHTML = '<h3>Saved checkpoint profiles</h3>' + titles.map((title, i) => {
+            const e = profiles[title];
+            const style = PROFILES[e.profile]?.label ?? e.profile;
+            const size = e.width && e.height ? `${e.width}×${e.height}` : 'size: inherit';
+            const bits = [style, size];
+            if (e.steps !== undefined) bits.push(`${e.steps} steps`);
+            if (e.cfg !== undefined) bits.push(`cfg ${e.cfg}`);
+            if (e.sampler) bits.push(e.sampler);
+            if (e.scheduler) bits.push(e.scheduler);
+            const stale = discovered.size > 0 && !discovered.has(title);
+            const active = title === settings.backends.a1111.checkpoint;
+            return `<div class="if-image-cp-item${active ? ' active' : ''}" data-cp-item="${i}">
+                <div class="if-image-cp-item-main">
+                    <div class="if-image-cp-item-title">${escapeHtml(title)}${stale ? ' <span class="if-image-cp-badge">not on server</span>' : ''}</div>
+                    <div class="if-image-cp-item-sub">${escapeHtml(bits.join(' · '))}</div>
+                </div>
+                <div class="if-image-cp-item-actions">
+                    ${stale ? '' : '<button data-cp-use class="menu_button" title="Select this checkpoint">Use</button>'}
+                    <button data-cp-del class="menu_button" title="Delete this profile">Delete</button>
+                </div>
+            </div>`;
+        }).join('');
+        cpList.querySelectorAll('[data-cp-item]').forEach(item => {
+            const title = titles[Number(item.dataset.cpItem)];
+            item.querySelector('[data-cp-use]')?.addEventListener('click', () => {
+                settings.backends.a1111.checkpoint = title;
+                a1111Checkpoint.value = title;
                 save();
-                renderCheckpointProfilesTable();
-            });
-            row.querySelector('[data-cp-remove]')?.addEventListener('click', () => {
-                delete settings.backends.a1111.checkpointProfiles[title];
-                // A removed title cannot stay selected anywhere.
-                if (settings.generation.checkpoint === title) settings.generation.checkpoint = '';
-                if (settings.backends.a1111.checkpoint === title) settings.backends.a1111.checkpoint = '';
-                save();
-                syncMainCheckpoint();
-                fillCheckpointSelect(a1111Checkpoint, a1111Models, settings.backends.a1111.checkpoint,
-                    a1111Models.length ? '-- select a checkpoint --' : '-- Refresh Models to load --');
-                renderCheckpointProfilesTable();
+                syncCheckpointProfileEditor();
                 syncTestGenVisibility();
             });
+            item.querySelector('[data-cp-del]')?.addEventListener('click', () => deleteCheckpointProfile(title));
         });
     }
-    renderCheckpointProfilesTable();
+
+    function deleteCheckpointProfile(title) {
+        delete settings.backends.a1111.checkpointProfiles[title];
+        save();
+        syncCheckpointProfileEditor();
+    }
+
+    if (cpEditor) {
+        cpSize.addEventListener('change', () => {
+            const preset = SIZE_PRESETS.find(p => p.key === cpSize.value);
+            if (!preset) return; // custom: leave the numbers alone
+            cpWidth.value = preset.width;
+            cpHeight.value = preset.height;
+        });
+        cpWidth.addEventListener('input', cpSyncSizePreset);
+        cpHeight.addEventListener('input', cpSyncSizePreset);
+        cpSave.addEventListener('click', () => {
+            const title = settings.backends.a1111.checkpoint || '';
+            if (!title) return;
+            const row = normalizeCheckpointProfile({
+                profile: cpProfile.value,
+                width: cpWidth.value,
+                height: cpHeight.value,
+                steps: cpSteps.value,
+                cfg: cpCfg.value,
+                sampler: cpSampler.value,
+                scheduler: cpScheduler.value,
+            });
+            if (!row) {
+                showResult(a1111Result, 'Pick a prompt style before saving the profile.', true);
+                return;
+            }
+            if (!settings.backends.a1111.checkpointProfiles || typeof settings.backends.a1111.checkpointProfiles !== 'object') {
+                settings.backends.a1111.checkpointProfiles = {};
+            }
+            settings.backends.a1111.checkpointProfiles[title] = row;
+            save();
+            syncCheckpointProfileEditor();
+            showResult(a1111Result, `Profile saved for "${title}".`, false);
+        });
+        cpDelete.addEventListener('click', () => {
+            const title = settings.backends.a1111.checkpoint || '';
+            if (title) deleteCheckpointProfile(title);
+        });
+    }
+    syncCheckpointProfileEditor();
 
     // ================= Test Gen Tab Wiring =================
     const testProfileRow = el.querySelector('[data-if-comfy-only]');

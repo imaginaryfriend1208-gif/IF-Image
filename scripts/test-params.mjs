@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { parseTriggers } from '../src/prompt/triggers.js';
 import { assemblePrompt, mergeProfileParams, applyMarkerParamOverrides, clampDim, clampSteps, clampCfg, resolveLockedSeed, resolveSizeKeyword } from '../src/prompt/render.js';
 import { PROFILES } from '../src/profiles.js';
-import { inferProfileKey, seedCheckpointProfiles, resolveCheckpointProfile, mergeParams, matchDiscoveredName, alignCheckpointProfileNames } from '../src/backends/checkpoint-profiles.js';
+import { inferProfileKey, resolveCheckpointProfile, mergeParams, matchDiscoveredName, suggestCheckpointProfile, normalizeCheckpointProfile, SIZE_PRESETS, matchSizePreset } from '../src/backends/checkpoint-profiles.js';
 
 let passed = 0;
 let failed = 0;
@@ -167,27 +167,50 @@ test('R1: 10 real magimo titles infer the correct profile', () => {
     }
 });
 
-test('seedCheckpointProfiles: adds missing titles with inferred profile + mapped defaults', () => {
-    const models = [
-        { title: 'Krea 2 | Turbo18+', family: 'krea2', defaults: { steps: 8, cfg: 1, width: 1344, height: 768, sampler: 'Euler a', scheduler: 'simple' } },
-        { title: 'Mystery Model' },
-    ];
-    const seeded = seedCheckpointProfiles({}, models, 'anima');
-    assert.deepEqual(seeded['Krea 2 | Turbo18+'], { profile: 'krea2', width: 1344, height: 768, steps: 8, cfg: 1, sampler: 'Euler a', scheduler: 'simple' });
-    assert.deepEqual(seeded['Mystery Model'], { profile: 'anima' });
+test('suggestCheckpointProfile: server defaults win, mapped + clamped, sampler aligned; source=server', () => {
+    const model = { title: 'Krea 2 | Turbo18+', family: 'krea2', defaults: { steps: 8, cfg: 1, width: 1344, height: 768, sampler: 'euler', scheduler: 'simple' } };
+    const s = suggestCheckpointProfile(model, 'anima', { samplers: ['Euler', 'Euler a'], schedulers: ['Automatic', 'simple'] });
+    assert.deepEqual(s, { profile: 'krea2', width: 1344, height: 768, steps: 8, cfg: 1, sampler: 'Euler', scheduler: 'simple', source: 'server' });
 });
 
-test('seedCheckpointProfiles: user edits survive re-seed (existing entries untouched, new object)', () => {
-    const existing = { 'Krea 2 | Turbo18+': { profile: 'anima', steps: 30 } };
-    const models = [
-        { title: 'Krea 2 | Turbo18+', family: 'krea2', defaults: { steps: 8 } },
-        { title: 'Anima | RDBT Anima', family: 'anima' },
-    ];
-    const seeded = seedCheckpointProfiles(existing, models, 'anima');
-    assert.notEqual(seeded, existing, 'must return a NEW object');
-    assert.deepEqual(seeded['Krea 2 | Turbo18+'], { profile: 'anima', steps: 30 }, 'user edit kept byte-identical');
-    assert.deepEqual(existing, { 'Krea 2 | Turbo18+': { profile: 'anima', steps: 30 } }, 'input never mutated');
-    assert.deepEqual(seeded['Anima | RDBT Anima'], { profile: 'anima' });
+test('suggestCheckpointProfile: without server defaults falls back to PROFILES numbers; source=profile; no sampler keys', () => {
+    const s = suggestCheckpointProfile({ title: 'Anima | RDBT Anima' }, 'krea2');
+    assert.deepEqual(s, { profile: 'anima', width: PROFILES.anima.width, height: PROFILES.anima.height, steps: PROFILES.anima.steps, cfg: PROFILES.anima.cfg, source: 'profile' });
+    assert.equal('sampler' in s, false);
+    // Unknown title -> fallback key; null model tolerated.
+    assert.equal(suggestCheckpointProfile({ title: 'Mystery' }, 'illustrious').profile, 'illustrious');
+    assert.equal(suggestCheckpointProfile(null, 'anima').profile, 'anima');
+    // Partial server defaults: missing numbers come from the profile.
+    const p = suggestCheckpointProfile({ title: 'Krea 2 | X', defaults: { steps: 4 } }, 'anima');
+    assert.equal(p.steps, 4);
+    assert.equal(p.width, PROFILES.krea2.width);
+    assert.equal(p.source, 'server');
+});
+
+test('normalizeCheckpointProfile: clamps numbers, drops blanks/invalid, rejects unknown style', () => {
+    assert.deepEqual(
+        normalizeCheckpointProfile({ profile: 'anima', width: '1000', height: '1216', steps: '999', cfg: '4.5', sampler: 'Euler a', scheduler: '' }),
+        { profile: 'anima', width: 1024, height: 1216, steps: 150, cfg: 4.5, sampler: 'Euler a' },
+    );
+    assert.deepEqual(normalizeCheckpointProfile({ profile: 'krea2', width: '', height: 'abc' }), { profile: 'krea2' });
+    assert.equal(normalizeCheckpointProfile({ profile: 'nope' }), null);
+    assert.equal(normalizeCheckpointProfile(null), null);
+});
+
+test('SIZE_PRESETS are 64-multiples inside the clamp range; matchSizePreset round-trips and reports custom', () => {
+    assert.ok(SIZE_PRESETS.length >= 6);
+    for (const p of SIZE_PRESETS) {
+        assert.equal(clampDim(p.width), p.width, p.key);
+        assert.equal(clampDim(p.height), p.height, p.key);
+        assert.equal(matchSizePreset(p.width, p.height), p.key);
+        assert.equal(matchSizePreset(String(p.width), String(p.height)), p.key, 'string input from form fields');
+    }
+    assert.equal(matchSizePreset(832, 832), 'custom');
+    assert.equal(matchSizePreset('', ''), 'custom');
+    assert.equal(new Set(SIZE_PRESETS.map(p => p.key)).size, SIZE_PRESETS.length, 'keys unique');
+    // Suggestion for a saved row round-trips through the preset matcher.
+    const row = normalizeCheckpointProfile({ profile: 'anima', width: 832, height: 1216 });
+    assert.equal(matchSizePreset(row.width, row.height), 'portrait');
 });
 
 test('resolveCheckpointProfile: returns {profileKey, overrides} or null', () => {
@@ -346,41 +369,13 @@ test('matchDiscoveredName: aligns ComfyUI-style ids with the server spelling; ke
     assert.equal(matchDiscoveredName('SGM Uniform', ['Automatic', 'simple', 'sgm_uniform']), 'sgm_uniform');
 });
 
-test('seedCheckpointProfiles: default sampler/scheduler are aligned to the discovered lists', () => {
-    const models = [{ title: 'Krea 2 | X', family: 'krea2', defaults: { steps: 8, sampler: 'euler', scheduler: 'simple' } }];
-    const discovered = { samplers: ['Euler', 'Euler a'], schedulers: ['Automatic', 'simple'] };
-    const seeded = seedCheckpointProfiles({}, models, 'anima', discovered);
-    assert.deepEqual(seeded['Krea 2 | X'], { profile: 'krea2', steps: 8, sampler: 'Euler', scheduler: 'simple' });
-    // Without discovered lists (4th arg omitted) the names pass through untouched.
-    const plainSeed = seedCheckpointProfiles({}, models, 'anima');
-    assert.equal(plainSeed['Krea 2 | X'].sampler, 'euler');
-    // Existing rows are never rewritten by alignment.
-    const existing = { 'Krea 2 | X': { profile: 'krea2', sampler: 'euler' } };
-    const again = seedCheckpointProfiles(existing, models, 'anima', discovered);
-    assert.deepEqual(again['Krea 2 | X'], { profile: 'krea2', sampler: 'euler' });
-});
-
-test('alignCheckpointProfileNames: spelling-only rewrite of existing rows; unknowns and malformed entries untouched', () => {
-    const profiles = {
-        'A': { profile: 'krea2', sampler: 'euler', scheduler: 'sgm_uniform', steps: 8 },
-        'B': { profile: 'anima', sampler: 'Euler a' },            // already canonical
-        'C': { profile: 'anima', sampler: 'uni_pc' },             // no match: kept verbatim
-        'D': { profile: 'illustrious' },                          // no names at all
-        'E': 'garbage',                                           // malformed persisted value
-    };
-    const discovered = { samplers: ['Euler', 'Euler a', 'DPM++ 2M'], schedulers: ['Automatic', 'simple', 'sgm_uniform'] };
-    const { profiles: out, changed } = alignCheckpointProfileNames(profiles, discovered);
-    assert.equal(changed, 1);
-    assert.notEqual(out, profiles, 'new object');
-    assert.deepEqual(out.A, { profile: 'krea2', sampler: 'Euler', scheduler: 'sgm_uniform', steps: 8 });
-    assert.deepEqual(profiles.A, { profile: 'krea2', sampler: 'euler', scheduler: 'sgm_uniform', steps: 8 }, 'input not mutated');
-    assert.equal(out.B, profiles.B, 'unchanged rows are shared, not cloned');
-    assert.equal(out.C, profiles.C);
-    assert.equal(out.D, profiles.D);
-    assert.equal(out.E, 'garbage');
-    // Empty discovery: nothing changes.
-    assert.equal(alignCheckpointProfileNames(profiles, {}).changed, 0);
-    assert.deepEqual(alignCheckpointProfileNames(undefined, discovered), { profiles: {}, changed: 0 });
+test('suggestCheckpointProfile: sampler/scheduler names pass through untouched without discovered lists', () => {
+    const model = { title: 'Krea 2 | X', family: 'krea2', defaults: { steps: 8, sampler: 'euler', scheduler: 'simple' } };
+    const plain = suggestCheckpointProfile(model, 'anima');
+    assert.equal(plain.sampler, 'euler');
+    const aligned = suggestCheckpointProfile(model, 'anima', { samplers: ['Euler', 'Euler a'], schedulers: ['Automatic', 'simple'] });
+    assert.equal(aligned.sampler, 'Euler');
+    assert.equal(aligned.scheduler, 'simple');
 });
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`);

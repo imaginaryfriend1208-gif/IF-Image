@@ -38,63 +38,64 @@
     gap: 4px;
 }
 
-/* R4: per-checkpoint profile table (Backends tab, A1111 block). */
-/* Checkpoint-profile table: horizontal scroll on narrow drawers instead of
-   squeezing numeric inputs until their digits are clipped. */
-.if-image-cp-scroll {
-    width: 100%;
-    overflow-x: auto;
+/* D9: per-checkpoint profile editor + saved-profile list (Backends tab,
+   A1111 block). */
+.if-image-cp-editor {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 8px;
+    padding: 6px 8px;
+    border: 1px solid var(--ifi-border);
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.15);
 }
 
-.if-image-cp-table {
-    width: 100%;
-    min-width: 760px;
-    border-collapse: collapse;
+.if-image-cp-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 6px;
+}
+
+.if-image-cp-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px;
+    border: 1px solid var(--ifi-border);
+    border-radius: 6px;
     font-size: 0.85em;
 }
 
-.if-image-cp-table th,
-.if-image-cp-table td {
-    padding: 3px 4px;
-    text-align: left;
-    vertical-align: middle;
-    border-bottom: 1px solid var(--SmartThemeBorderColor, #3b4261);
-    white-space: nowrap;
+.if-image-cp-item.active {
+    outline: 1px solid var(--ifi-accent);
 }
 
-.if-image-cp-table td.if-image-cp-title {
-    white-space: normal;
-    min-width: 160px;
-    max-width: 260px;
+.if-image-cp-item-main {
+    flex: 1;
+    min-width: 0;
+}
+
+.if-image-cp-item-title {
     overflow-wrap: anywhere;
 }
 
-.if-image-cp-table input,
-.if-image-cp-table select {
-    width: 100%;
-    box-sizing: border-box;
-    margin: 0;
+.if-image-cp-item-sub {
+    color: var(--ifi-dim);
+    font-size: 0.9em;
+    overflow-wrap: anywhere;
 }
 
-.if-image-cp-table input[type="number"] {
-    min-width: 72px;
+.if-image-cp-item-actions {
+    display: flex;
+    gap: 4px;
+    flex: none;
 }
 
-.if-image-cp-table select {
-    min-width: 96px;
-}
-
-.if-image-cp-table select[data-cp-field="profile"] {
-    min-width: 110px;
-}
-
-.if-image-cp-table td.if-image-cp-actions .menu_button {
+.if-image-cp-item-actions .menu_button {
     margin: 0;
     padding: 2px 8px;
-}
-
-.if-image-cp-table tr.if-image-cp-stale td {
-    opacity: 0.7;
 }
 
 .if-image-cp-badge {

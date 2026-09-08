@@ -770,6 +770,30 @@ test('relay: 500 maps to A1111_HTTP with a server-console pointer and an http://
         err.code === 'A1111_HTTP' && /https:\/\/ URL directly/.test(err.message));
 });
 
+test('relay: generate 500 is diagnosed with one model-list probe (refused job vs. bad URL/key), key never echoed', async () => {
+    // Backend reachable: probe succeeds -> "job refused" wording, no /interrupt, exactly one probe.
+    const log = [];
+    const routes = { ...RELAY_ROUTES, 'POST /api/sd/generate': textResponse('Internal Server Error', 500) };
+    await assert.rejects(makeRelayClient(routes, log).txt2img({ prompt: 'p', checkpoint: 'Krea 2 | A' }), err => {
+        assert.equal(err.code, 'A1111_HTTP');
+        assert.match(err.message, /refused this generation job/);
+        assert.match(err.message, /missing on the server/);
+        assert.equal(err.message.includes('dummy-secret'), false);
+        return true;
+    });
+    assert.deepEqual(log.map(c => c.url), ['/api/sd/generate', '/api/sd/models']);
+    assert.ok(log.every(c => !/interrupt/.test(c.url)));
+    // Probe also fails -> "check URL/key" wording.
+    const log2 = [];
+    const routes2 = { ...routes, 'POST /api/sd/models': textResponse('Internal Server Error', 500) };
+    await assert.rejects(makeRelayClient(routes2, log2).txt2img({ prompt: 'p', checkpoint: 'Krea 2 | A' }), err =>
+        err.code === 'A1111_HTTP' && /check the API base URL and the key/.test(err.message));
+    // Probe throws -> neutral console pointer; still A1111_HTTP.
+    const routes3 = { ...routes, 'POST /api/sd/models': () => { throw new TypeError('Failed to fetch'); } };
+    await assert.rejects(makeRelayClient(routes3).txt2img({ prompt: 'p', checkpoint: 'Krea 2 | A' }), err =>
+        err.code === 'A1111_HTTP' && /server console/.test(err.message));
+});
+
 test('relay: 401/403 from ST itself maps to A1111_AUTH without echoing the key; network error maps to A1111_NETWORK', async () => {
     const routes = { ...RELAY_ROUTES, 'POST /api/sd/models': textResponse('Forbidden', 403) };
     await assert.rejects(makeRelayClient(routes).models(), err => err.code === 'A1111_AUTH' && !/dummy-secret/.test(err.message));

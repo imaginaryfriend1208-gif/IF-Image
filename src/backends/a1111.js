@@ -482,6 +482,18 @@ export class A1111Client {
             const hint = /^http:\/\//i.test(backendUrl)
                 ? ' The API base URL uses http:// — if the service redirects to https, the relay drops the credentials; enter the https:// URL directly.'
                 : '';
+            if (isGenerate) {
+                // The relay hides the backend's answer, so tell apart "cannot
+                // reach / wrong key" from "reachable but the job was refused"
+                // with one cheap model-list probe over the same relay.
+                const reachable = await this._relayProbe(backendUrl, auth, headers);
+                const reason = reachable === true
+                    ? 'The connection and key work (a model-list probe succeeded), so the backend refused this generation job. On a ComfyUI-backed proxy this usually means the workflow behind the selected checkpoint references a checkpoint or LoRA file that is missing on the server — only the server owner can fix that; try another checkpoint meanwhile.'
+                    : reachable === false
+                        ? 'A model-list probe over the same relay also failed — check the API base URL and the key (Backends → Test Connection).'
+                        : 'The backend answer is logged in the SillyTavern server console.';
+                throw new A1111Error('A1111_HTTP', `The SillyTavern relay returned HTTP ${response.status} for ${path}. ${reason}${hint}`);
+            }
             throw new A1111Error('A1111_HTTP', `The SillyTavern relay returned HTTP ${response.status} for ${path}. The backend answer (wrong URL, rejected key, or a generation failure) is logged in the SillyTavern server console.${hint}`);
         }
         let text = '';
@@ -493,6 +505,29 @@ export class A1111Client {
             throw new A1111Error('A1111_MALFORMED', `${path} (relay) did not return the expected JSON (first 120 chars: "${text.slice(0, 120)}").`);
         }
         return { ok: true, status: response.status, headers: { get: () => 'application/json' }, text: async () => reshaped };
+    }
+
+    /**
+     * Diagnostic model-list probe over the relay after a failed generate.
+     * @returns {Promise<boolean | null>} true = backend reachable with this
+     *   URL/key, false = probe rejected too, null = probe itself could not run.
+     */
+    async _relayProbe(backendUrl, auth, headers) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), Math.min(DISCOVERY_TIMEOUT_MS, 15000));
+        try {
+            const probe = await this.fetchImpl(ST_RELAY_ROUTES['/sdapi/v1/sd-models'].endpoint, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({ url: backendUrl, auth }),
+                signal: controller.signal,
+            });
+            return Boolean(probe.ok);
+        } catch {
+            return null;
+        } finally {
+            clearTimeout(timer);
+        }
     }
 
     /** Bounded, JSON-preferring, credential-redacted error detail. */
