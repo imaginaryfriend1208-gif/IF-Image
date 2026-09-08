@@ -12,7 +12,7 @@ import { createTaskQueue } from './src/runtime/tasks.js';
 import { createExecutor } from './src/runtime/executor.js';
 import { createMarkerPipeline } from './src/runtime/marker-pipeline.js';
 import { replaceMarkers, createSlotElement, renderSlotState, renderImageFrame, renderRegenerateChip, renderIdleChip, openLightbox, contentHash } from './src/runtime/insert.js';
-import { saveImageRecord, getImagesForMessage, getImageRecord, deleteImageRecord } from './src/storage/images.js';
+import { saveImageRecord, getImagesForMessage, getImageRecord, deleteImageRecord, getStorageStats, pruneImages, toJpegBlob } from './src/storage/images.js';
 import { getAllCharacters } from './src/storage/chars.js';
 import { getAllStyles, getAllPersonas, getReplaceRules } from './src/storage/presets.js';
 import { getAllOutfits } from './src/storage/outfits.js';
@@ -100,6 +100,33 @@ jQuery(async () => {
         }
     }
     refreshRoster();
+
+    // ------------------------------------------------------------------
+    // D6: image cache management.
+    // - Save wrapper: fresh blobs are JPEG-converted when
+    //   settings.cache.jpegQuality > 0 (never converts existing records;
+    //   failure records have no blob and pass through untouched).
+    // - Startup prune: fire-and-forget by ttlDays/maxMB when either > 0.
+    // ------------------------------------------------------------------
+    async function saveImageRecordWithCache(record) {
+        const quality = Number(settings.cache?.jpegQuality ?? 0);
+        if (record?.blob && quality > 0) {
+            return saveImageRecord({ ...record, blob: await toJpegBlob(record.blob, quality) });
+        }
+        return saveImageRecord(record);
+    }
+    {
+        const ttlDays = Number(settings.cache?.ttlDays ?? 0);
+        const maxMB = Number(settings.cache?.maxMB ?? 0);
+        if (ttlDays > 0 || maxMB > 0) {
+            pruneImages({
+                olderThanMs: ttlDays > 0 ? ttlDays * 86400000 : undefined,
+                maxBytes: maxMB > 0 ? maxMB * 1024 * 1024 : undefined,
+            }).then(({ deleted, bytesFreed }) => {
+                if (deleted > 0) console.log(`[IF Image] Cache prune: ${deleted} records, ${(bytesFreed / 1048576).toFixed(1)} MB freed.`);
+            }).catch(err => console.warn('[IF Image] Cache prune failed:', err?.message ?? err));
+        }
+    }
 
     // ------------------------------------------------------------------
     // C4: active character resolution. The current card id (avatar
@@ -257,7 +284,7 @@ jQuery(async () => {
         getQueue: () => queue,
         compile,
         getImagesForMessage,
-        saveImageRecord,
+        saveImageRecord: saveImageRecordWithCache,
         contentHash,
         defaultBackendKind,
         defaultProfileKey,
@@ -349,7 +376,7 @@ jQuery(async () => {
         const result = await new Promise((resolve, reject) => {
             regenWaiters.set(taskId, { resolve, reject });
         });
-        return saveImageRecord({
+        return saveImageRecordWithCache({
             chatId: record.chatId,
             messageId: record.messageId,
             swipeId: record.swipeId,

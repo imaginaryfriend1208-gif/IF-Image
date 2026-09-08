@@ -108,7 +108,7 @@ const store = installFakeIndexedDB();
 // Import AFTER installing the fake global — idb.js's getDB() lazily reads
 // `indexedDB` only when first called, so import order here doesn't matter
 // in practice, but this keeps the setup obviously correct either way.
-const { saveImageRecord, listImages, countImages, getImageRecord, deleteImageRecord } = await import('../src/storage/images.js');
+const { saveImageRecord, listImages, countImages, getImageRecord, deleteImageRecord, getStorageStats, pruneImages, toJpegBlob } = await import('../src/storage/images.js');
 
 function makeRecord(overrides = {}) {
     return {
@@ -206,6 +206,82 @@ await test('R3: failure error string is bounded to 300 chars', async () => {
     const record = await getImageRecord(id);
     assert.equal(record.error.length, 300);
     await deleteImageRecord(id);
+});
+
+// ---- D6: storage stats + pruning + JPEG conversion ---------------------------
+// Fresh slate: D6 assertions are byte-exact, so earlier seeds are cleared.
+store.clear();
+
+/** Save a record and force its timestamp/blob size. slotN distinguishes
+ *  slots via occurrence; body length = blob.size in bytes. */
+async function seed({ ts, slot = 0, chatId = 'chat-1', body = 'x', failed = false }) {
+    const id = await saveImageRecord(makeRecord({
+        chatId, occurrence: slot,
+        ...(failed ? { blob: undefined, status: 'failed', error: 'e' } : { blob: new Blob([body]) }),
+    }));
+    store.get(id).timestamp = ts;
+    return id;
+}
+
+await test('D6: getStorageStats counts blob records and sums blob.size; failures excluded; chat scoped', async () => {
+    await seed({ ts: 1, body: 'aaaa' });                    // 4 bytes chat-1
+    await seed({ ts: 2, body: 'bb', chatId: 'chat-2' });    // 2 bytes chat-2
+    await seed({ ts: 3, failed: true });                    // blob-less: invisible
+    const all = await getStorageStats();
+    assert.deepEqual(all, { count: 2, bytes: 6 });
+    const one = await getStorageStats({ chatId: 'chat-1' });
+    assert.deepEqual(one, { count: 1, bytes: 4 });
+    store.clear();
+});
+
+await test('D6: pruneImages TTL deletes oldest first but never a slot\'s only remaining record', async () => {
+    // Slot 0: three records (ts 10, 20, 30). Slot 1: one old record (ts 5).
+    const a = await seed({ ts: 10, slot: 0, body: 'aa' });
+    const b = await seed({ ts: 20, slot: 0, body: 'bb' });
+    const c = await seed({ ts: 30, slot: 0, body: 'cc' });
+    const lone = await seed({ ts: 5, slot: 1, body: 'dddd' });
+    // Everything is "older than now - 1ms" => all candidates.
+    const result = await pruneImages({ olderThanMs: 1 });
+    // a and b deleted (oldest first); c kept (slot 0's last record);
+    // lone kept (slot 1's only record) despite being oldest overall.
+    assert.deepEqual(result, { deleted: 2, bytesFreed: 4 });
+    assert.equal(store.has(a), false);
+    assert.equal(store.has(b), false);
+    assert.equal(store.has(c), true, 'slot 0 keeps its newest record');
+    assert.equal(store.has(lone), true, 'a slot\'s only record is protected');
+    store.clear();
+});
+
+await test('D6: pruneImages maxBytes stops once within budget; chatId restricts the pass', async () => {
+    const a = await seed({ ts: 10, slot: 0, body: 'aaaaaaaa' }); // 8B
+    const b = await seed({ ts: 20, slot: 0, body: 'bbbbbbbb' }); // 8B
+    const c = await seed({ ts: 30, slot: 0, body: 'cccccccc' }); // 8B
+    const other = await seed({ ts: 1, slot: 0, chatId: 'chat-2', body: 'zzzzzzzz' }); // 8B, other chat
+    // chat-1 total 24B; budget 16B: delete only `a`.
+    const result = await pruneImages({ maxBytes: 16, chatId: 'chat-1' });
+    assert.deepEqual(result, { deleted: 1, bytesFreed: 8 });
+    assert.equal(store.has(a), false);
+    assert.equal(store.has(b), true);
+    assert.equal(store.has(c), true);
+    assert.equal(store.has(other), true, 'other chats untouched by a scoped prune');
+    store.clear();
+});
+
+await test('D6: pruneImages with no criteria (all knobs 0/absent) deletes nothing', async () => {
+    const a = await seed({ ts: 10, slot: 0 });
+    const result = await pruneImages({});
+    assert.deepEqual(result, { deleted: 0, bytesFreed: 0 });
+    assert.equal(store.has(a), true);
+    store.clear();
+});
+
+await test('D6: toJpegBlob returns the ORIGINAL blob for quality 0 or when canvas is unavailable', async () => {
+    const blob = new Blob(['png-bytes']);
+    assert.equal(await toJpegBlob(blob, 0), blob, 'quality 0 = conversion off');
+    assert.equal(await toJpegBlob(blob, 101), blob, 'out-of-range quality = off');
+    // Node has no OffscreenCanvas/createImageBitmap: valid quality still
+    // falls back to the original instead of throwing.
+    assert.equal(await toJpegBlob(blob, 85), blob, 'no canvas facilities = original kept');
 });
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`);

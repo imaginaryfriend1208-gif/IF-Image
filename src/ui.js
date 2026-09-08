@@ -8,7 +8,7 @@ import { PROFILES, PROFILE_KEYS, applyProfile } from './profiles.js';
 import { getAllCharacters, saveCharacter, removeCharacter, createDefaultCharacter, emptyBooruDetail } from './storage/chars.js';
 import { getAllPersonas, savePersona, removePersona, getAllStyles, saveStyle, removeStyle, createDefaultPersona, createDefaultStyle, getReplaceRules, saveReplaceRules } from './storage/presets.js';
 import { getOutfitsForCharacter, saveOutfit, removeOutfit, createDefaultOutfit } from './storage/outfits.js';
-import { listImages, countImages, deleteImageRecord } from './storage/images.js';
+import { listImages, countImages, deleteImageRecord, getStorageStats, pruneImages } from './storage/images.js';
 import { parseTriggers } from './prompt/triggers.js';
 import { assemblePrompt, resolveProfileKey } from './prompt/render.js';
 import { cleanupEnvelope } from './prompt/cleanup.js';
@@ -700,7 +700,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
 
         <!-- ============ GALLERY TAB ============ -->
         <div class="if-image-panel" data-if-panel="gallery" style="display:none;">
-            <h3>Gallery</h3>
+            <h3>Gallery <span id="if_gallery_stats" class="if-image-hint"></span></h3>
             <div class="if-image-row">
                 <label class="if-image-check">
                     <input type="radio" name="if_gallery_scope" id="if_gallery_scope_chat" value="chat" checked> Current chat
@@ -708,6 +708,16 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 <label class="if-image-check">
                     <input type="radio" name="if_gallery_scope" id="if_gallery_scope_all" value="all"> All chats
                 </label>
+            </div>
+            <div class="if-image-row" style="gap:6px; flex-wrap:wrap;">
+                <button id="if_gallery_prune_old" class="menu_button">Delete older than</button>
+                <input id="if_gallery_prune_days" type="number" class="text_pole textarea_compact" min="1" step="1" value="30" style="width:64px;"> days
+                <button id="if_gallery_prune_chat" class="menu_button" style="background:#552222;">Delete all in this chat</button>
+            </div>
+            <div class="if-image-row" style="gap:6px; flex-wrap:wrap;" title="0 disables each knob. Applied on load (TTL/size) and on new saves (JPEG).">
+                <label>TTL days <input id="if_cache_ttl" type="number" class="text_pole textarea_compact" min="0" step="1" style="width:64px;"></label>
+                <label>Max MB <input id="if_cache_maxmb" type="number" class="text_pole textarea_compact" min="0" step="1" style="width:64px;"></label>
+                <label>JPEG quality <input id="if_cache_jpegq" type="number" class="text_pole textarea_compact" min="0" max="100" step="1" style="width:64px;"></label>
             </div>
             <div class="if-image-gallery-grid" id="if_gallery_grid"></div>
             <div class="if-image-row" style="justify-content:center; gap:8px;">
@@ -2113,6 +2123,20 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             galleryGrid.textContent = '';
             console.warn('[IF Image] Gallery load failed:', e);
         }
+        refreshGalleryStats(chatId);
+    }
+
+    // D6: "N images · X MB" header (blob records only, scope-aware).
+    const galleryStats = $('if_gallery_stats');
+    async function refreshGalleryStats(chatId) {
+        if (!galleryStats) return;
+        try {
+            const { count, bytes } = await getStorageStats({ chatId });
+            galleryStats.textContent = `${count} image${count === 1 ? '' : 's'} · ${(bytes / 1048576).toFixed(1)} MB`;
+        } catch (e) {
+            galleryStats.textContent = '';
+            console.warn('[IF Image] Gallery stats failed:', e);
+        }
     }
 
     function renderGalleryGrid() {
@@ -2230,6 +2254,56 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         });
     });
     galleryDetailClose.addEventListener('click', closeGalleryDetail);
+
+    // ---- D6: cache management (prune buttons + settings inputs) ----------
+    const pruneOldBtn = $('if_gallery_prune_old');
+    const pruneDaysEl = $('if_gallery_prune_days');
+    const pruneChatBtn = $('if_gallery_prune_chat');
+    if (pruneOldBtn) pruneOldBtn.addEventListener('click', async () => {
+        const days = Number(pruneDaysEl?.value);
+        if (!Number.isFinite(days) || days < 1) return;
+        if (!confirm(`Delete images older than ${days} day(s)? Each marker keeps its newest image.`)) return;
+        try {
+            const { deleted, bytesFreed } = await pruneImages({ olderThanMs: days * 86400000 });
+            showResult(galleryDetailStatus, `Deleted ${deleted} image(s), freed ${(bytesFreed / 1048576).toFixed(1)} MB.`, false);
+            galleryPage = 0;
+            await loadGalleryPage();
+        } catch (e) {
+            showResult(galleryDetailStatus, e.message, true);
+        }
+    });
+    if (pruneChatBtn) pruneChatBtn.addEventListener('click', async () => {
+        const chatId = typeof getCurrentChatId === 'function' ? getCurrentChatId() : undefined;
+        if (!chatId) { showResult(galleryDetailStatus, 'No active chat.', true); return; }
+        if (!confirm('Delete ALL images in this chat? Each marker keeps its newest image.')) return;
+        try {
+            // olderThanMs: everything qualifies; the newest-per-slot rule
+            // still protects each marker's latest image.
+            const { deleted, bytesFreed } = await pruneImages({ chatId, olderThanMs: 1 });
+            showResult(galleryDetailStatus, `Deleted ${deleted} image(s), freed ${(bytesFreed / 1048576).toFixed(1)} MB.`, false);
+            galleryPage = 0;
+            await loadGalleryPage();
+        } catch (e) {
+            showResult(galleryDetailStatus, e.message, true);
+        }
+    });
+    // Cache settings (migrator v7 defaults 0/0/0 = all off).
+    const cacheDefaults = () => (settings.cache ??= { ttlDays: 0, maxMB: 0, jpegQuality: 0 });
+    const cacheInput = (id, key, max) => {
+        const input = $(id);
+        if (!input) return;
+        input.value = String(cacheDefaults()[key] ?? 0);
+        input.addEventListener('change', () => {
+            let n = Math.max(0, Math.round(Number(input.value) || 0));
+            if (max !== undefined) n = Math.min(max, n);
+            input.value = String(n);
+            cacheDefaults()[key] = n;
+            save();
+        });
+    };
+    cacheInput('if_cache_ttl', 'ttlDays');
+    cacheInput('if_cache_maxmb', 'maxMB');
+    cacheInput('if_cache_jpegq', 'jpegQuality', 100);
 
     galleryDetailDelete.addEventListener('click', async () => {
         if (!galleryDetailId) return;
