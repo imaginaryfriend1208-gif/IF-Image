@@ -43,6 +43,8 @@ export async function saveImageRecord(record) {
         width: record.width ?? 0,
         height: record.height ?? 0,
     };
+    // D4: mark records whose prompt/params the user edited before generating.
+    if (record.editedPrompt === true) entry.editedPrompt = true;
     // R3 failure-record fields (bounded, sanitized upstream).
     if (record.status === 'failed') {
         entry.status = 'failed';

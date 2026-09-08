@@ -2696,3 +2696,171 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
 
     return el;
 }
+
+// ---------------------------------------------------------------------------
+// D4: edit-before-generate dialog. Exported as a factory so index.js can wire
+// it into the marker pipeline (deps.openEditDialog) with the ST popup and the
+// LLM tag-modify callback injected — ui.js never imports the engine itself.
+// ---------------------------------------------------------------------------
+
+/**
+ * @param {object} deps
+ * @param {() => object|null} deps.getContext - ST getContext (feature-detected:
+ *   callGenericPopup + POPUP_TYPE.CONFIRM when present, else a self-built
+ *   overlay so offline/degraded environments still work).
+ * @param {(promptText: string, instruction: string, opts: {signal?: AbortSignal}) => Promise<{tags: string}>} [deps.modifyTags]
+ *   AI assist hook (index.js wires engine.modifyTags). Optional: without it
+ *   the assist row is hidden.
+ * @param {(kind: string, message: string) => void} deps.notify
+ * @param {object} deps.profiles - PROFILES map (for negativeDisabled).
+ * @returns {(current: {prompt, negative, params, profileKey}) => Promise<object|null>}
+ *   resolves to an envelope override { prompt, negative, params } or null on cancel.
+ */
+export function createEditDialog({ getContext, modifyTags, notify, profiles }) {
+    return async function openEditDialog({ prompt = '', negative = '', params = {}, profileKey } = {}) {
+        const doc = document;
+        const form = doc.createElement('div');
+        form.className = 'ifimg-edit-dialog';
+
+        const field = (labelText, node) => {
+            const wrap = doc.createElement('label');
+            wrap.className = 'ifimg-edit-field';
+            const span = doc.createElement('span');
+            span.textContent = labelText;
+            wrap.appendChild(span);
+            wrap.appendChild(node);
+            form.appendChild(wrap);
+            return node;
+        };
+        const promptEl = doc.createElement('textarea');
+        promptEl.rows = 5;
+        promptEl.value = String(prompt);
+        field('Prompt', promptEl);
+
+        // AI assist: rewrites the prompt textarea via the LLM; NEVER generates.
+        let abortAssist = null;
+        if (typeof modifyTags === 'function') {
+            const row = doc.createElement('div');
+            row.className = 'ifimg-edit-assist';
+            const instrEl = doc.createElement('input');
+            instrEl.type = 'text';
+            instrEl.placeholder = 'AI assist instruction (e.g. "make it night time")';
+            const assistBtn = doc.createElement('button');
+            assistBtn.type = 'button';
+            assistBtn.className = 'menu_button';
+            assistBtn.textContent = 'AI assist';
+            assistBtn.addEventListener('click', async () => {
+                const instruction = instrEl.value.trim();
+                if (!instruction) { notify('warning', 'Enter an assist instruction first.'); return; }
+                assistBtn.disabled = true;
+                abortAssist = new AbortController();
+                try {
+                    // engine.modifyTags keeps only the FIRST line of the reply,
+                    // so the current prompt is collapsed to one line first.
+                    const oneLine = promptEl.value.replace(/\s*\n+\s*/g, ', ').trim();
+                    const result = await modifyTags(oneLine, instruction, { signal: abortAssist.signal });
+                    if (result?.tags) promptEl.value = result.tags;
+                } catch (err) {
+                    if (err?.name !== 'AbortError') notify('error', `AI assist failed: ${err?.message ?? err}`);
+                } finally {
+                    abortAssist = null;
+                    assistBtn.disabled = false;
+                }
+            });
+            row.appendChild(instrEl);
+            row.appendChild(assistBtn);
+            form.appendChild(row);
+        }
+
+        const negativeEl = doc.createElement('textarea');
+        negativeEl.rows = 2;
+        negativeEl.value = String(negative);
+        const negField = field('Negative', negativeEl);
+        if (profiles?.[profileKey]?.negativeDisabled) negField.parentNode.style.display = 'none';
+
+        const numRow = doc.createElement('div');
+        numRow.className = 'ifimg-edit-params';
+        form.appendChild(numRow);
+        const num = (labelText, value, step = 1) => {
+            const wrap = doc.createElement('label');
+            wrap.className = 'ifimg-edit-field ifimg-edit-num';
+            const span = doc.createElement('span');
+            span.textContent = labelText;
+            const input = doc.createElement('input');
+            input.type = 'number';
+            input.step = String(step);
+            input.value = value === undefined || value === null ? '' : String(value);
+            wrap.appendChild(span);
+            wrap.appendChild(input);
+            numRow.appendChild(wrap);
+            return input;
+        };
+        const widthEl = num('Width', params.width, 64);
+        const heightEl = num('Height', params.height, 64);
+        const stepsEl = num('Steps', params.steps);
+        const cfgEl = num('CFG', params.cfg, 0.5);
+        const seedEl = num('Seed', params.seed ?? -1);
+
+        const collect = () => ({
+            prompt: promptEl.value,
+            negative: negativeEl.value,
+            params: {
+                width: widthEl.value === '' ? undefined : Number(widthEl.value),
+                height: heightEl.value === '' ? undefined : Number(heightEl.value),
+                steps: stepsEl.value === '' ? undefined : Number(stepsEl.value),
+                cfg: cfgEl.value === '' ? undefined : Number(cfgEl.value),
+                seed: seedEl.value === '' ? undefined : Number(seedEl.value),
+            },
+        });
+
+        // ST popup path: CONFIRM gives OK/Cancel; the OK button is relabeled
+        // "Generate" via popupOptions where supported.
+        let ctx = null;
+        try { ctx = getContext?.(); } catch { ctx = null; }
+        const popup = ctx?.callGenericPopup;
+        const confirmType = ctx?.POPUP_TYPE?.CONFIRM ?? 2;
+        if (typeof popup === 'function') {
+            try {
+                const result = await popup(form, confirmType, '', { okButton: 'Generate', cancelButton: 'Cancel' });
+                abortAssist?.abort();
+                return result ? collect() : null;
+            } catch (err) {
+                console.warn('[IF Image] callGenericPopup failed; using fallback dialog:', err?.message ?? err);
+            }
+        }
+
+        // Fallback: self-built modal overlay (no ST).
+        return new Promise((resolve) => {
+            const overlay = doc.createElement('div');
+            overlay.className = 'ifimg-lightbox'; // reuse backdrop styling
+            const inner = doc.createElement('div');
+            inner.className = 'ifimg-lightbox-inner ifimg-edit-inner';
+            inner.addEventListener('click', (e) => e.stopPropagation());
+            inner.appendChild(form);
+            const buttons = doc.createElement('div');
+            buttons.className = 'ifimg-lb-actions';
+            const done = (value) => {
+                abortAssist?.abort();
+                overlay.remove();
+                doc.removeEventListener('keydown', onKey);
+                resolve(value);
+            };
+            const mkBtn = (label, handler) => {
+                const b = doc.createElement('button');
+                b.type = 'button';
+                b.className = 'menu_button';
+                b.textContent = label;
+                b.addEventListener('click', handler);
+                buttons.appendChild(b);
+            };
+            mkBtn('Generate', () => done(collect()));
+            mkBtn('Cancel', () => done(null));
+            inner.appendChild(buttons);
+            overlay.appendChild(inner);
+            const onKey = (e) => { if (e.key === 'Escape') done(null); };
+            overlay.addEventListener('click', () => done(null));
+            doc.addEventListener('keydown', onKey);
+            (doc.body || doc).appendChild(overlay);
+        });
+    };
+}

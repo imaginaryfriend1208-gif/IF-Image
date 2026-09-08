@@ -13,6 +13,10 @@
 // matching content hash; if found, it skips generation entirely and lets the
 // DOM pass restore the persisted image instead.
 
+// Pure clamp helpers (no ST deps) — safe to import in offline tests. Used by
+// D4's edit-before-generate override sanitization.
+import { clampDim, clampSteps, clampCfg } from '../prompt/render.js';
+
 /**
  * @param {object} deps
  * @param {() => object} deps.getQueue - lazy getter for the createTaskQueue()
@@ -57,6 +61,10 @@ export function createMarkerPipeline(deps) {
         // button for slots with nothing persisted and no live task. Without
         // it, such slots fall back to the old invisible idle placeholder.
         renderIdleChip,
+        // D4 (optional): edit-before-generate dialog. Receives the slot's
+        // current { prompt, negative, params, profileKey } and resolves to an
+        // envelope override { prompt?, negative?, params? } or null (cancel).
+        openEditDialog,
     } = deps;
 
     // key -> entry. Entry holds the DOM slot (may be detached after a
@@ -141,6 +149,35 @@ export function createMarkerPipeline(deps) {
         if (id && entry.slot) renderSlotState(entry.slot, { status: 'queued' }, doc);
     }
 
+    /**
+     * D4: apply an edit-dialog override onto an envelope without mutating it.
+     * prompt/negative replace only when strings; numeric params go through
+     * the standard clamp helpers (width/height as a pair); seed must be an
+     * integer >= -1. Unknown params fields are ignored.
+     */
+    function applyEnvelopeOverride(envelope, override) {
+        if (!override || typeof override !== 'object') return envelope;
+        const out = { ...envelope, params: { ...envelope.params } };
+        if (typeof override.prompt === 'string' && override.prompt.trim()) out.prompt = override.prompt.trim();
+        if (typeof override.negative === 'string') out.negative = override.negative.trim();
+        const p = override.params;
+        if (p && typeof p === 'object') {
+            const width = clampDim(p.width);
+            const height = clampDim(p.height);
+            if (width !== undefined && height !== undefined) {
+                out.params.width = width;
+                out.params.height = height;
+            }
+            const steps = clampSteps(p.steps);
+            if (steps !== undefined) out.params.steps = steps;
+            const cfg = clampCfg(p.cfg);
+            if (cfg !== undefined) out.params.cfg = cfg;
+            const seed = Number(p.seed);
+            if (Number.isInteger(seed) && seed >= -1) out.params.seed = seed;
+        }
+        return out;
+    }
+
     function bindImageActions(entry) {
         const openView = async () => {
             if (activeLightbox) activeLightbox.close();
@@ -213,6 +250,29 @@ export function createMarkerPipeline(deps) {
         // or random (-1) — reproducing a random seed is meaningless.
         if (Number.isInteger(entry.lastSeed) && entry.lastSeed >= 0) {
             actions.onRepro = () => regenerate(entry, { seed: entry.lastSeed });
+        }
+        // D4: Edit-before-generate. The dialog resolves to an envelope
+        // override (or null on cancel); Generate re-enters the shared
+        // generation path. The marker text in the message is NEVER modified —
+        // entry identity stays the rendered marker text.
+        if (typeof openEditDialog === 'function' && entry.envelope) {
+            actions.onEdit = async () => {
+                let override;
+                try {
+                    override = await openEditDialog({
+                        prompt: entry.envelope.prompt ?? '',
+                        negative: entry.envelope.negative ?? '',
+                        params: { ...(entry.envelope.params ?? {}) },
+                        profileKey: entry.profileKey,
+                    });
+                } catch (err) {
+                    console.warn('[IF Image] Edit dialog failed:', err?.message ?? err);
+                    return;
+                }
+                if (!override) return; // cancelled
+                if (slots.get(entry.key) !== entry) return; // superseded during await
+                startGeneration(entry, { envelopeOverride: override });
+            };
         }
         // Delete only when the record id is known and a delete backend was
         // injected — restored frames and fresh saves both stamp recordId.
@@ -316,6 +376,8 @@ export function createMarkerPipeline(deps) {
                     blob: result.blob,
                     width: result.width,
                     height: result.height,
+                    // D4: user edited the prompt/params before generating.
+                    ...(entry.editedPrompt ? { editedPrompt: true } : {}),
                 });
             } catch (err) {
                 console.warn('[IF Image] Image record save failed:', err?.message ?? err);
@@ -544,9 +606,15 @@ export function createMarkerPipeline(deps) {
      * chip descriptor `{ chatId, messageId, swipeId, occurrence, content,
      * slot?, failedRecordId? }` — the chip path compiles fresh (compile →
      * overrides) and registers a new entry, replacing any stale one.
+     *
+     * D4: `options.envelopeOverride` replaces the envelope's prompt/negative/
+     * params (clamped through the standard helpers) before enqueueing, and
+     * marks the entry so the saved record carries editedPrompt: true. The
+     * marker text/identity is never touched.
+     * @param {{envelopeOverride?: object}} [options]
      * @returns {object|null} the live entry, or null if compile failed.
      */
-    function startGeneration(entryInfo) {
+    function startGeneration(entryInfo, { envelopeOverride } = {}) {
         const settings = getSettings();
         let entry = entryInfo;
         if (!entry.envelope) {
@@ -583,6 +651,14 @@ export function createMarkerPipeline(deps) {
                 failedRecordId: entryInfo.failedRecordId ?? previous?.failedRecordId ?? null,
             };
             slots.set(key, entry);
+        }
+
+        // D4: user-edited prompt/params replace the compiled envelope. The
+        // flag sticks on the entry so the eventual success record is marked.
+        if (envelopeOverride) {
+            releaseUrl(entry); // closes any open lightbox for this entry (FIX 4)
+            entry.envelope = applyEnvelopeOverride(entry.envelope, envelopeOverride);
+            entry.editedPrompt = true;
         }
 
         // Dry-run: log the final envelope, never enqueue.

@@ -433,12 +433,13 @@ test('R2: restore rehydrates the record checkpoint; regenerate reuses it', async
 // ---- R3: idle/failed chips + failure persistence ----------------------------
 
 /** Pipeline with renderIdleChip/deleteImageRecord injected and IDB writes captured. */
-function makeR3Pipeline({ records = [] } = {}) {
+function makeR3Pipeline({ records = [], openEditDialog } = {}) {
     const queue = makeQueue();
     const saved = [];
     const deleted = [];
     const idleChips = []; // { slot, onGenerate }
     const failedRenders = []; // { slot, snapshot, onRetry }
+    const frames = []; // { slot, url, actions } (D4)
     let recSeq = 0;
     const pipeline = createMarkerPipeline({
         getQueue: () => queue,
@@ -459,11 +460,12 @@ function makeR3Pipeline({ records = [] } = {}) {
             slot.dataset.ifimgState = snapshot?.status || 'queued';
             if (snapshot?.status === 'failed') failedRenders.push({ slot, snapshot, onRetry: actions.onRetry });
         },
-        renderImageFrame: () => {},
+        renderImageFrame: (slot, d, url, actions) => { frames.push({ slot, url, actions }); },
         renderIdleChip: (slot, d, { onGenerate } = {}) => {
             slot.dataset.ifimgState = 'idle';
             idleChips.push({ slot, onGenerate });
         },
+        openEditDialog,
         openLightbox: () => () => {},
         replaceMarkers: (root, tags, onFound) => {
             const slot = onFound({ occurrence: 0, content: 'scene' });
@@ -475,7 +477,7 @@ function makeR3Pipeline({ records = [] } = {}) {
         getSettings: () => ({ enabled: true, generation: { enabled: true, mode: 'direct', startTag: 'image###', endTag: '###' } }),
         getCurrentChatId: () => 'A',
     });
-    return { pipeline, queue, saved, deleted, idleChips, failedRenders };
+    return { pipeline, queue, saved, deleted, idleChips, failedRenders, frames };
 }
 
 test('R3: no record and no live task renders the idle chip; Generate enqueues exactly once', async () => {
@@ -692,6 +694,82 @@ test('D3: llmSize "auto" (and unset) applies the LLM width/height', async () => 
         assert.equal(task.prompt.params.width, 512, `width applied for llmSize=${llmSize}`);
         assert.equal(task.prompt.params.height, 768, `height applied for llmSize=${llmSize}`);
     }
+});
+
+// ---- D4: edit before generate -------------------------------------------------
+test('D4: edited envelope reaches the queue clamped; record gets editedPrompt; marker identity unchanged', async () => {
+    const override = {
+        prompt: '  edited prompt  ',
+        negative: 'neg2',
+        // Out-of-range values must pass through the standard clamps.
+        params: { width: 500, height: 900, steps: 200, cfg: 50, seed: 5 },
+    };
+    const { pipeline, queue, saved, frames } = makeR3Pipeline({ openEditDialog: async () => override });
+    await pipeline.onMarker(marker);
+    const firstId = [...queue._tasks.keys()][0];
+    await pipeline.onTaskStateChange({
+        id: firstId, status: 'succeeded',
+        result: { blob: new Blob(['x']), seed: 42, backend: 'a1111', profileKey: 'anima', width: 832, height: 1216 },
+    });
+    assert.equal(saved.length, 1);
+    assert.equal(saved[0].editedPrompt, undefined, 'un-edited generation carries no flag');
+    const actions = frames.at(-1).actions;
+    assert.equal(typeof actions.onEdit, 'function', 'frame exposes Edit when a dialog is injected');
+
+    await actions.onEdit();
+    assert.equal(queue._tasks.size, 2, 'Generate from the dialog enqueues a new task');
+    const edited = [...queue._tasks.values()].at(-1);
+    assert.equal(edited.prompt.prompt, 'edited prompt', 'prompt replaced (trimmed)');
+    assert.equal(edited.prompt.negative, 'neg2');
+    assert.equal(edited.prompt.params.width, 512, 'width clamped to 64px grid');
+    assert.equal(edited.prompt.params.height, 896);
+    assert.equal(edited.prompt.params.steps, 150, 'steps clamped to 150');
+    assert.equal(edited.prompt.params.cfg, 30, 'cfg clamped to 30');
+    assert.equal(edited.prompt.params.seed, 5);
+
+    await pipeline.onTaskStateChange({
+        id: edited.id, status: 'succeeded',
+        result: { blob: new Blob(['y']), seed: 5, backend: 'a1111', profileKey: 'anima', width: 512, height: 896 },
+    });
+    assert.equal(saved.length, 2);
+    assert.equal(saved[1].editedPrompt, true, 'edited generation record is flagged');
+    assert.equal(saved[1].content, 'scene', 'record identity stays the ORIGINAL marker text');
+    assert.equal(saved[1].prompt, 'edited prompt');
+});
+
+test('D4: restore after an edit shows the newest (edited) record', async () => {
+    const base = {
+        chatId: 'A', messageId: 0, swipeId: 0, occurrence: 0, content: 'scene',
+        negative: '', params: {}, backend: 'a1111', profileKey: 'anima',
+    };
+    // getImagesForMessage returns newest first; the edited record is newest.
+    const records = [
+        { ...base, id: 'rec-edited', prompt: 'edited prompt', editedPrompt: true, seed: 5, blob: new Blob(['new']) },
+        { ...base, id: 'rec-old', prompt: 'original prompt', seed: 9, blob: new Blob(['old']) },
+    ];
+    const { pipeline, queue, frames } = makeR3Pipeline({ records });
+    pipeline.attachSlots('A', 0);
+    await new Promise(r => setTimeout(r, 10));
+    assert.equal(frames.length, 1, 'restored exactly one frame');
+    const actions = frames[0].actions;
+    // The restored entry carries the NEWEST record: its Repro uses seed 5 and
+    // its Regen re-enqueues the edited prompt.
+    await actions.onRepro();
+    let task = [...queue._tasks.values()].at(-1);
+    assert.equal(task.prompt.params.seed, 5, 'Repro uses the edited record seed');
+    assert.equal(task.prompt.prompt, 'edited prompt', 'restored envelope is the edited prompt');
+});
+
+test('D4: cancelling the edit dialog enqueues nothing', async () => {
+    const { pipeline, queue, frames } = makeR3Pipeline({ openEditDialog: async () => null });
+    await pipeline.onMarker(marker);
+    const firstId = [...queue._tasks.keys()][0];
+    await pipeline.onTaskStateChange({
+        id: firstId, status: 'succeeded',
+        result: { blob: new Blob(['x']), seed: 1, backend: 'a1111', profileKey: 'anima', width: 832, height: 1216 },
+    });
+    await frames.at(-1).actions.onEdit();
+    assert.equal(queue._tasks.size, 1, 'cancel = no new task');
 });
 
 // ---- Snapshot never contains credentials -----------------------------------

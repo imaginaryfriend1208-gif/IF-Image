@@ -287,6 +287,7 @@ export function renderImageFrame(slot, doc, objectUrl, actions = {}) {
         ['View', actions.onView],
         ['Regen', actions.onRegen],
         ['Repro', actions.onRepro], // D2: regenerate with the record's seed
+        ['Edit', actions.onEdit],   // D4: edit prompt/params, then generate
         ['Delete', actions.onDelete],
     ].filter(([, handler]) => typeof handler === 'function');
     if (overlayActions.length) {

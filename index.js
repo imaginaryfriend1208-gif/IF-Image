@@ -6,7 +6,7 @@ import { getSettings, saveSettings } from './src/settings.js';
 import { NaiClient } from './src/backends/nai.js';
 import { ComfyProxyClient } from './src/backends/comfy.js';
 import { A1111Client } from './src/backends/a1111.js';
-import { renderDrawer } from './src/ui.js';
+import { renderDrawer, createEditDialog } from './src/ui.js';
 import { createMarkerRuntime } from './src/runtime/events.js';
 import { createTaskQueue } from './src/runtime/tasks.js';
 import { createExecutor } from './src/runtime/executor.js';
@@ -239,6 +239,16 @@ jQuery(async () => {
         activeLlmAborts.clear();
     }
 
+    // D4: edit-before-generate dialog. ui.js owns the DOM/popup; the LLM
+    // assist goes through exactly one callback (engine.modifyTags) so ui.js
+    // never imports the engine.
+    const openEditDialog = createEditDialog({
+        getContext: () => getContext(),
+        modifyTags: (tagList, instruction, opts) => engine.modifyTags(tagList, instruction, opts),
+        notify,
+        profiles: PROFILES,
+    });
+
     const pipeline = createMarkerPipeline({
         getQueue: () => queue,
         compile,
@@ -255,6 +265,7 @@ jQuery(async () => {
         renderRegenerateChip,
         renderIdleChip,
         openLightbox,
+        openEditDialog,
         deleteImageRecord,
         replaceMarkers,
         rewrite: rewriteWithAbort,

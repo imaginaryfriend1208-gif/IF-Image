@@ -422,3 +422,54 @@
 .ifimg-lb-delete {
     background: #552222;
 }
+
+/* D4: edit-before-generate dialog */
+.ifimg-edit-dialog {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 320px;
+    text-align: left;
+}
+
+.ifimg-edit-field {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 0.85em;
+}
+
+.ifimg-edit-field textarea,
+.ifimg-edit-field input {
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.ifimg-edit-assist {
+    display: flex;
+    gap: 6px;
+}
+
+.ifimg-edit-assist input {
+    flex: 1;
+    min-width: 0;
+}
+
+.ifimg-edit-params {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.ifimg-edit-num {
+    flex: 1;
+    min-width: 70px;
+}
+
+.ifimg-edit-inner {
+    background: var(--SmartThemeBlurTintColor, #1a1a1a);
+    padding: 16px;
+    border-radius: 8px;
+    max-height: 90vh;
+    overflow-y: auto;
+}
