@@ -452,14 +452,22 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
 
         <!-- ============ CHARACTERS TAB ============ -->
         <div class="if-image-panel" data-if-panel="chars" style="display:none;">
-            <h3>Character Presets</h3>
-            <div class="if-image-row" style="gap:6px; flex-wrap:wrap;">
-                <button id="if_preset_export" class="menu_button">Export preset</button>
-                <button id="if_preset_import" class="menu_button">Import preset</button>
-                <select id="if_preset_import_mode" class="text_pole" style="width:auto;" title="Conflict handling for records that already exist (matched by id or name)">
-                    <option value="keep-mine" selected>Conflicts: keep mine</option>
-                    <option value="overwrite">Conflicts: overwrite</option>
-                </select>
+            <div class="if-image-heading-row">
+                <h3>Character Presets</h3>
+                <!-- D14: ST-style small icon buttons (same pattern as the
+                     host's preset import/export controls). -->
+                <div class="if-image-icon-actions">
+                    <div id="if_preset_import" class="margin0 menu_button_icon menu_button" title="Import preset" tabindex="0" role="button">
+                        <i class="fa-fw fa-solid fa-file-import"></i>
+                    </div>
+                    <div id="if_preset_export" class="margin0 menu_button_icon menu_button" title="Export preset" tabindex="0" role="button">
+                        <i class="fa-fw fa-solid fa-file-export"></i>
+                    </div>
+                    <select id="if_preset_import_mode" class="text_pole" title="Conflict handling for records that already exist (matched by id or name)">
+                        <option value="keep-mine" selected>Conflicts: keep mine</option>
+                        <option value="overwrite">Conflicts: overwrite</option>
+                    </select>
+                </div>
                 <input id="if_preset_import_file" type="file" accept=".json,application/json" style="display:none;">
             </div>
             <div id="if_preset_status" class="if-image-result"></div>
