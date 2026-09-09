@@ -158,6 +158,49 @@ export function renderPersonaGenPrompt() {
 }`;
 }
 
+/**
+ * Render the system prompt for the chat_place request type.
+ * @param {{ count: number, dialect_rules?: string, character_cards?: string, persona_block?: string }} slots
+ * @returns {string}
+ */
+export function renderChatPlacePrompt({ count, dialect_rules, character_cards, persona_block } = {}) {
+    const parts = [
+        `You are an image placement planner for a roleplay chat. You decide where to insert ${count} images that best illustrate the conversation.`,
+        '',
+        'RULES:',
+        `- Choose exactly ${count} visually significant moments — actions, scene changes, emotional beats, character interactions.`,
+        '- Spread images across the conversation. Never cluster two images on adjacent messages.',
+        '- For each image, pick the message whose content it illustrates.',
+        '- "anchor" = the last 3–8 words of that message, copied VERBATIM from the chat text. The system uses this to find the message, so exactness matters. Do NOT paraphrase.',
+        '- "prompt" = a danbooru-style image prompt for that moment, following the dialect rules below.',
+        `- Reply with EXACTLY ONE JSON object, no prose, no code fences:`,
+        '',
+        `{"images":[{"anchor":"...","prompt":"...","negative":"...","size":"..."}]}`,
+        '',
+        '"negative" is optional (omit or empty string if the dialect doesn\'t use negatives).',
+        '"size" is optional ("WxH" e.g. "832x1216", portrait for close-ups, landscape for wide shots).',
+        '',
+    ];
+
+    if (dialect_rules) {
+        parts.push('DIALECT RULES:');
+        parts.push(dialect_rules);
+        parts.push('');
+    }
+    if (character_cards) {
+        parts.push('ACTIVE CHARACTERS (reference their appearance tags):');
+        parts.push(character_cards);
+        parts.push('');
+    }
+    if (persona_block) {
+        parts.push('USER PERSONA:');
+        parts.push(persona_block);
+        parts.push('');
+    }
+
+    return parts.join('\n');
+}
+
 /** type -> system prompt renderer, for the non-image_gen request types. */
 export const REQUEST_PROMPT_RENDERERS = {
     char_design: renderCharDesignPrompt,
@@ -165,4 +208,5 @@ export const REQUEST_PROMPT_RENDERERS = {
     tag_modify: renderTagModifyPrompt,
     translation: renderTranslationPrompt,
     persona_gen: renderPersonaGenPrompt,
+    chat_place: renderChatPlacePrompt,
 };

@@ -58,6 +58,12 @@ export const defaultSettings = {
         defaultMethod: 'direct',
         defaultApiProfileId: '',
         injectionStyle: 'compact',
+        // Phase CP: chat image placement (LLM plans N images across the chat).
+        chatPlace: {
+            count: 3,
+            onlyCharacter: true,
+            maxChatWindow: 40,
+        },
     },
     generation: {
         mode: 'direct',       // direct | assist | full
