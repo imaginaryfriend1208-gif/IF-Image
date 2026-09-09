@@ -99,9 +99,13 @@ export function createLlmClient({ getSettings, getContext, fetchImpl = fetch } =
         }
 
         // Method 2: ConnectionManagerRequestService — use the user's connection profile.
+        // The target is the SillyTavern connection profile id stored on the
+        // API profile as stProfileId, NOT this extension's own profile id:
+        // sendRequest resolves it against extension_settings.connectionManager.
         if (method === 'st_connection_manager' || method === 'connection_manager') {
-            if (!activeProfileId) {
-                throw new LlmError('CONFIG', 'No API profile ID configured for Connection Manager.');
+            const stProfileId = activeProfile?.stProfileId ?? '';
+            if (!stProfileId) {
+                throw new LlmError('CONFIG', 'This API profile has no SillyTavern connection profile selected. Pick one in the LLM tab, or switch the method to ST generateRaw.');
             }
             try {
                 const CMRS = ctx.ConnectionManagerRequestService;
@@ -113,7 +117,7 @@ export function createLlmClient({ getSettings, getContext, fetchImpl = fetch } =
                 const messages = [];
                 if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
                 messages.push({ role: 'user', content: fullUserPrompt });
-                const result = await CMRS.sendRequest(activeProfileId, messages, 4096, {
+                const result = await CMRS.sendRequest(stProfileId, messages, 4096, {
                     stream: false,
                     signal,
                     extractData: true,

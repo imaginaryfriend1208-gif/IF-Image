@@ -13,6 +13,10 @@ export function createDefaultApiProfile(name = 'New API Profile') {
         id: crypto.randomUUID ? crypto.randomUUID() : 'ap_' + Date.now(),
         name,
         method: 'generateRaw', // generateRaw | connection_manager | direct_fetch
+        // For method 'connection_manager': the id of a profile saved in
+        // SillyTavern's own Connection Manager. Credentials stay on the
+        // host; only this reference is stored here.
+        stProfileId: '',
         baseUrl: '',
         apiKey: '',
         model: '',

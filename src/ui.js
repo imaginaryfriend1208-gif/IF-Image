@@ -197,6 +197,17 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                     <option value="direct_fetch">Direct fetch</option>
                 </select>
             </div>
+            <div class="if-image-row" data-if-llm-cm>
+                <label for="if_llm_profile_stprofile">SillyTavern connection profile</label>
+                <div style="display:flex; gap:6px;">
+                    <select id="if_llm_profile_stprofile" class="text_pole" style="flex:1;">
+                        <option value="">-- none --</option>
+                    </select>
+                    <button id="if_llm_profile_strefresh" class="menu_button" title="Reload the list from SillyTavern">Refresh</button>
+                </div>
+            </div>
+            <div class="if-image-note" data-if-llm-cm>Reads the profiles saved in SillyTavern's Connection Manager. No URL or key is copied here — the request is handed to SillyTavern, which uses its own stored credentials.</div>
+            <div class="if-image-result" id="if_llm_stprofile_hint" data-if-llm-cm style="display:none;"></div>
             <div class="if-image-row" data-if-llm-fetch>
                 <label for="if_llm_profile_baseurl">Base URL</label>
                 <input id="if_llm_profile_baseurl" type="text" class="text_pole" placeholder="https://api.example.com">
@@ -3141,6 +3152,10 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     const llmMapApi = $('if_llm_map_api');
     const llmMapCtx = $('if_llm_map_ctx');
     const llmFetchRows = el.querySelectorAll('[data-if-llm-fetch]');
+    const llmProfStProfile = $('if_llm_profile_stprofile');
+    const llmProfStRefresh = $('if_llm_profile_strefresh');
+    const llmStProfileHint = $('if_llm_stprofile_hint');
+    const llmCmRows = el.querySelectorAll('[data-if-llm-cm]');
 
     if (llmMethod) llmMethod.value = settings.llm?.defaultMethod ?? 'direct';
     if (llmInjection) llmInjection.value = settings.llm?.injectionStyle ?? 'compact';
@@ -3164,9 +3179,67 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         }
     }
 
+    // Connection profiles saved in SillyTavern's own Connection Manager.
+    // Only id and name are read; credentials stay on the host, which is the
+    // point of this method — ST performs the request with its own settings.
+    function readStConnectionProfiles() {
+        try {
+            const ctx = getChatContext?.() ?? null;
+            const list = ctx?.extensionSettings?.connectionManager?.profiles;
+            return Array.isArray(list) ? list : null;
+        } catch {
+            return null;
+        }
+    }
+
+    function refreshStConnectionProfiles(selectedId) {
+        if (!llmProfStProfile) return;
+        const wanted = selectedId ?? llmProfStProfile.value ?? '';
+        const profiles = readStConnectionProfiles();
+
+        if (profiles === null) {
+            llmProfStProfile.innerHTML = '<option value="">-- unavailable --</option>';
+            if (llmStProfileHint) {
+                showResult(llmStProfileHint, 'SillyTavern did not expose its Connection Manager profiles. Use ST generateRaw or Direct fetch instead.', true);
+            }
+            return;
+        }
+
+        const options = profiles
+            .filter(p => p && p.id)
+            .map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name || p.id)}</option>`)
+            .join('');
+        llmProfStProfile.innerHTML = '<option value="">-- none --</option>' + options;
+        // Keep a stored id selected even if it is gone, so saving does not
+        // silently repoint the profile at someone else's connection.
+        const stillThere = profiles.some(p => p?.id === wanted);
+        llmProfStProfile.value = stillThere ? wanted : '';
+
+        if (llmStProfileHint) {
+            if (!profiles.length) {
+                showResult(llmStProfileHint, 'No connection profiles saved in SillyTavern yet. Create one in its Connection Manager first.', true);
+            } else if (wanted && !stillThere) {
+                showResult(llmStProfileHint, 'The connection profile this API profile pointed at no longer exists — pick another one.', true);
+            } else {
+                llmStProfileHint.style.display = 'none';
+            }
+        }
+    }
+
     function syncLlmFetchRows() {
-        const show = llmProfMethod?.value === 'direct_fetch';
-        llmFetchRows.forEach(row => row.style.display = show ? '' : 'none');
+        const method = llmProfMethod?.value;
+        const showFetch = method === 'direct_fetch';
+        llmFetchRows.forEach(row => row.style.display = showFetch ? '' : 'none');
+        const showCm = method === 'connection_manager';
+        llmCmRows.forEach(row => {
+            // The hint line manages its own visibility via showResult.
+            if (row.id === 'if_llm_stprofile_hint') {
+                if (!showCm) row.style.display = 'none';
+                return;
+            }
+            row.style.display = showCm ? '' : 'none';
+        });
+        if (showCm) refreshStConnectionProfiles();
     }
 
     if (llmMethod) llmMethod.addEventListener('change', () => { settings.llm.defaultMethod = llmMethod.value; save(); });
@@ -3184,6 +3257,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             if (llmProfModel) llmProfModel.value = '';
             if (llmProfTemp) llmProfTemp.value = '0.7';
             if (llmProfMaxTok) llmProfMaxTok.value = '4096';
+            if (llmProfStProfile) llmProfStProfile.value = '';
             syncLlmFetchRows();
             return;
         }
@@ -3194,6 +3268,12 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         if (llmProfModel) llmProfModel.value = profile.model ?? '';
         if (llmProfTemp) llmProfTemp.value = String(profile.temperature ?? 0.7);
         if (llmProfMaxTok) llmProfMaxTok.value = String(profile.maxTokens ?? 4096);
+        // Populate before syncLlmFetchRows so the refresh keeps this id.
+        if (llmProfStProfile && profile.method === 'connection_manager') {
+            refreshStConnectionProfiles(profile.stProfileId ?? '');
+        } else if (llmProfStProfile) {
+            llmProfStProfile.value = profile.stProfileId ?? '';
+        }
         syncLlmFetchRows();
     }
 
@@ -3204,6 +3284,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     });
     if (llmProfNew) llmProfNew.addEventListener('click', () => { llmProfSel.value = ''; populateLlmProfileForm(null); });
     if (llmProfMethod) llmProfMethod.addEventListener('change', syncLlmFetchRows);
+    if (llmProfStRefresh) llmProfStRefresh.addEventListener('click', () => refreshStConnectionProfiles());
 
     if (llmProfDel) llmProfDel.addEventListener('click', () => {
         if (!activeLlmProfileId) return;
@@ -3228,10 +3309,19 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         if (!Array.isArray(settings.llm.apiProfiles)) settings.llm.apiProfiles = [];
         const name = llmProfName?.value?.trim();
         if (!name) { showResult(llmResult, 'Profile name is required', true); return; }
+        const method = llmProfMethod?.value ?? 'generateRaw';
+        const stProfileId = llmProfStProfile?.value ?? '';
+        // Saving Connection Manager without a target would fall back to
+        // generateRaw at request time, silently using a different model.
+        if (method === 'connection_manager' && !stProfileId) {
+            showResult(llmResult, 'Pick a SillyTavern connection profile, or switch the method to ST generateRaw.', true);
+            return;
+        }
         const profile = {
             id: activeLlmProfileId || (crypto.randomUUID ? crypto.randomUUID() : 'ap_' + Date.now()),
             name,
-            method: llmProfMethod?.value ?? 'generateRaw',
+            method,
+            stProfileId,
             baseUrl: llmProfUrl?.value?.trim() ?? '',
             apiKey: llmProfKey?.value ?? '',
             model: llmProfModel?.value?.trim() ?? '',
