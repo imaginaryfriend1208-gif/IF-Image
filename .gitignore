@@ -20,3 +20,4 @@ st_chatu8_*.json
 
 # Claude Code agent worktrees — local only
 .claude/
+PLAN-CHAT-PLACE-LLM.html
