@@ -355,8 +355,15 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 </div>
                 <div class="if-image-result" id="if_a1111_result"></div>
 
-                <!-- D9: per-checkpoint profile editor. Shown once a checkpoint
-                     is selected above; nothing is stored until "Save profile". -->
+                <!-- D14: the profile editor is rarely used, so it stays
+                     collapsed behind this toggle. Editing from the saved
+                     list below also expands it. -->
+                <div class="if-image-row">
+                    <button id="if_cp_editor_toggle" class="menu_button" style="display:none;">Create / edit profile…</button>
+                </div>
+
+                <!-- D9: per-checkpoint profile editor. Expanded via the toggle
+                     above; nothing is stored until "Save profile". -->
                 <div id="if_a1111_cp_editor" class="if-image-cp-editor" style="display:none;">
                     <h3>Checkpoint profile</h3>
                     <div class="if-image-note" id="if_cp_status"></div>
@@ -1353,6 +1360,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     // "Save profile"; rows are keyed by checkpoint title and used by
     // compile()/mergeParams exactly as before.
     const cpEditor = $('if_a1111_cp_editor');
+    const cpEditorToggle = $('if_cp_editor_toggle');
     const cpStatus = $('if_cp_status');
     const cpName = $('if_cp_name');
     const cpProfile = $('if_cp_profile');
@@ -1399,9 +1407,13 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     // D14: which saved profile the editor form currently edits. null = a new
     // draft for the selected checkpoint ("Save profile" creates a new row).
     let cpEditingId = settings.backends.a1111.activeProfileId || null;
+    // The editor is rarely used, so it stays collapsed until the user asks
+    // for it (toggle button or a list row's Edit). Not persisted.
+    let cpEditorOpen = false;
 
     /** Re-render editor + saved-profile list. The editor shows the row being
-     *  edited (cpEditingId) or a fresh suggestion for the selected checkpoint. */
+     *  edited (cpEditingId) or a fresh suggestion for the selected checkpoint,
+     *  and only while cpEditorOpen (collapsed behind the toggle otherwise). */
     function syncCheckpointProfileEditor() {
         if (!cpEditor) return;
         const profiles = settings.backends.a1111.checkpointProfiles ?? {};
@@ -1409,7 +1421,11 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             ? profiles[cpEditingId] : null;
         if (!editing) cpEditingId = null;
         const title = editing?.checkpoint || settings.backends.a1111.checkpoint || '';
-        if (!title) {
+        if (cpEditorToggle) {
+            cpEditorToggle.style.display = title ? '' : 'none';
+            cpEditorToggle.textContent = cpEditorOpen ? 'Hide profile editor' : 'Create / edit profile…';
+        }
+        if (!title || !cpEditorOpen) {
             cpEditor.style.display = 'none';
         } else {
             cpEditor.style.display = '';
@@ -1469,7 +1485,9 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             item.querySelector('[data-cp-use]')?.addEventListener('click', () => setActiveProfile(id));
             item.querySelector('[data-cp-edit]')?.addEventListener('click', () => {
                 cpEditingId = id;
+                cpEditorOpen = true; // Edit from the list always expands the editor
                 syncCheckpointProfileEditor();
+                cpEditor?.scrollIntoView({ block: 'nearest' });
             });
             item.querySelector('[data-cp-del]')?.addEventListener('click', () => deleteCheckpointProfile(id));
         });
@@ -1478,7 +1496,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     function deleteCheckpointProfile(id) {
         delete settings.backends.a1111.checkpointProfiles[id];
         if (settings.backends.a1111.activeProfileId === id) settings.backends.a1111.activeProfileId = '';
-        if (cpEditingId === id) cpEditingId = null;
+        if (cpEditingId === id) { cpEditingId = null; cpEditorOpen = false; }
         save();
         syncActiveProfileSelect();
         syncCheckpointProfileEditor();
@@ -1493,6 +1511,13 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             if (m) max = Math.max(max, Number(m[1]));
         }
         return `cp${max + 1}`;
+    }
+
+    if (cpEditorToggle) {
+        cpEditorToggle.addEventListener('click', () => {
+            cpEditorOpen = !cpEditorOpen;
+            syncCheckpointProfileEditor();
+        });
     }
 
     if (cpEditor) {
@@ -1542,6 +1567,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 settings.backends.a1111.activeProfileId = id;
             }
             save();
+            cpEditorOpen = false; // collapse after a successful save
             syncActiveProfileSelect();
             syncCheckpointProfileEditor();
             syncTestGenVisibility();
