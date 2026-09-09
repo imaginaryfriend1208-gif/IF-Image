@@ -265,10 +265,15 @@ function attachClickBehavior(el, { onSingleClick, onDoubleClick } = {}) {
 /**
  * Swap a slot to the succeeded image frame. Wires the 300ms click/dblclick
  * disambiguation: single click opens a lightbox, double click regenerates.
- * Also adds a hover overlay with explicit View/Regen/Delete buttons (Phase
- * C10) — each stopPropagation()s so it never also triggers the frame's own
- * click/dblclick handlers. Buttons are only rendered for actions the caller
- * actually supplies. The caller owns the object URL's lifetime (create/revoke).
+ * Also adds an always-visible toolbar ABOVE the image with the explicit
+ * View/Regen/Repro/Edit/Delete buttons (C10, reworked in D13: the old
+ * absolute-positioned hover overlay had no positioned frame ancestor, so it
+ * covered the whole message block and blocked the host's edit-message
+ * buttons; a normal-flow toolbar also works on touch screens where hover
+ * does not exist). Each button stopPropagation()s so it never also triggers
+ * the frame's own click/dblclick handlers. Buttons are only rendered for
+ * actions the caller actually supplies. The caller owns the object URL's
+ * lifetime (create/revoke).
  * @param {{onSingleClick?: () => void, onDoubleClick?: () => void,
  *           onView?: () => void, onRegen?: () => void, onDelete?: () => void}} actions
  */
@@ -281,31 +286,31 @@ export function renderImageFrame(slot, doc, objectUrl, actions = {}) {
     const img = doc.createElement('img');
     img.src = objectUrl;
     img.alt = 'Generated image';
-    frame.appendChild(img);
 
-    const overlayActions = [
+    const toolbarActions = [
         ['View', actions.onView],
         ['Regen', actions.onRegen],
         ['Repro', actions.onRepro], // D2: regenerate with the record's seed
         ['Edit', actions.onEdit],   // D4: edit prompt/params, then generate
         ['Delete', actions.onDelete],
     ].filter(([, handler]) => typeof handler === 'function');
-    if (overlayActions.length) {
-        const overlay = doc.createElement('div');
-        overlay.className = 'if-image-frame-overlay';
-        for (const [label, handler] of overlayActions) {
+    if (toolbarActions.length) {
+        const toolbar = doc.createElement('div');
+        toolbar.className = 'ifimg-toolbar';
+        for (const [label, handler] of toolbarActions) {
             const btn = doc.createElement('button');
             btn.type = 'button';
-            btn.className = `menu_button ifimg-overlay-${label.toLowerCase()}`;
+            btn.className = `menu_button ifimg-tb-${label.toLowerCase()}`;
             btn.textContent = label;
             btn.addEventListener('click', (event) => {
                 event.stopPropagation();
                 handler();
             });
-            overlay.appendChild(btn);
+            toolbar.appendChild(btn);
         }
-        frame.appendChild(overlay);
+        frame.appendChild(toolbar);
     }
+    frame.appendChild(img);
 
     slot.appendChild(frame);
     attachClickBehavior(frame, actions);

@@ -280,27 +280,25 @@
     display: block;
 }
 
-.if-image-frame-overlay {
-    position: absolute;
-    inset: 0;
+/* D13: action toolbar rendered in normal flow ABOVE the in-chat image.
+   Replaces the old absolute-inset hover overlay, which (with no positioned
+   frame ancestor) stretched over the whole message block, blocking the
+   host's edit-message buttons — and hover never worked on touch anyway. */
+.ifimg-toolbar {
     display: flex;
-    align-items: flex-end;
-    justify-content: center;
+    flex-wrap: wrap;
+    align-items: center;
     gap: 4px;
-    padding: 4px;
-    opacity: 0;
-    transition: opacity 0.15s;
-    background: linear-gradient(to top, rgba(0, 0, 0, 0.6), transparent 60%);
+    margin: 2px 0;
 }
 
-.ifimg-frame:hover .if-image-frame-overlay,
-.if-image-gallery-thumb:hover .if-image-frame-overlay {
-    opacity: 1;
-}
-
-.if-image-frame-overlay button {
+.ifimg-toolbar button {
     font-size: 0.75em;
-    padding: 2px 6px;
+    padding: 2px 8px;
+}
+
+.ifimg-toolbar .ifimg-tb-delete {
+    background: #552222;
 }
 
 

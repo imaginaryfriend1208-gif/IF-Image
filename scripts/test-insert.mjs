@@ -247,26 +247,29 @@ test('failed slot error message never leaks credentials passed through snapshot 
     assert.ok(!slot.textContent.includes('Basic '));
 });
 
-// ---- C10: hover overlay + regenerate chip ---------------------------------
+// ---- C10/D13: action toolbar + regenerate chip -----------------------------
 
-const overlayOf = frame => frame.childNodes.find(c => c.className === 'if-image-frame-overlay') ?? null;
-const overlayBtn = (frame, label) => overlayOf(frame)?.childNodes.find(b => b.textContent === label) ?? null;
+const toolbarOf = frame => frame.childNodes.find(c => c.className === 'ifimg-toolbar') ?? null;
+const toolbarBtn = (frame, label) => toolbarOf(frame)?.childNodes.find(b => b.textContent === label) ?? null;
 
-test('C10 overlay: View/Regen/Delete buttons render only for supplied actions', () => {
+test('D13 toolbar: View/Regen/Delete buttons render only for supplied actions, above the image', () => {
     const slot = createSlotElement(doc, { occurrence: 0, content: 'a' });
     const frame = renderImageFrame(slot, doc, 'blob:x', {
         onView: () => {}, onRegen: () => {}, onDelete: () => {},
     });
-    const overlay = overlayOf(frame);
-    assert.ok(overlay, 'overlay div present');
-    assert.deepEqual(overlay.childNodes.map(b => b.textContent), ['View', 'Regen', 'Delete']);
-    // No overlay actions supplied -> no overlay at all (pre-C10 shape preserved).
+    const toolbar = toolbarOf(frame);
+    assert.ok(toolbar, 'toolbar div present');
+    assert.deepEqual(toolbar.childNodes.map(b => b.textContent), ['View', 'Regen', 'Delete']);
+    // The toolbar precedes the image in the frame (sits above it in flow).
+    assert.ok(frame.childNodes.indexOf(toolbar) < frame.childNodes.findIndex(c => c.tagName === 'IMG'),
+        'toolbar comes before the img');
+    // No toolbar actions supplied -> no toolbar at all (pre-C10 shape preserved).
     const slot2 = createSlotElement(doc, { occurrence: 1, content: 'b' });
     const frame2 = renderImageFrame(slot2, doc, 'blob:y', { onSingleClick: () => {} });
-    assert.equal(overlayOf(frame2), null);
+    assert.equal(toolbarOf(frame2), null);
 });
 
-test('C10 overlay: View fires only onView, never regen, and stops propagation', async () => {
+test('D13 toolbar: View fires only onView, never regen, and stops propagation', async () => {
     const slot = createSlotElement(doc, { occurrence: 0, content: 'a' });
     const events = [];
     const frame = renderImageFrame(slot, doc, 'blob:x', {
@@ -276,7 +279,7 @@ test('C10 overlay: View fires only onView, never regen, and stops propagation', 
         onRegen: () => events.push('regen'),
         onDelete: () => events.push('delete'),
     });
-    const event = overlayBtn(frame, 'View').dispatch('click');
+    const event = toolbarBtn(frame, 'View').dispatch('click');
     assert.ok(event.propagationStopped, 'button click stops propagation');
     await new Promise(r => setTimeout(r, 350)); // outlive the 300ms single-click timer
     assert.deepEqual(events, ['view']);
@@ -422,13 +425,13 @@ test('D1: opening a second lightbox closes the first', () => {
     } finally { restore(); }
 });
 
-test('C10 overlay: Delete fires onDelete; caller collapses slot to a regenerate chip', () => {
+test('D13 toolbar: Delete fires onDelete; caller collapses slot to a regenerate chip', () => {
     const slot = createSlotElement(doc, { occurrence: 0, content: 'a' });
     let regenerated = 0;
     const frame = renderImageFrame(slot, doc, 'blob:x', {
         onDelete: () => renderRegenerateChip(slot, doc, () => regenerated++),
     });
-    overlayBtn(frame, 'Delete').dispatch('click');
+    toolbarBtn(frame, 'Delete').dispatch('click');
     assert.equal(slot.dataset.ifimgState, 'idle');
     assert.equal(slot.childNodes[0].className, 'ifimg-chip ifimg-chip-regenerate');
     assert.equal(slot.childNodes[0].textContent, 'Image deleted');
