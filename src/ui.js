@@ -1457,11 +1457,11 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         const disc = settings.backends.a1111.discovery ?? {};
         const numField = (key, label, value, min, max, step) =>
             `<label class="if-image-cp-inline-field">${label}
-                <input data-cpi="${key}" type="number" min="${min}" max="${max}" step="${step}" value="${value ?? ''}">
+                <input data-cpi="${key}" type="number" class="text_pole" min="${min}" max="${max}" step="${step}" value="${value ?? ''}">
             </label>`;
         const selField = (key, label, values, selected) =>
             `<label class="if-image-cp-inline-field">${label}
-                <select data-cpi="${key}">${cpOptionList(values, selected ?? '')}</select>
+                <select data-cpi="${key}" class="text_pole">${cpOptionList(values, selected ?? '')}</select>
             </label>`;
         return `<div class="if-image-cp-inline" data-cp-inline>
             ${numField('width', 'W', e.width, 256, 2048, 64)}

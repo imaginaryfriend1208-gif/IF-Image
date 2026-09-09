@@ -182,24 +182,17 @@
     color: var(--ifi-dim);
 }
 
+/* Colors come from ST's .text_pole theme styling; only sizing here. */
 .if-image-cp-inline-field input {
     width: 64px;
     min-height: 24px;
     padding: 1px 4px;
-    border-radius: 4px;
-    background: color-mix(in srgb, var(--ifi-bg) 85%, #000);
-    border: 1px solid var(--ifi-border);
-    color: var(--ifi-text);
 }
 
 .if-image-cp-inline-field select {
     max-width: 130px;
     min-height: 24px;
     padding: 1px 4px;
-    border-radius: 4px;
-    background: color-mix(in srgb, var(--ifi-bg) 85%, #000);
-    border: 1px solid var(--ifi-border);
-    color: var(--ifi-text);
 }
 
 .if-image-settings .if-image-cp-inline .menu_button {
@@ -270,6 +263,10 @@
     color: var(--ifi-dim);
 }
 
+/* D14: colors/borders/radius come from ST's theme (all controls carry
+   .text_pole, which the host themes like every native select/input) —
+   overriding them here made the dropdowns look foreign. Only layout is
+   normalized. */
 .if-image-row input[type="text"],
 .if-image-row input[type="password"],
 .if-image-row input[type="number"],
@@ -277,11 +274,6 @@
 .if-image-row textarea {
     width: 100%;
     min-height: 28px;
-    padding: 2px 6px;
-    border-radius: 4px;
-    background: color-mix(in srgb, var(--ifi-bg) 85%, #000);
-    border: 1px solid var(--ifi-border);
-    color: var(--ifi-text);
 }
 
 .if-image-radios {
