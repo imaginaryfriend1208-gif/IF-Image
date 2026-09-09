@@ -137,6 +137,12 @@
     margin-top: 6px;
 }
 
+/* D14: make the saved-profiles section stand out — bold heading and bold
+   profile names in the rows. */
+.if-image-cp-list h3 {
+    font-weight: 700;
+}
+
 .if-image-cp-item {
     display: flex;
     align-items: center;
@@ -158,6 +164,7 @@
 
 .if-image-cp-item-title {
     overflow-wrap: anywhere;
+    font-weight: 700;
 }
 
 .if-image-cp-item-sub {
