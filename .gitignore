@@ -6,18 +6,16 @@ dist/
 .DS_Store
 Thumbs.db
 
-# plans/docs — local only, never pushed to git
-BACKEND-PLAN.html
-PROMPT-SPEC.html
-PLAN-CHINH.html
-GAP-PLAN.html
-UI-RESEARCH.html
+# plans/docs — local only, never pushed to git.
+# Blanket rules: no Markdown, no HTML, no plain-text notes in the repo.
+# Only code (.js/.mjs) and manifest.json are tracked.
+*.md
+*.html
+*.txt
 research/
 docs/
-README.md
 st-chatu8/
 st_chatu8_*.json
 
 # Claude Code agent worktrees — local only
 .claude/
-PLAN-CHAT-PLACE-LLM.html
