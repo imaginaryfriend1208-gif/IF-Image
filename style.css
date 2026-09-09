@@ -413,17 +413,27 @@
 .ifimg-lightbox {
     position: fixed;
     inset: 0;
+    /* D12: explicit viewport size. In SillyTavern a fixed element sized
+       only by inset:0 computes to height 0, so the flex centering
+       collapsed and the content sat at the top edge. 100dvh tracks the
+       real visible height on mobile (URL-bar show/hide); vh is the
+       fallback for engines without dvh. */
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
     z-index: 10000;
     background: rgba(0, 0, 0, 0.85);
     display: flex;
     align-items: center;
     justify-content: center;
+    padding: 12px;
+    box-sizing: border-box;
     cursor: zoom-out;
 }
 
 .ifimg-lightbox img {
-    max-width: 90vw;
-    max-height: 84vh;
+    max-width: min(90vw, 100%);
+    max-height: 70dvh;
     object-fit: contain;
     border-radius: 6px;
 }
@@ -436,13 +446,25 @@
     align-items: center;
     gap: 8px;
     cursor: default;
-    max-width: 96vw;
+    max-width: 100%;
+    /* D12: never taller than the overlay; scroll instead of overflowing
+       off-screen on short/mobile viewports. */
+    max-height: 100%;
+    overflow-y: auto;
 }
 
 .ifimg-lb-stage {
     display: flex;
     align-items: center;
+    justify-content: center;
     gap: 8px;
+    max-width: 100%;
+    min-width: 0;
+}
+
+.ifimg-lb-stage img {
+    min-width: 0;
+    flex: 0 1 auto;
 }
 
 .ifimg-lb-prev,
@@ -456,12 +478,14 @@
     color: #ddd;
     font-size: 0.85em;
     text-align: center;
-    max-width: 90vw;
+    max-width: 100%;
     overflow-wrap: anywhere;
 }
 
 .ifimg-lb-actions {
     display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
     gap: 8px;
 }
 
