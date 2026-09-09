@@ -24,6 +24,7 @@ import { cleanupEnvelope } from './src/prompt/cleanup.js';
 import { applyReplaceRules } from './src/prompt/replace.js';
 import { PROFILES } from './src/profiles.js';
 import { createEngine } from './src/llm/engine.js';
+import { applyPlacements as injectPlacements } from './src/llm/inject.js';
 import { parseLlmReply } from './src/llm/parser.js';
 import { event_types, eventSource } from '../../../../script.js';
 import { getContext } from '../../../st-context.js';
@@ -490,29 +491,19 @@ jQuery(async () => {
         },
         applyPlacements: (placements) => {
             const ctx = getContext();
-            const chat = ctx.chat ?? [];
-            const mode = settings.generation?.mode ?? 'direct';
             const tags = settings.generation ?? {};
-            const startTag = tags.startTag ?? 'image###';
-            const endTag = tags.endTag ?? '###';
-            const touched = new Set();
-            // Inject from the end so earlier indices stay stable.
-            for (const p of [...placements].reverse()) {
-                const message = chat[p.messageId];
-                if (!message || touched.has(p.messageId)) continue;
-                const promptText = p.prompt.split(endTag).join(' ').trim();
-                const marker = mode === 'direct'
-                    ? `${startTag} ${promptText} ${endTag}`
-                    : `<ifimage>${promptText}</ifimage>`;
-                const sep = message.mes && !/\s$/.test(message.mes) ? '\n' : '';
-                message.mes = `${message.mes ?? ''}${sep}${marker}`;
-                touched.add(p.messageId);
-            }
-            try { ctx.saveChat?.(); } catch (err) { console.warn('[IF Image] saveChat after placement failed:', err?.message ?? err); }
-            for (const id of touched) {
-                eventSource.emit(event_types.MESSAGE_UPDATED, id);
-            }
-            return touched.size;
+            const { touched } = injectPlacements(placements, {
+                chat: ctx.chat ?? [],
+                mode: settings.generation?.mode ?? 'direct',
+                startTag: tags.startTag ?? 'image###',
+                endTag: tags.endTag ?? '###',
+                saveChat: () => ctx.saveChat?.(),
+                updateMessageBlock: ctx.updateMessageBlock
+                    ? (id, message) => ctx.updateMessageBlock(id, message)
+                    : undefined,
+                emit: (id) => eventSource.emit(event_types.MESSAGE_UPDATED, id),
+            });
+            return touched.length;
         },
     });
     $('#extensions_settings2').append(drawer);

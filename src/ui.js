@@ -13,6 +13,7 @@ import { getOutfitsForCharacter, getAllOutfits, saveOutfit, removeOutfit, create
 import { buildExport, validateImport, planMerge } from './storage/transfer.js';
 import { listImages, countImages, deleteImageRecord, getStorageStats, pruneImages } from './storage/images.js';
 import { parseTriggers } from './prompt/triggers.js';
+import { undoPlacements } from './llm/inject.js';
 import { assemblePrompt, resolveProfileKey } from './prompt/render.js';
 import { cleanupEnvelope } from './prompt/cleanup.js';
 import { applyReplaceRules, parseCompactRule } from './prompt/replace.js';
@@ -1067,21 +1068,16 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 return;
             }
             const ctx = getChatContext?.() ?? null;
-            const chat = ctx?.chat ?? [];
-            let count = 0;
-            for (const snap of lastPlacementSnapshots) {
-                const message = chat[snap.messageId];
-                if (!message) continue;
-                message.mes = snap.prevMes;
-                count++;
-            }
-            try { ctx?.saveChat?.(); } catch {}
             const msgUpdated = event_types?.MESSAGE_UPDATED;
-            if (msgUpdated) {
-                for (const snap of lastPlacementSnapshots) {
-                    eventSource?.emit?.(msgUpdated, snap.messageId);
-                }
-            }
+            const { restored } = undoPlacements(lastPlacementSnapshots, {
+                chat: ctx?.chat ?? [],
+                saveChat: () => ctx?.saveChat?.(),
+                updateMessageBlock: ctx?.updateMessageBlock
+                    ? (id, message) => ctx.updateMessageBlock(id, message)
+                    : undefined,
+                emit: msgUpdated ? (id) => eventSource?.emit?.(msgUpdated, id) : undefined,
+            });
+            const count = restored.length;
             planResult.textContent = `Undone ${count} placement${count !== 1 ? 's' : ''}.`;
             lastPlacementSnapshots = [];
         });
