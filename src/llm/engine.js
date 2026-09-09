@@ -3,11 +3,11 @@
 // and feeding the result into the existing compile → queue pipeline.
 
 import { createLlmClient, LlmError } from './client.js';
-import { buildContext } from './context.js';
-import { renderSystemPrompt, renderUserPrompt, renderChatPlacePrompt, DIALECT_RULES, REQUEST_PROMPT_RENDERERS } from './prompts.js';
+import { buildContext, stripRenderedArtifacts } from './context.js';
+import { renderSystemPrompt, renderUserPrompt, renderChatPlacePrompt, renderChatRewritePrompt, DIALECT_RULES, REWRITE_DIALECT_RULES, REQUEST_PROMPT_RENDERERS } from './prompts.js';
 import { parseLlmReply } from './parser.js';
 import { resolveRequestMapping } from './profiles.js';
-import { validatePlacements } from './placements.js';
+import { validatePlacements, validateRewrites } from './placements.js';
 import { resolveProfileKey } from '../prompt/render.js';
 import { PROFILES } from '../profiles.js';
 
@@ -422,7 +422,121 @@ export function createEngine({
         const parsed = parseJsonLoose(result.text);
         const placements = validatePlacements(parsed, chat, count, { onlyCharacter });
 
-        return { placements, method: result.method, elapsedMs: result.elapsedMs };
+        // Second pass: rewrite each prompt against the chat text at its
+        // anchor. Off switch: settings.llm.chatPlace.rewrite === false.
+        if (chatPlaceSettings.rewrite === false || !placements.length) {
+            return { placements, method: result.method, elapsedMs: result.elapsedMs, rewritten: false };
+        }
+
+        const rewriteResult = await rewritePlacements(placements, {
+            chat,
+            settings,
+            dialectRules,
+            dialectKey,
+            charBlock,
+            personaBlock,
+            signal,
+        });
+
+        return {
+            placements: rewriteResult.placements,
+            method: result.method,
+            elapsedMs: result.elapsedMs,
+            rewritten: rewriteResult.rewritten,
+            rewriteChanged: rewriteResult.changed,
+            rewriteElapsedMs: rewriteResult.elapsedMs,
+            rewriteError: rewriteResult.error,
+        };
+    }
+
+    /**
+     * chat_rewrite: revise planned prompts against the chat text around each
+     * anchor. One call for all placements.
+     *
+     * This pass is strictly an improvement step: any failure short of an
+     * abort returns the input placements unchanged with rewritten:false and
+     * the reason in .error, so a broken rewrite never costs the user their
+     * planned images. Aborts propagate, matching planChatImages.
+     *
+     * @returns {Promise<{ placements: Array<object>, rewritten: boolean, changed: number, elapsedMs: number, error?: string }>}
+     */
+    async function rewritePlacements(placements, {
+        chat, settings, dialectRules, dialectKey, charBlock, personaBlock, signal,
+    } = {}) {
+        const rewriteRules = REWRITE_DIALECT_RULES[dialectKey] ?? REWRITE_DIALECT_RULES.anima;
+
+        // One item per placement: the message at the anchor plus its
+        // immediate neighbours, so the LLM sees how the moment is set up
+        // and what it leads into.
+        const items = placements.map((p, index) => {
+            const from = Math.max(0, p.messageId - 1);
+            const to = Math.min(chat.length - 1, p.messageId + 1);
+            const excerptParts = [];
+            for (let i = from; i <= to; i++) {
+                const m = chat[i];
+                if (!m || m.is_system) continue;
+                const body = stripRenderedArtifacts(m.mes ?? m.content ?? '');
+                if (!body) continue;
+                const role = m.role === 'user' ? 'User' : 'Character';
+                const marker = i === p.messageId ? ' <- the illustrated message' : '';
+                excerptParts.push(`${role}${marker}: ${body}`);
+            }
+            return [
+                `### ITEM ${index}`,
+                'CHAT EXCERPT:',
+                excerptParts.join('\n') || '(no readable text)',
+                '',
+                `DRAFT PROMPT: ${p.prompt}`,
+            ].join('\n');
+        });
+
+        const systemPrompt = renderChatRewritePrompt({
+            count: placements.length,
+            dialect_rules: dialectRules,
+            rewrite_rules: rewriteRules,
+            character_cards: charBlock,
+            persona_block: personaBlock,
+        });
+        const userPrompt = `Rewrite these ${placements.length} prompts against their chat excerpts.\n\n${items.join('\n\n')}`;
+
+        // chat_rewrite → chat_place → image_gen → global default.
+        const profileId = resolveRequestMapping(settings, 'chat_rewrite').apiProfile?.id
+            ?? resolveRequestMapping(settings, 'chat_place').apiProfile?.id
+            ?? resolveRequestMapping(settings, 'image_gen').apiProfile?.id
+            ?? settings.llm?.defaultApiProfileId
+            ?? '';
+
+        try {
+            const result = await client.request({
+                type: 'chat_rewrite',
+                systemPrompt,
+                userPrompt,
+                profileId,
+                signal,
+            });
+            const parsed = parseJsonLoose(result.text);
+            const merged = validateRewrites(parsed, placements);
+            if (!parsed) {
+                console.warn('[IF Image] chat_rewrite reply was not parseable JSON; keeping the planned prompts.');
+                return {
+                    placements, rewritten: false, changed: 0,
+                    elapsedMs: result.elapsedMs, error: 'reply was not valid JSON',
+                };
+            }
+            return {
+                placements: merged.placements,
+                rewritten: true,
+                changed: merged.changed,
+                elapsedMs: result.elapsedMs,
+            };
+        } catch (err) {
+            if (err?.code === 'ABORTED' || err?.name === 'AbortError' || signal?.aborted) throw err;
+            console.warn('[IF Image] chat_rewrite failed, keeping the planned prompts:', err?.message ?? err);
+            return {
+                placements, rewritten: false, changed: 0,
+                elapsedMs: 0, error: err?.message ?? String(err),
+            };
+        }
     }
 
     return {

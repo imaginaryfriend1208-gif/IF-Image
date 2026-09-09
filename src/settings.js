@@ -63,6 +63,11 @@ export const defaultSettings = {
             count: 3,
             onlyCharacter: true,
             maxChatWindow: 40,
+            // Second LLM pass: rewrite each planned prompt against the chat
+            // text around its anchor, so the prompt matches what actually
+            // happens there instead of the roster defaults. One extra call
+            // for all N images; failures fall back to the raw prompts.
+            rewrite: true,
         },
     },
     generation: {

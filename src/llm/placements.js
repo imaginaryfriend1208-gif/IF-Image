@@ -136,3 +136,53 @@ export function validatePlacements(parsed, chat, count, { onlyCharacter = true }
     }
     return out;
 }
+
+/**
+ * Merge a chat_rewrite reply back onto the planned placements.
+ *
+ * The rewrite pass may only change prompt/negative/size. messageId, order,
+ * and array length are invariant: an entry the LLM skipped, mangled, or
+ * indexed out of range leaves its placement untouched, so a bad rewrite
+ * reply degrades to the original plan instead of losing images.
+ *
+ * @param {object} parsed - raw parsed JSON from the rewrite call
+ * @param {Array<{ messageId: number, prompt: string, negative?: string, width?: number, height?: number }>} placements
+ * @returns {{ placements: Array<object>, changed: number }}
+ */
+export function validateRewrites(parsed, placements) {
+    const base = Array.isArray(placements) ? placements : [];
+    const out = base.map(p => ({ ...p }));
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.images)) {
+        return { placements: out, changed: 0 };
+    }
+
+    const seen = new Set();
+    let changed = 0;
+
+    for (const img of parsed.images) {
+        if (!img || typeof img !== 'object') continue;
+        const idx = Number(img.index);
+        if (!Number.isInteger(idx) || idx < 0 || idx >= out.length) continue;
+        // One rewrite per index; a repeated index is ignored.
+        if (seen.has(idx)) continue;
+
+        const prompt = typeof img.prompt === 'string' ? img.prompt.trim() : '';
+        if (!prompt) continue; // keep the original prompt
+
+        seen.add(idx);
+        const target = out[idx];
+        if (prompt !== target.prompt) changed++;
+        target.prompt = prompt;
+
+        if (typeof img.negative === 'string' && img.negative.trim()) {
+            target.negative = img.negative.trim();
+        }
+        const size = parseSize(img.size);
+        if (size) {
+            target.width = size.width;
+            target.height = size.height;
+        }
+    }
+
+    return { placements: out, changed };
+}

@@ -207,6 +207,92 @@ export function renderChatPlacePrompt({ count, dialect_rules, character_cards, p
     return parts.join('\n');
 }
 
+// ------------------------------------------------------------------
+// chat_rewrite: second pass over chat_place output. DIALECT_RULES above
+// describes how to WRITE a prompt from scratch; these describe how to
+// EDIT an existing one against the chat text at its anchor — what to
+// keep, what to pull in from the scene, what to drop when the roster
+// defaults contradict what the chat actually says.
+// ------------------------------------------------------------------
+
+/** @type {Record<string, string>} */
+export const REWRITE_DIALECT_RULES = {
+    krea: `REWRITE RULES FOR KREA (prose):
+- Keep the result one flowing paragraph of natural English, 35-90 words.
+- ADD concrete detail the chat states: posture, action, clothing actually worn now, weather, time of day, light source, objects held or nearby.
+- REMOVE any detail that the chat contradicts (e.g. the prompt says "black dress" but the chat says she already changed into a robe).
+- Do NOT convert the prose into comma-separated tags.
+- Do not invent events the chat never mentions.`,
+
+    anima: `REWRITE RULES FOR ANIMA (ordered tags + short caption):
+- Keep the structure: count tag first, then character tags, then a caption under 20 words, then detail tags.
+- ADD scene tags the chat supports: pose, expression, lighting, setting, held objects.
+- REPLACE clothing/appearance tags the chat contradicts; keep identity tags (hair colour, eye colour, species) unless the chat explicitly changes them.
+- Keep spaces, not underscores, between tag words.`,
+
+    illus: `REWRITE RULES FOR ILLUSTRIOUS (booru tags):
+- Keep the danbooru tag format, comma-separated, spaces not underscores.
+- Keep the quality prefix and the character count tag exactly as they are.
+- ADD scene tags the chat supports: pose, expression, camera angle, lighting, background, objects.
+- DROP tags the chat contradicts, especially outfit tags carried over from the character card.
+- Never merge tags into prose.`,
+};
+
+/**
+ * Render the system prompt for the chat_rewrite request type: a second
+ * pass that edits already-planned prompts against their chat context.
+ * @param {{
+ *   count: number,
+ *   dialect_rules?: string,
+ *   rewrite_rules?: string,
+ *   character_cards?: string,
+ *   persona_block?: string,
+ * }} slots
+ * @returns {string}
+ */
+export function renderChatRewritePrompt({ count, dialect_rules, rewrite_rules, character_cards, persona_block } = {}) {
+    const parts = [
+        `You revise image prompts so they match the chat text they illustrate. You are given ${count} numbered items. Each item has an excerpt of the conversation and a draft prompt written before that excerpt was consulted.`,
+        '',
+        'YOUR TASK: for each item, rewrite the draft prompt so it depicts what the excerpt actually describes.',
+        '',
+        'RULES:',
+        '- Keep the same subject and the same character identity as the draft.',
+        '- Add details the excerpt supports. Remove details the excerpt contradicts.',
+        '- Do not invent events, characters, or settings the excerpt never mentions.',
+        '- If a draft is already correct, return it unchanged.',
+        `- Return exactly ${count} items, one per input index, in the same order.`,
+        '- Reply with EXACTLY ONE JSON object, no prose, no code fences:',
+        '',
+        '{"images":[{"index":0,"prompt":"...","negative":"...","size":"..."}]}',
+        '',
+        '"index" must be the item number you were given. "negative" and "size" are optional; omit them to keep the draft values.',
+        '',
+    ];
+
+    if (rewrite_rules) {
+        parts.push(rewrite_rules);
+        parts.push('');
+    }
+    if (dialect_rules) {
+        parts.push('THE PROMPT DIALECT (the rewritten prompt must still obey this):');
+        parts.push(dialect_rules);
+        parts.push('');
+    }
+    if (character_cards) {
+        parts.push('ACTIVE CHARACTERS (identity tags — keep these unless the excerpt changes them):');
+        parts.push(character_cards);
+        parts.push('');
+    }
+    if (persona_block) {
+        parts.push('USER PERSONA:');
+        parts.push(persona_block);
+        parts.push('');
+    }
+
+    return parts.join('\n');
+}
+
 /** type -> system prompt renderer, for the non-image_gen request types. */
 export const REQUEST_PROMPT_RENDERERS = {
     char_design: renderCharDesignPrompt,
@@ -215,4 +301,5 @@ export const REQUEST_PROMPT_RENDERERS = {
     translation: renderTranslationPrompt,
     persona_gen: renderPersonaGenPrompt,
     chat_place: renderChatPlacePrompt,
+    chat_rewrite: renderChatRewritePrompt,
 };

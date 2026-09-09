@@ -134,6 +134,12 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 </label>
             </div>
             <div class="if-image-row">
+                <label class="if-image-check">
+                    <input type="checkbox" id="if_plan_rewrite" checked> Rewrite prompts against the chat (one extra LLM call)
+                </label>
+            </div>
+            <div class="if-image-note">With rewrite on, a second pass edits each planned prompt to match the messages around it — adding what the scene describes and dropping character-card details the scene contradicts.</div>
+            <div class="if-image-row">
                 <button id="if_plan_run" class="menu_button" style="flex:1;">Plan & place images</button>
                 <button id="if_plan_undo" class="menu_button" title="Undo last placement">Undo</button>
             </div>
@@ -964,6 +970,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     // ================= Chat Placement Wiring =================
     const planCount = $('if_plan_count');
     const planCharOnly = $('if_plan_charonly');
+    const planRewrite = $('if_plan_rewrite');
     const planRun = $('if_plan_run');
     const planUndo = $('if_plan_undo');
     const planResult = $('if_plan_result');
@@ -987,6 +994,13 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             save();
         });
     }
+    if (planRewrite) {
+        planRewrite.checked = chatPlace.rewrite !== false;
+        planRewrite.addEventListener('change', () => {
+            chatPlace.rewrite = planRewrite.checked;
+            save();
+        });
+    }
     if (planRun) {
         planRun.addEventListener('click', async () => {
             if (typeof planChatImages !== 'function') {
@@ -1000,7 +1014,10 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             planAbort?.abort();
             planAbort = new AbortController();
             try {
-                const { placements, method, elapsedMs } = await planChatImages(count, { signal: planAbort.signal });
+                const {
+                    placements, method, elapsedMs,
+                    rewritten, rewriteChanged, rewriteElapsedMs, rewriteError,
+                } = await planChatImages(count, { signal: planAbort.signal });
                 if (!placements.length) {
                     planResult.textContent = `LLM returned no valid placements (${method}, ${(elapsedMs / 1000).toFixed(1)}s). Check LLM settings or try again.`;
                     return;
@@ -1015,6 +1032,13 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 const skipped = placements.length - touched;
                 let msg = `Placed ${touched} image${touched !== 1 ? 's' : ''} (${method}, ${(elapsedMs / 1000).toFixed(1)}s)`;
                 if (skipped > 0) msg += ` — ${skipped} skipped (duplicate position)`;
+                // Report the rewrite pass honestly: silence would read as
+                // success even when the second call failed.
+                if (rewriteError) {
+                    msg += ` — rewrite pass FAILED (${rewriteError}); the planned prompts were used unchanged`;
+                } else if (rewritten) {
+                    msg += ` — rewrite pass changed ${rewriteChanged ?? 0} prompt${rewriteChanged === 1 ? '' : 's'} (+${((rewriteElapsedMs ?? 0) / 1000).toFixed(1)}s)`;
+                }
                 planResult.textContent = msg;
             } catch (err) {
                 if (err?.code === 'ABORTED' || err?.name === 'AbortError') return;

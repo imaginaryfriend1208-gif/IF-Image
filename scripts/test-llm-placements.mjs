@@ -4,7 +4,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseSize, resolveAnchor, validatePlacements } from '../src/llm/placements.js';
+import { parseSize, resolveAnchor, validatePlacements, validateRewrites } from '../src/llm/placements.js';
 import { createEngine } from '../src/llm/engine.js';
 
 // ------------------------------------------------------------------
@@ -167,21 +167,141 @@ test('validatePlacements: onlyCharacter=false includes user messages', () => {
 });
 
 // ------------------------------------------------------------------
+// validateRewrites
+// ------------------------------------------------------------------
+const planned = [
+    { messageId: 3, prompt: 'draft one', negative: 'lowres' },
+    { messageId: 5, prompt: 'draft two', negative: '' },
+];
+
+test('validateRewrites: merges by index and reports the changed count', () => {
+    const parsed = {
+        images: [
+            { index: 0, prompt: 'revised one' },
+            { index: 1, prompt: 'revised two' },
+        ],
+    };
+    const { placements, changed } = validateRewrites(parsed, planned);
+    assert.equal(changed, 2);
+    assert.equal(placements[0].prompt, 'revised one');
+    assert.equal(placements[1].prompt, 'revised two');
+    // messageId is never touched by the rewrite pass.
+    assert.equal(placements[0].messageId, 3);
+    assert.equal(placements[1].messageId, 5);
+});
+
+test('validateRewrites: an unchanged prompt is not counted as changed', () => {
+    const parsed = { images: [{ index: 0, prompt: 'draft one' }] };
+    const { changed } = validateRewrites(parsed, planned);
+    assert.equal(changed, 0);
+});
+
+test('validateRewrites: missing/blank prompt keeps the original', () => {
+    const parsed = {
+        images: [
+            { index: 0, prompt: '   ' },
+            { index: 1 },
+        ],
+    };
+    const { placements, changed } = validateRewrites(parsed, planned);
+    assert.equal(changed, 0);
+    assert.equal(placements[0].prompt, 'draft one');
+    assert.equal(placements[1].prompt, 'draft two');
+});
+
+test('validateRewrites: out-of-range and non-integer indices are ignored', () => {
+    const parsed = {
+        images: [
+            { index: 9, prompt: 'nope' },
+            { index: -1, prompt: 'nope' },
+            { index: 'x', prompt: 'nope' },
+            { index: 1.5, prompt: 'nope' },
+        ],
+    };
+    const { placements, changed } = validateRewrites(parsed, planned);
+    assert.equal(changed, 0);
+    assert.equal(placements[0].prompt, 'draft one');
+    assert.equal(placements[1].prompt, 'draft two');
+});
+
+test('validateRewrites: a repeated index only applies once', () => {
+    const parsed = {
+        images: [
+            { index: 0, prompt: 'first wins' },
+            { index: 0, prompt: 'second ignored' },
+        ],
+    };
+    const { placements, changed } = validateRewrites(parsed, planned);
+    assert.equal(changed, 1);
+    assert.equal(placements[0].prompt, 'first wins');
+});
+
+test('validateRewrites: applies negative and size when valid', () => {
+    const parsed = {
+        images: [{ index: 0, prompt: 'revised', negative: 'bad hands', size: '1216x832' }],
+    };
+    const { placements } = validateRewrites(parsed, planned);
+    assert.equal(placements[0].negative, 'bad hands');
+    assert.equal(placements[0].width, 1216);
+    assert.equal(placements[0].height, 832);
+});
+
+test('validateRewrites: an invalid size leaves the dimensions alone', () => {
+    const sized = [{ messageId: 3, prompt: 'draft', width: 832, height: 1216 }];
+    const parsed = { images: [{ index: 0, prompt: 'revised', size: 'huge' }] };
+    const { placements } = validateRewrites(parsed, sized);
+    assert.equal(placements[0].width, 832);
+    assert.equal(placements[0].height, 1216);
+});
+
+test('validateRewrites: garbage reply returns the plan untouched', () => {
+    for (const bad of [null, {}, { images: 'nope' }, { images: [null, 3, 'x'] }]) {
+        const { placements, changed } = validateRewrites(bad, planned);
+        assert.equal(changed, 0);
+        assert.equal(placements.length, 2);
+        assert.equal(placements[0].prompt, 'draft one');
+        assert.equal(placements[1].prompt, 'draft two');
+    }
+});
+
+test('validateRewrites: does not mutate the input placements', () => {
+    const input = [{ messageId: 3, prompt: 'draft one' }];
+    validateRewrites({ images: [{ index: 0, prompt: 'revised' }] }, input);
+    assert.equal(input[0].prompt, 'draft one');
+});
+
+// ------------------------------------------------------------------
 // engine.planChatImages (mocked client)
 // ------------------------------------------------------------------
-function makeEngine({ llmReply, settings = {}, chat = [], roster = {} } = {}) {
+// `llmReply` answers the chat_place call. `rewriteReply` answers the
+// chat_rewrite call; pass a function to throw or vary the reply. Rewrite
+// defaults to OFF here so the pre-rewrite tests below keep asserting a
+// single call — the rewrite tests opt in explicitly.
+function makeEngine({ llmReply, rewriteReply, settings = {}, chat = [], roster = {}, rewrite = false } = {}) {
     const calls = [];
     const client = {
         async request({ type, systemPrompt, userPrompt, profileId, signal }) {
             calls.push({ type, systemPrompt, userPrompt, profileId, signal });
+            if (type === 'chat_rewrite') {
+                const reply = typeof rewriteReply === 'function' ? rewriteReply() : rewriteReply;
+                return { text: reply ?? '', method: 'mock', elapsedMs: 17 };
+            }
             return { text: llmReply, method: 'mock', elapsedMs: 42 };
         },
     };
+    const baseLlm = {
+        defaultApiProfileId: 'prof_1',
+        chatPlace: { count: 3, onlyCharacter: true, maxChatWindow: 40, rewrite },
+    };
+    const overrideLlm = settings.llm;
+    const mergedLlm = overrideLlm
+        ? { ...overrideLlm, chatPlace: { rewrite, ...(overrideLlm.chatPlace ?? {}) } }
+        : baseLlm;
     const engine = createEngine({
         getSettings: () => ({
-            llm: { defaultApiProfileId: 'prof_1', chatPlace: { count: 3, onlyCharacter: true, maxChatWindow: 40 } },
             generation: { profile: 'anima' },
             ...settings,
+            llm: mergedLlm,
         }),
         getContext: () => ({ chat }),
         roster: () => roster,
@@ -255,6 +375,141 @@ test('planChatImages: onlyCharacter=false from settings', async () => {
     const result = await engine.planChatImages(1);
     assert.equal(result.placements.length, 1);
     assert.equal(result.placements[0].messageId, 0);
+});
+
+// ---- rewrite pass -------------------------------------------------
+const rewriteChat = [
+    { role: 'user', mes: 'What are you wearing?' },
+    { role: 'char', mes: 'She pulled the red coat tighter and closed the door behind her.' },
+    { role: 'user', mes: 'It is cold out.' },
+];
+const planReply = JSON.stringify({
+    images: [{ anchor: 'closed the door behind her', prompt: '1girl, black dress, closing door' }],
+});
+
+test('planChatImages: rewrite pass revises the planned prompt', async () => {
+    const { engine, calls } = makeEngine({
+        chat: rewriteChat,
+        llmReply: planReply,
+        rewrite: true,
+        rewriteReply: JSON.stringify({
+            images: [{ index: 0, prompt: '1girl, red coat, closing door, cold weather' }],
+        }),
+    });
+    const result = await engine.planChatImages(1);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1].type, 'chat_rewrite');
+    assert.match(calls[1].systemPrompt, /revise image prompts/i);
+    // The excerpt and the draft both reach the rewrite call.
+    assert.match(calls[1].userPrompt, /red coat tighter/);
+    assert.match(calls[1].userPrompt, /DRAFT PROMPT: 1girl, black dress/);
+    assert.equal(result.placements[0].prompt, '1girl, red coat, closing door, cold weather');
+    assert.equal(result.placements[0].messageId, 1);
+    assert.equal(result.rewritten, true);
+    assert.equal(result.rewriteChanged, 1);
+});
+
+test('planChatImages: rewrite off makes exactly one call', async () => {
+    const { engine, calls } = makeEngine({
+        chat: rewriteChat,
+        llmReply: planReply,
+        rewrite: false,
+        rewriteReply: JSON.stringify({ images: [{ index: 0, prompt: 'should never be used' }] }),
+    });
+    const result = await engine.planChatImages(1);
+    assert.equal(calls.length, 1);
+    assert.equal(result.placements[0].prompt, '1girl, black dress, closing door');
+    assert.equal(result.rewritten, false);
+});
+
+test('planChatImages: a failing rewrite keeps the planned prompts and reports the error', async () => {
+    const { engine, calls } = makeEngine({
+        chat: rewriteChat,
+        llmReply: planReply,
+        rewrite: true,
+        rewriteReply: () => { throw new Error('rewrite endpoint down'); },
+    });
+    const result = await engine.planChatImages(1);
+    assert.equal(calls.length, 2);
+    assert.equal(result.placements.length, 1);
+    assert.equal(result.placements[0].prompt, '1girl, black dress, closing door');
+    assert.equal(result.rewritten, false);
+    assert.match(result.rewriteError, /rewrite endpoint down/);
+});
+
+test('planChatImages: an unparseable rewrite reply keeps the planned prompts', async () => {
+    const { engine } = makeEngine({
+        chat: rewriteChat,
+        llmReply: planReply,
+        rewrite: true,
+        rewriteReply: 'not json at all',
+    });
+    const result = await engine.planChatImages(1);
+    assert.equal(result.placements[0].prompt, '1girl, black dress, closing door');
+    assert.equal(result.rewritten, false);
+    assert.match(result.rewriteError, /not valid JSON/);
+});
+
+test('planChatImages: no placements means no rewrite call', async () => {
+    const { engine, calls } = makeEngine({
+        chat: rewriteChat,
+        llmReply: JSON.stringify({ images: [{ anchor: 'totally wrong anchor', prompt: 'x' }] }),
+        rewrite: true,
+        rewriteReply: JSON.stringify({ images: [] }),
+    });
+    const result = await engine.planChatImages(1);
+    assert.equal(calls.length, 1);
+    assert.deepEqual(result.placements, []);
+    assert.equal(result.rewritten, false);
+});
+
+test('planChatImages: rewrite uses the chat_rewrite mapping when present', async () => {
+    const { engine, calls } = makeEngine({
+        chat: rewriteChat,
+        llmReply: planReply,
+        rewrite: true,
+        rewriteReply: JSON.stringify({ images: [{ index: 0, prompt: 'revised' }] }),
+        settings: {
+            llm: {
+                defaultApiProfileId: 'prof_default',
+                requestMapping: {
+                    chat_place: { apiProfileId: 'prof_chatplace' },
+                    chat_rewrite: { apiProfileId: 'prof_rewrite' },
+                },
+                apiProfiles: [
+                    { id: 'prof_default', name: 'Default' },
+                    { id: 'prof_chatplace', name: 'ChatPlace' },
+                    { id: 'prof_rewrite', name: 'Rewrite' },
+                ],
+                chatPlace: { count: 3, onlyCharacter: true, maxChatWindow: 40, rewrite: true },
+            },
+        },
+    });
+    await engine.planChatImages(1);
+    assert.equal(calls[0].profileId, 'prof_chatplace');
+    assert.equal(calls[1].profileId, 'prof_rewrite');
+});
+
+test('planChatImages: rewrite falls back to the chat_place profile', async () => {
+    const { engine, calls } = makeEngine({
+        chat: rewriteChat,
+        llmReply: planReply,
+        rewrite: true,
+        rewriteReply: JSON.stringify({ images: [{ index: 0, prompt: 'revised' }] }),
+        settings: {
+            llm: {
+                defaultApiProfileId: 'prof_default',
+                requestMapping: { chat_place: { apiProfileId: 'prof_chatplace' } },
+                apiProfiles: [
+                    { id: 'prof_default', name: 'Default' },
+                    { id: 'prof_chatplace', name: 'ChatPlace' },
+                ],
+                chatPlace: { count: 3, onlyCharacter: true, maxChatWindow: 40, rewrite: true },
+            },
+        },
+    });
+    await engine.planChatImages(1);
+    assert.equal(calls[1].profileId, 'prof_chatplace');
 });
 
 test('planChatImages: chat_place mapping wins over image_gen fallback', async () => {
