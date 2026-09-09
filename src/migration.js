@@ -199,6 +199,38 @@ export const migrators = [
         s.backends.a1111.checkpoint = unified;
         s.generation.checkpoint = unified;
     },
+
+    // 9 -> 10 (D14): checkpointProfiles becomes keyed by a unique PROFILE ID
+    // instead of the checkpoint title, so one checkpoint can hold multiple
+    // saved profiles. Each row gains `checkpoint` (the title it targets) and
+    // `name` (display label, defaults to the title). activeProfileId replaces
+    // the checkpoint selection as "which saved profile drives generation";
+    // the checkpoint keys stay in sync with the active row (executor
+    // compatibility). Old rows migrate 1:1 (id = 'cp1', 'cp2', ...).
+    (s) => {
+        if (!s.backends) s.backends = {};
+        if (!s.backends.a1111 || typeof s.backends.a1111 !== 'object') {
+            s.backends.a1111 = { baseUrl: '', auth: '', checkpoint: '' };
+        }
+        const a1111 = s.backends.a1111;
+        const old = a1111.checkpointProfiles && typeof a1111.checkpointProfiles === 'object'
+            ? a1111.checkpointProfiles : {};
+        const next = {};
+        let activeProfileId = '';
+        let n = 0;
+        for (const [title, entry] of Object.entries(old)) {
+            if (!entry || typeof entry !== 'object') continue;
+            // Already-migrated rows (carry their own checkpoint) keep it.
+            const checkpoint = typeof entry.checkpoint === 'string' && entry.checkpoint ? entry.checkpoint : title;
+            const name = typeof entry.name === 'string' && entry.name ? entry.name : checkpoint;
+            n += 1;
+            const id = `cp${n}`;
+            next[id] = { ...entry, checkpoint, name };
+            if (!activeProfileId && checkpoint === a1111.checkpoint) activeProfileId = id;
+        }
+        a1111.checkpointProfiles = next;
+        a1111.activeProfileId = activeProfileId;
+    },
 ];
 
 /** Current schema version = number of migrators applied from zero. */

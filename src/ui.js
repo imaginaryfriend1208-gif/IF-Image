@@ -5,7 +5,7 @@
 
 import { NAI_MODELS } from './backends/nai.js';
 import { resolveCheckpoint } from './backends/a1111.js';
-import { resolveCheckpointProfile, mergeParams, suggestCheckpointProfile, normalizeCheckpointProfile, SIZE_PRESETS, matchSizePreset } from './backends/checkpoint-profiles.js';
+import { getActiveProfile, mergeParams, suggestCheckpointProfile, normalizeCheckpointProfile, SIZE_PRESETS, matchSizePreset } from './backends/checkpoint-profiles.js';
 import { PROFILES, PROFILE_KEYS } from './profiles.js';
 import { getAllCharacters, saveCharacter, removeCharacter, createDefaultCharacter, emptyBooruDetail, applyCharMigrations } from './storage/chars.js';
 import { getAllPersonas, savePersona, removePersona, getAllStyles, saveStyle, removeStyle, createDefaultPersona, createDefaultStyle, getReplaceRules, saveReplaceRules } from './storage/presets.js';
@@ -117,32 +117,9 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             <div class="if-image-note">How an Assist/Full-mode LLM &lt;size&gt; hint interacts with sizes from markers and profiles. Auto and Force behave identically today.</div>
 
             <hr class="if-image-sep"/>
-            <h3>Generation Params</h3>
-            <div class="if-image-note">Overrides the profile default for markers using this profile. Blank = inherit the profile default; a marker's own "size"/"steps"/"cfg" JSON trigger wins over this.</div>
-            <div class="if-image-row">
-                <label for="if_params_profile">Profile</label>
-                <select id="if_params_profile" class="text_pole">
-                    ${PROFILE_KEYS.map(k => `<option value="${k}">${PROFILES[k].label}</option>`).join('')}
-                </select>
-            </div>
-            <div class="if-image-grid">
-                <div class="if-image-row">
-                    <label for="if_params_width">Width</label>
-                    <input id="if_params_width" type="number" min="256" max="2048" step="64" class="text_pole">
-                </div>
-                <div class="if-image-row">
-                    <label for="if_params_height">Height</label>
-                    <input id="if_params_height" type="number" min="256" max="2048" step="64" class="text_pole">
-                </div>
-                <div class="if-image-row">
-                    <label for="if_params_steps">Steps</label>
-                    <input id="if_params_steps" type="number" min="1" max="150" class="text_pole">
-                </div>
-                <div class="if-image-row">
-                    <label for="if_params_cfg">CFG</label>
-                    <input id="if_params_cfg" type="number" min="0" max="30" step="0.5" class="text_pole">
-                </div>
-            </div>
+            <h3>Active Profile</h3>
+            <div class="if-image-note">Generation uses the checkpoint profile marked active in Settings → Stable Diffusion — one set of params for everything. Marker JSON triggers and LLM hints still override individual values per image.</div>
+            <div id="if_main_active_profile" class="if-image-active-summary">No active profile.</div>
         </div>
 
         <!-- ============ LLM TAB ============ -->
@@ -181,7 +158,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                         <option value="">-- New Profile --</option>
                     </select>
                     <button id="if_llm_profile_new" class="menu_button">+ New</button>
-                    <button id="if_llm_profile_del" class="menu_button" style="background:#552222;">Delete</button>
+                    <button id="if_llm_profile_del" class="menu_button if-image-btn-danger">Delete</button>
                 </div>
             </div>
             <div class="if-image-row">
@@ -429,7 +406,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                     <div class="if-image-row">
                         <div style="display:flex; gap:6px;">
                             <button id="if_cp_save" class="menu_button">Save profile</button>
-                            <button id="if_cp_delete" class="menu_button" style="background:#552222; display:none;">Delete profile</button>
+                            <button id="if_cp_delete" class="menu_button if-image-btn-danger" style="display:none;">Delete profile</button>
                         </div>
                     </div>
                     <div class="if-image-note">A saved profile ties this checkpoint to a prompt style and generation params. Chat markers using the checkpoint pick them up automatically (marker JSON and LLM hints still override). Without a saved profile the default profile and its Generation Params apply.</div>
@@ -567,7 +544,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
 
             <div style="display:flex; gap:6px; margin-top:4px;">
                 <button id="if_char_save" class="menu_button" style="flex:1;">Save Character</button>
-                <button id="if_char_del" class="menu_button" style="background:#552222;">Delete</button>
+                <button id="if_char_del" class="menu_button if-image-btn-danger">Delete</button>
             </div>
             <div id="if_char_status" class="if-image-result"></div>
         </div>
@@ -582,7 +559,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                         <option value="">-- New Persona --</option>
                     </select>
                     <button id="if_per_new" class="menu_button">+ New</button>
-                    <button id="if_per_del" class="menu_button" style="background:#552222;">Delete</button>
+                    <button id="if_per_del" class="menu_button if-image-btn-danger">Delete</button>
                 </div>
             </div>
             <div class="if-image-row">
@@ -634,7 +611,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                         <option value="">-- New Style --</option>
                     </select>
                     <button id="if_style_new" class="menu_button">+ New</button>
-                    <button id="if_style_del" class="menu_button" style="background:#552222;">Delete</button>
+                    <button id="if_style_del" class="menu_button if-image-btn-danger">Delete</button>
                 </div>
             </div>
             <div class="if-image-row">
@@ -744,7 +721,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             <div class="if-image-row" style="gap:6px; flex-wrap:wrap;">
                 <button id="if_gallery_prune_old" class="menu_button">Delete older than</button>
                 <input id="if_gallery_prune_days" type="number" class="text_pole textarea_compact" min="1" step="1" value="30" style="width:64px;"> days
-                <button id="if_gallery_prune_chat" class="menu_button" style="background:#552222;">Delete all in this chat</button>
+                <button id="if_gallery_prune_chat" class="menu_button if-image-btn-danger">Delete all in this chat</button>
             </div>
             <div class="if-image-row" style="gap:6px; flex-wrap:wrap;" title="0 disables each knob. Applied on load (TTL/size) and on new saves (JPEG).">
                 <label>TTL days <input id="if_cache_ttl" type="number" class="text_pole textarea_compact" min="0" step="1" style="width:64px;"></label>
@@ -766,8 +743,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 <div class="if-image-row" style="gap:6px;">
                     <a id="if_gallery_detail_download" class="menu_button" download="if-image.png">Download</a>
                     <button id="if_gallery_detail_regen" class="menu_button">Regenerate</button>
-                    <button id="if_gallery_detail_repro" class="menu_button" title="Regenerate with this image's exact seed">Repro</button>
-                    <button id="if_gallery_detail_delete" class="menu_button" style="background:#552222;">Delete</button>
+                    <button id="if_gallery_detail_delete" class="menu_button if-image-btn-danger">Delete</button>
                     <button id="if_gallery_detail_close" class="menu_button">Close</button>
                 </div>
                 <div class="if-image-row">
@@ -1297,32 +1273,33 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
 
     a1111Checkpoint.addEventListener('change', () => setA1111Checkpoint(a1111Checkpoint.value));
 
-    // ---- Active checkpoint profile select ----------------------------------
-    // One entry per SAVED checkpoint profile (checkpointProfiles rows). The
-    // selected entry is the profile driving all generation: choosing one
-    // selects its checkpoint through the same D11 single writer. The current
-    // checkpoint may have no saved row yet — then the select shows a
-    // "(no saved profile)" entry for it so the state stays visible.
+    // ---- D14: active checkpoint profile select ------------------------------
+    // One entry per SAVED profile (checkpointProfiles rows, keyed by unique
+    // profile id — one checkpoint may hold several profiles). The selected
+    // row is the one profile driving all generation (compile/executor/Test
+    // Generate). Selecting it also stamps the legacy checkpoint keys so
+    // every older consumer keeps working.
     const activeProfileSelect = $('if_active_profile');
+    function cpRows() {
+        const profiles = settings.backends.a1111.checkpointProfiles ?? {};
+        return Object.entries(profiles).filter(([, e]) => e && typeof e === 'object');
+    }
+    function cpRowLabel(id, e) {
+        return e.name && e.name !== e.checkpoint ? `${e.name} — ${e.checkpoint}` : (e.name || e.checkpoint || id);
+    }
     function syncActiveProfileSelect() {
         if (!activeProfileSelect) return;
-        const profiles = settings.backends.a1111.checkpointProfiles ?? {};
-        const titles = Object.keys(profiles).filter(t => profiles[t] && typeof profiles[t] === 'object');
-        const stored = settings.backends.a1111.checkpoint || '';
-        const options = titles.map(t => {
-            const label = profiles[t].name ? `${profiles[t].name} — ${t}` : t;
-            return `<option value="${escapeHtml(t)}">${escapeHtml(label)}</option>`;
-        });
-        if (stored && !titles.includes(stored)) {
-            options.push(`<option value="${escapeHtml(stored)}">${escapeHtml(stored)} (no saved profile)</option>`);
-        }
+        const rows = cpRows();
+        const activeId = settings.backends.a1111.activeProfileId || '';
+        const options = rows.map(([id, e]) =>
+            `<option value="${escapeHtml(id)}">${escapeHtml(cpRowLabel(id, e))}</option>`);
         activeProfileSelect.innerHTML = options.length
             ? '<option value="">-- none active --</option>' + options.join('')
             : '<option value="">-- no saved profiles yet --</option>';
-        activeProfileSelect.value = stored;
+        activeProfileSelect.value = rows.some(([id]) => id === activeId) ? activeId : '';
     }
     if (activeProfileSelect) {
-        activeProfileSelect.addEventListener('change', () => setA1111Checkpoint(activeProfileSelect.value));
+        activeProfileSelect.addEventListener('change', () => setActiveProfile(activeProfileSelect.value));
     }
     syncActiveProfileSelect();
     // Seed the Backends checkpoint select from the persisted discovery too.
@@ -1330,16 +1307,36 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         fillCheckpointSelect(a1111Checkpoint, a1111Models, settings.backends.a1111.checkpoint, '-- select a checkpoint --');
     }
 
-    // ---- D11: single writer for the A1111 checkpoint selection ------------
-    // The Main tab (generation.checkpoint) and the Backends tab
-    // (backends.a1111.checkpoint) used to be two independent keys with
-    // separate selects, so a checkpoint (and its saved profile) picked in
-    // Backends did not drive marker generation when Main pointed elsewhere.
-    // Every UI path now goes through this function: both keys always hold
-    // the same title, and every dependent control re-syncs.
+    // ---- D14 single writer: which saved profile drives generation ----------
+    // Also keeps the legacy checkpoint keys (D11 unification; executor
+    // fallback) in step with the active row's checkpoint.
+    function setActiveProfile(id) {
+        const profiles = settings.backends.a1111.checkpointProfiles ?? {};
+        const row = profiles[id] && typeof profiles[id] === 'object' ? profiles[id] : null;
+        settings.backends.a1111.activeProfileId = row ? id : '';
+        const title = row?.checkpoint || settings.backends.a1111.checkpoint || '';
+        settings.backends.a1111.checkpoint = title;
+        settings.generation.checkpoint = title;
+        if (row) cpEditingId = id; // editor follows the active profile
+        save();
+        syncActiveProfileSelect();
+        fillCheckpointSelect(a1111Checkpoint, a1111Models, title,
+            a1111Models.length ? '-- select a checkpoint --' : '-- Refresh Models to load --');
+        syncCheckpointProfileEditor();
+        syncTestGenVisibility();
+    }
+
+    // ---- D11: single writer for the raw A1111 checkpoint selection --------
+    // Picking a checkpoint in the discovery select chooses which checkpoint
+    // the EDITOR below targets (and the legacy keys). It starts a NEW
+    // profile draft; an active profile pointing at another checkpoint is
+    // deselected so compile() never silently uses a different model.
     function setA1111Checkpoint(title) {
         settings.backends.a1111.checkpoint = title;
         settings.generation.checkpoint = title;
+        const activeRow = settings.backends.a1111.checkpointProfiles?.[settings.backends.a1111.activeProfileId || ''];
+        if (activeRow && activeRow.checkpoint !== title) settings.backends.a1111.activeProfileId = '';
+        cpEditingId = null; // editor shows a fresh draft for this checkpoint
         save();
         syncActiveProfileSelect();
         fillCheckpointSelect(a1111Checkpoint, a1111Models, title,
@@ -1399,47 +1396,53 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         cpSize.value = matchSizePreset(cpWidth.value, cpHeight.value);
     }
 
-    /** Re-render editor + saved-profile list for the current checkpoint. */
+    // D14: which saved profile the editor form currently edits. null = a new
+    // draft for the selected checkpoint ("Save profile" creates a new row).
+    let cpEditingId = settings.backends.a1111.activeProfileId || null;
+
+    /** Re-render editor + saved-profile list. The editor shows the row being
+     *  edited (cpEditingId) or a fresh suggestion for the selected checkpoint. */
     function syncCheckpointProfileEditor() {
         if (!cpEditor) return;
-        const title = settings.backends.a1111.checkpoint || '';
         const profiles = settings.backends.a1111.checkpointProfiles ?? {};
+        const editing = cpEditingId && profiles[cpEditingId] && typeof profiles[cpEditingId] === 'object'
+            ? profiles[cpEditingId] : null;
+        if (!editing) cpEditingId = null;
+        const title = editing?.checkpoint || settings.backends.a1111.checkpoint || '';
         if (!title) {
             cpEditor.style.display = 'none';
         } else {
             cpEditor.style.display = '';
-            const saved = profiles[title];
-            if (saved && typeof saved === 'object' && PROFILES[saved.profile]) {
-                cpFillForm(saved);
-                cpStatus.textContent = `Saved profile for "${title}".`;
+            if (editing && PROFILES[editing.profile]) {
+                cpFillForm(editing);
+                cpStatus.textContent = `Editing "${cpRowLabel(cpEditingId, editing)}" — Save updates it; change the name to keep both.`;
                 cpDelete.style.display = '';
             } else {
                 const disc = settings.backends.a1111.discovery ?? {};
                 const model = (disc.models ?? []).find(m => m?.title === title) ?? { title };
                 const fallbackKey = settings.generation.profile || settings.backends.comfy.profile || 'anima';
                 const suggestion = suggestCheckpointProfile(model, fallbackKey, { samplers: disc.samplers, schedulers: disc.schedulers });
-                cpFillForm(suggestion);
+                cpFillForm({ ...suggestion, name: '' });
                 cpStatus.textContent = suggestion.source === 'server'
-                    ? `No profile saved for "${title}" yet — values below are the server's suggestion for this checkpoint.`
-                    : `No profile saved for "${title}" yet — values below come from the ${PROFILES[suggestion.profile].label} defaults.`;
+                    ? `New profile for "${title}" — values below are the server's suggestion for this checkpoint.`
+                    : `New profile for "${title}" — values below come from the ${PROFILES[suggestion.profile].label} defaults.`;
                 cpDelete.style.display = 'none';
             }
         }
         renderCheckpointProfileList();
     }
 
-    /** Compact list of every saved profile with a "use" + "delete" action. */
+    /** List of every saved profile with Use (activate) / Edit / Delete. */
     function renderCheckpointProfileList() {
         if (!cpList) return;
-        const profiles = settings.backends.a1111.checkpointProfiles ?? {};
-        const titles = Object.keys(profiles).filter(t => profiles[t] && typeof profiles[t] === 'object');
-        if (!titles.length) {
+        const rows = cpRows();
+        if (!rows.length) {
             cpList.innerHTML = '';
             return;
         }
         const discovered = new Set((settings.backends.a1111.discovery?.models ?? []).map(m => m?.title).filter(Boolean));
-        cpList.innerHTML = '<h3>Saved checkpoint profiles</h3>' + titles.map((title, i) => {
-            const e = profiles[title];
+        const activeId = settings.backends.a1111.activeProfileId || '';
+        cpList.innerHTML = '<h3>Saved checkpoint profiles</h3>' + rows.map(([id, e]) => {
             const style = PROFILES[e.profile]?.label ?? e.profile;
             const size = e.width && e.height ? `${e.width}×${e.height}` : 'size: inherit';
             const bits = [style, size];
@@ -1447,33 +1450,49 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             if (e.cfg !== undefined) bits.push(`cfg ${e.cfg}`);
             if (e.sampler) bits.push(e.sampler);
             if (e.scheduler) bits.push(e.scheduler);
-            const stale = discovered.size > 0 && !discovered.has(title);
-            const active = title === settings.backends.a1111.checkpoint;
-            const heading = e.name ? `${e.name} — ${title}` : title;
-            return `<div class="if-image-cp-item${active ? ' active' : ''}" data-cp-item="${i}">
+            const stale = discovered.size > 0 && !discovered.has(e.checkpoint);
+            const active = id === activeId;
+            return `<div class="if-image-cp-item${active ? ' active' : ''}" data-cp-item="${escapeHtml(id)}">
                 <div class="if-image-cp-item-main">
-                    <div class="if-image-cp-item-title">${escapeHtml(heading)}${stale ? ' <span class="if-image-cp-badge">not on server</span>' : ''}</div>
+                    <div class="if-image-cp-item-title">${escapeHtml(cpRowLabel(id, e))}${stale ? ' <span class="if-image-cp-badge">not on server</span>' : ''}</div>
                     <div class="if-image-cp-item-sub">${escapeHtml(bits.join(' · '))}</div>
                 </div>
                 <div class="if-image-cp-item-actions">
-                    ${stale ? '' : '<button data-cp-use class="menu_button" title="Select this checkpoint">Use</button>'}
-                    <button data-cp-del class="menu_button" title="Delete this profile">Delete</button>
+                    ${stale ? '' : '<button data-cp-use class="menu_button" title="Make this the active profile">Use</button>'}
+                    <button data-cp-edit class="menu_button" title="Load this profile into the editor">Edit</button>
+                    <button data-cp-del class="menu_button if-image-btn-danger" title="Delete this profile">Delete</button>
                 </div>
             </div>`;
         }).join('');
         cpList.querySelectorAll('[data-cp-item]').forEach(item => {
-            const title = titles[Number(item.dataset.cpItem)];
-            item.querySelector('[data-cp-use]')?.addEventListener('click', () => setA1111Checkpoint(title));
-            item.querySelector('[data-cp-del]')?.addEventListener('click', () => deleteCheckpointProfile(title));
+            const id = item.dataset.cpItem;
+            item.querySelector('[data-cp-use]')?.addEventListener('click', () => setActiveProfile(id));
+            item.querySelector('[data-cp-edit]')?.addEventListener('click', () => {
+                cpEditingId = id;
+                syncCheckpointProfileEditor();
+            });
+            item.querySelector('[data-cp-del]')?.addEventListener('click', () => deleteCheckpointProfile(id));
         });
     }
 
-    function deleteCheckpointProfile(title) {
-        delete settings.backends.a1111.checkpointProfiles[title];
+    function deleteCheckpointProfile(id) {
+        delete settings.backends.a1111.checkpointProfiles[id];
+        if (settings.backends.a1111.activeProfileId === id) settings.backends.a1111.activeProfileId = '';
+        if (cpEditingId === id) cpEditingId = null;
         save();
         syncActiveProfileSelect();
         syncCheckpointProfileEditor();
         syncTestGenVisibility();
+    }
+
+    /** Unique row id: cp<n> above every existing numeric suffix. */
+    function nextProfileId(profiles) {
+        let max = 0;
+        for (const key of Object.keys(profiles)) {
+            const m = /^cp(\d+)$/.exec(key);
+            if (m) max = Math.max(max, Number(m[1]));
+        }
+        return `cp${max + 1}`;
     }
 
     if (cpEditor) {
@@ -1486,10 +1505,17 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         cpWidth.addEventListener('input', cpSyncSizePreset);
         cpHeight.addEventListener('input', cpSyncSizePreset);
         cpSave.addEventListener('click', () => {
-            const title = settings.backends.a1111.checkpoint || '';
+            if (!settings.backends.a1111.checkpointProfiles || typeof settings.backends.a1111.checkpointProfiles !== 'object') {
+                settings.backends.a1111.checkpointProfiles = {};
+            }
+            const profiles = settings.backends.a1111.checkpointProfiles;
+            const editing = cpEditingId ? profiles[cpEditingId] : null;
+            const title = editing?.checkpoint || settings.backends.a1111.checkpoint || '';
             if (!title) return;
             const row = normalizeCheckpointProfile({
                 profile: cpProfile.value,
+                checkpoint: title,
+                name: cpName?.value ?? '',
                 width: cpWidth.value,
                 height: cpHeight.value,
                 steps: cpSteps.value,
@@ -1501,23 +1527,28 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 showResult(a1111Result, 'Pick a prompt style before saving the profile.', true);
                 return;
             }
-            // Display name is UI metadata, added after normalization so the
-            // pure model stays unchanged; blank = fall back to the title.
-            const displayName = cpName?.value?.trim();
-            if (displayName) row.name = displayName;
-            if (!settings.backends.a1111.checkpointProfiles || typeof settings.backends.a1111.checkpointProfiles !== 'object') {
-                settings.backends.a1111.checkpointProfiles = {};
+            // Same id + same name = update in place. A CHANGED name on an
+            // existing row saves a NEW profile instead of overwriting, so
+            // one checkpoint accumulates as many variants as needed.
+            let id = cpEditingId;
+            if (!id || !profiles[id] || profiles[id].name !== row.name) {
+                id = nextProfileId(profiles);
             }
-            settings.backends.a1111.checkpointProfiles[title] = row;
+            profiles[id] = row;
+            cpEditingId = id;
+            // First saved profile (or re-save of the active one) becomes /
+            // stays active so "save then generate" just works.
+            if (!settings.backends.a1111.activeProfileId || settings.backends.a1111.activeProfileId === id) {
+                settings.backends.a1111.activeProfileId = id;
+            }
             save();
             syncActiveProfileSelect();
             syncCheckpointProfileEditor();
             syncTestGenVisibility();
-            showResult(a1111Result, `Profile saved for "${title}".`, false);
+            showResult(a1111Result, `Profile "${row.name}" saved for "${title}".`, false);
         });
         cpDelete.addEventListener('click', () => {
-            const title = settings.backends.a1111.checkpoint || '';
-            if (title) deleteCheckpointProfile(title);
+            if (cpEditingId) deleteCheckpointProfile(cpEditingId);
         });
     }
     syncCheckpointProfileEditor();
@@ -1565,12 +1596,16 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         }
         const conn = currentSdConnection();
         if (conn === 'a1111') {
-            const title = settings.backends.a1111.checkpoint || '';
-            const cp = title ? resolveCheckpointProfile(settings, title) : null;
-            const profileKey = cp?.profileKey || settings.generation.profile || 'anima';
+            // D14: the ACTIVE saved profile decides checkpoint + style +
+            // params; without one, the raw checkpoint selection + fallback
+            // style apply. Mirrors compile() in index.js.
+            const active = getActiveProfile(settings);
+            const title = active?.entry.checkpoint || settings.backends.a1111.checkpoint || '';
+            const profileKey = active?.entry.profile || settings.generation.profile || 'anima';
             return {
                 backend: 'comfy', conn, profileKey, checkpointTitle: title,
-                params: mergeParams({ profileKey, checkpointTitle: title || undefined, settings }),
+                activeName: active?.entry.name || '', hasActive: !!active,
+                params: mergeParams({ profileKey, checkpointTitle: title || undefined, profileId: active?.id, settings }),
             };
         }
         const profileKey = settings.generation.profile || settings.backends.comfy.profile || 'anima';
@@ -1580,6 +1615,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     // The "uses X" note under the Test Generate heading; re-rendered whenever
     // the connection, checkpoint, or a saved profile changes.
     function syncTestGenVisibility() {
+        syncMainActiveProfile();
         if (!testUsing) return;
         const setup = effectiveTestSetup();
         const style = PROFILES[setup.profileKey]?.label ?? setup.profileKey;
@@ -1589,12 +1625,9 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             return;
         }
         if (setup.conn === 'a1111') {
-            const row = setup.checkpointTitle
-                ? settings.backends.a1111.checkpointProfiles?.[setup.checkpointTitle]
-                : null;
-            const label = row?.name || setup.checkpointTitle;
+            const label = setup.activeName || setup.checkpointTitle;
             testUsing.textContent = setup.checkpointTitle
-                ? `Uses ${label}${row ? '' : ' (no saved profile — fallback style)'} · ${style} · ${p.width}×${p.height} · ${p.steps} steps · cfg ${p.cfg}.`
+                ? `Uses ${label}${setup.hasActive ? '' : ' (no active profile — fallback style)'} · ${style} · ${p.width}×${p.height} · ${p.steps} steps · cfg ${p.cfg}.`
                 : 'No checkpoint selected — pick or save a checkpoint profile above first.';
             return;
         }
@@ -1887,7 +1920,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 <span class="if-image-log-type">${o.charId ? 'own' : 'common'}</span>
                 ${escapeHtml(o.name)}: ${escapeHtml(o.tags)}
                 <button class="ifimg-outfit-edit menu_button" data-outfit-id="${escapeHtml(o.id)}">Edit</button>
-                <button class="ifimg-outfit-del menu_button" data-outfit-id="${escapeHtml(o.id)}" style="background:#552222;">Delete</button>
+                <button class="ifimg-outfit-del menu_button if-image-btn-danger" data-outfit-id="${escapeHtml(o.id)}" >Delete</button>
             </div>`).join('');
         charOutfitsList.querySelectorAll('.ifimg-outfit-edit').forEach(btn => {
             btn.addEventListener('click', () => {
@@ -2246,7 +2279,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 <span class="if-image-log-type">${escapeHtml(r.mode)}</span>
                 "${escapeHtml(r.trigger)}" &rarr; "${escapeHtml(r.replacement ?? '')}"
                 ${r.condition ? ` [${escapeHtml(r.condition)}]` : ''}
-                <button class="ifimg-rule-del menu_button" data-idx="${i}" style="background:#552222;">Delete</button>
+                <button class="ifimg-rule-del menu_button if-image-btn-danger" data-idx="${i}" >Delete</button>
             </div>`).join('');
         replaceList.querySelectorAll('.ifimg-rule-del').forEach(btn => {
             btn.addEventListener('click', async () => {
@@ -2313,7 +2346,6 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     const galleryDetailMeta = $('if_gallery_detail_meta');
     const galleryDetailDownload = $('if_gallery_detail_download');
     const galleryDetailRegen = $('if_gallery_detail_regen');
-    const galleryDetailRepro = $('if_gallery_detail_repro');
     const galleryLockChar = $('if_gallery_lock_char');
     const galleryLockApply = $('if_gallery_lock_apply');
     const galleryDetailDelete = $('if_gallery_detail_delete');
@@ -2415,9 +2447,8 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             `<span class="k">prompt:</span> ${escapeHtml(record.prompt || '')}`,
         ].join('<br>');
         showResult(galleryDetailStatus, '', false);
-        // D2: Repro/Lock need a concrete non-random seed to be meaningful.
+        // D2: Lock needs a concrete non-random seed to be meaningful.
         const hasSeed = Number.isInteger(record.seed) && record.seed >= 0;
-        galleryDetailRepro.disabled = !hasSeed;
         galleryLockApply.disabled = !hasSeed;
         populateGalleryLockSelect();
         galleryDetail.style.display = '';
@@ -2454,24 +2485,6 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             }
         } catch (e) {
             showResult(galleryDetailStatus, e.message, true);
-        }
-    });
-
-    galleryDetailRepro.addEventListener('click', async () => {
-        if (!galleryDetailId) return;
-        const record = galleryItems.find(r => r.id === galleryDetailId);
-        if (!record || typeof regenerateImage !== 'function') return;
-        galleryDetailRepro.disabled = true;
-        showResult(galleryDetailStatus, `Reproducing with seed ${record.seed}...`, false);
-        try {
-            await regenerateImage(record, { seed: record.seed });
-            showResult(galleryDetailStatus, 'Reproduced — a new record was saved.', false);
-            galleryPage = 0;
-            await loadGalleryPage();
-        } catch (e) {
-            showResult(galleryDetailStatus, e.message, true);
-        } finally {
-            galleryDetailRepro.disabled = false;
         }
     });
 
@@ -2738,53 +2751,36 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         llmSizeEl.addEventListener('change', () => { settings.generation.llmSize = llmSizeEl.value; save(); });
     }
 
-    // ================= Main Tab: Generation Params (C0) =================
-    const paramsProfile = $('if_params_profile');
-    const paramsWidth = $('if_params_width');
-    const paramsHeight = $('if_params_height');
-    const paramsSteps = $('if_params_steps');
-    const paramsCfg = $('if_params_cfg');
-
-    function currentParamsOverride() {
-        if (!settings.generation.params) settings.generation.params = { krea2: {}, anima: {}, illustrious: {} };
-        const key = paramsProfile.value;
-        if (!settings.generation.params[key]) settings.generation.params[key] = {};
-        return settings.generation.params[key];
+    // ============ Main Tab: Active Profile summary (D14) ============
+    // Read-only mirror of what generation would use right now (same
+    // resolution as effectiveTestSetup / compile()). The old per-profile
+    // Generation Params matrix is gone — ONE active profile drives all
+    // params; generation.params stays in settings as a legacy data layer.
+    function syncMainActiveProfile() {
+        // Looked up per call (hoisted declaration; syncTestGenVisibility
+        // calls this before this section of setup code has executed).
+        const mainActiveProfile = $('if_main_active_profile');
+        if (!mainActiveProfile) return;
+        const setup = effectiveTestSetup();
+        const style = PROFILES[setup.profileKey]?.label ?? setup.profileKey;
+        const p = setup.params;
+        const paramsText = `${style} · ${p.width}×${p.height} · ${p.steps} steps · cfg ${p.cfg}`;
+        if (setup.backend === 'nai') {
+            mainActiveProfile.textContent = `NovelAI · ${paramsText}`;
+        } else if (setup.conn === 'a1111') {
+            mainActiveProfile.textContent = setup.hasActive
+                ? `${setup.activeName} · ${setup.checkpointTitle} · ${paramsText}`
+                : (setup.checkpointTitle
+                    ? `No active profile — using checkpoint ${setup.checkpointTitle} · ${paramsText}`
+                    : 'No active profile — save one in Settings → Stable Diffusion.');
+        } else {
+            const model = settings.backends.comfy.proxyModel || '';
+            mainActiveProfile.textContent = model
+                ? `Comfy proxy · ${model} · ${paramsText}`
+                : 'No proxy model selected — pick one in Settings → Stable Diffusion.';
+        }
     }
-
-    function syncParamsForm() {
-        const profile = PROFILES[paramsProfile.value];
-        const override = currentParamsOverride();
-        paramsWidth.value = override.width ?? '';
-        paramsWidth.placeholder = String(profile?.width ?? '');
-        paramsHeight.value = override.height ?? '';
-        paramsHeight.placeholder = String(profile?.height ?? '');
-        paramsSteps.value = override.steps ?? '';
-        paramsSteps.placeholder = String(profile?.steps ?? '');
-        paramsCfg.value = override.cfg ?? '';
-        paramsCfg.placeholder = String(profile?.cfg ?? '');
-    }
-    if (paramsProfile) {
-        paramsProfile.value = settings.generation.profile || 'anima';
-        syncParamsForm();
-        paramsProfile.addEventListener('change', syncParamsForm);
-
-        const bindParam = (input, key, parse) => {
-            input.addEventListener('change', () => {
-                const override = currentParamsOverride();
-                const raw = input.value.trim();
-                if (!raw) { delete override[key]; save(); return; }
-                const n = parse(raw);
-                if (!Number.isFinite(n)) { delete override[key]; save(); return; }
-                override[key] = n;
-                save();
-            });
-        };
-        bindParam(paramsWidth, 'width', Number);
-        bindParam(paramsHeight, 'height', Number);
-        bindParam(paramsSteps, 'steps', Number);
-        bindParam(paramsCfg, 'cfg', Number);
-    }
+    syncMainActiveProfile();
 
     // ================= LLM Tab Wiring =================
     const llmMethod = $('if_llm_default_method');

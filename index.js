@@ -19,7 +19,7 @@ import { getAllOutfits } from './src/storage/outfits.js';
 import { resolveActiveCharacters } from './src/prompt/binding.js';
 import { parseTriggers } from './src/prompt/triggers.js';
 import { assemblePrompt, resolveProfileKey, mergeProfileParams, applyMarkerParamOverrides, resolveLockedSeed, resolveSizeKeyword } from './src/prompt/render.js';
-import { resolveCheckpointProfile, mergeParams } from './src/backends/checkpoint-profiles.js';
+import { getActiveProfile, mergeParams } from './src/backends/checkpoint-profiles.js';
 import { cleanupEnvelope } from './src/prompt/cleanup.js';
 import { applyReplaceRules } from './src/prompt/replace.js';
 import { PROFILES } from './src/profiles.js';
@@ -164,16 +164,19 @@ jQuery(async () => {
             outfits: roster.outfits,
             onFallback: (tier, token) => notify('warning', `Character trigger "$${token}" resolved via ${tier} fallback (not active for this chat/card).`),
         });
-        // R2: with the A1111-compatible SD connection, the selected
-        // checkpoint's profile becomes the configured default (still beaten
-        // by a marker {{dialect}} override). The checkpoint itself is NEVER
-        // derived from the profile — only the reverse.
+        // R2/D14: with the A1111-compatible SD connection, the ACTIVE saved
+        // profile (Settings tab) supplies both the checkpoint title and the
+        // prompt style (still beaten by a marker {{dialect}} override). With
+        // no active profile the persisted checkpoint selection is used with
+        // the fallback prompt style. The checkpoint is NEVER derived from a
+        // profile/family name — only the reverse.
         const backendKind = defaultBackendKind();
+        const activeProfile = backendKind === 'a1111' ? getActiveProfile(settings) : null;
         const checkpointTitle = backendKind === 'a1111'
-            ? (settings.generation?.checkpoint || settings.backends.a1111.checkpoint || '')
+            ? (activeProfile?.entry.checkpoint
+                || settings.generation?.checkpoint || settings.backends.a1111.checkpoint || '')
             : '';
-        const checkpointProfile = checkpointTitle ? resolveCheckpointProfile(settings, checkpointTitle) : null;
-        const configuredProfileKey = checkpointProfile?.profileKey ?? defaultProfileKey();
+        const configuredProfileKey = activeProfile?.entry.profile ?? defaultProfileKey();
         const { profileKey } = resolveProfileKey(parsed.dialectOverride, configuredProfileKey);
         const baseProfile = PROFILES[profileKey] ?? PROFILES.anima;
         const effectiveProfile = mergeProfileParams(baseProfile, settings.generation?.params?.[profileKey]);
@@ -210,6 +213,7 @@ jQuery(async () => {
             const merged = mergeParams({
                 profileKey,
                 checkpointTitle,
+                profileId: activeProfile?.id,
                 settings,
                 markerOverrides,
             });

@@ -1,15 +1,18 @@
-// IF Image - checkpoint-profile model (Phase R1, reworked in D9). Pure
+// IF Image - checkpoint-profile model (Phase R1, reworked in D9/D14). Pure
 // functions only: no DOM, no fetch, no settings mutation — callers persist
 // the returned values.
 //
 // A "checkpoint profile" binds a DISCOVERED checkpoint title to a prompt
-// profile key (krea2/anima/illustrious) plus per-checkpoint generation
-// params (size/steps/cfg/sampler/scheduler). Rows are created ONLY when the
-// user clicks "Save profile" in the Backends tab — discovery never seeds
-// them. A profile changes prompt dialect and generation params only; the
-// checkpoint actually sent to the server is always resolved separately via
-// resolveCheckpoint() against fresh /sdapi/v1/sd-models discovery — never
-// derived from a profile/family name.
+// profile key (krea2/anima/illustrious) plus generation params (size/steps/
+// cfg/sampler/scheduler). Since D14 the map is keyed by a UNIQUE PROFILE ID
+// (not the checkpoint title), each row carries `checkpoint` (the title) and
+// a display `name`, and `backends.a1111.activeProfileId` selects the one
+// profile that drives generation — so one checkpoint can have any number of
+// saved profiles. Rows are created ONLY when the user clicks "Save profile"
+// in the Settings tab — discovery never seeds them. A profile changes prompt
+// dialect and generation params only; the checkpoint actually sent to the
+// server is always resolved separately via resolveCheckpoint() against fresh
+// /sdapi/v1/sd-models discovery — never derived from a profile/family name.
 
 import { PROFILES } from '../profiles.js';
 import { clampDim, clampSteps, clampCfg } from '../prompt/render.js';
@@ -150,17 +153,24 @@ export function suggestCheckpointProfile(model, fallbackKey, discovered = {}) {
 
 /**
  * Normalize editor form values into the persisted checkpoint-profile row
- * shape, or null when the row would be unusable (unknown profile key).
+ * shape, or null when the row would be unusable (unknown profile key or no
+ * checkpoint title — D14: a row must say which checkpoint it targets).
  * Numeric fields are clamped with the C0 policies and dropped when invalid;
- * blank sampler/scheduler are omitted (= let the server decide).
- * @param {{profile?: string, width?: unknown, height?: unknown, steps?: unknown,
+ * blank sampler/scheduler are omitted (= let the server decide); a blank
+ * display name falls back to the checkpoint title.
+ * @param {{profile?: string, checkpoint?: unknown, name?: unknown,
+ *          width?: unknown, height?: unknown, steps?: unknown,
  *          cfg?: unknown, sampler?: unknown, scheduler?: unknown}} form
- * @returns {{profile: string, width?: number, height?: number, steps?: number,
+ * @returns {{profile: string, checkpoint: string, name: string,
+ *            width?: number, height?: number, steps?: number,
  *            cfg?: number, sampler?: string, scheduler?: string} | null}
  */
 export function normalizeCheckpointProfile(form) {
     if (!form || typeof form !== 'object' || !PROFILES[form.profile]) return null;
-    const out = { profile: form.profile };
+    const checkpoint = typeof form.checkpoint === 'string' ? form.checkpoint.trim() : '';
+    if (!checkpoint) return null;
+    const name = typeof form.name === 'string' && form.name.trim() ? form.name.trim() : checkpoint;
+    const out = { profile: form.profile, checkpoint, name };
     const width = clampDim(form.width);
     const height = clampDim(form.height);
     const steps = clampSteps(form.steps);
@@ -204,36 +214,58 @@ export function alignCheckpointProfileNames(profiles, { samplers, schedulers } =
 }
 
 /**
- * Look up the checkpoint profile for a title.
+ * Look up a checkpoint-profile row by its unique profile id (D14 keying).
  * @param {object} settings live settings object (read-only here)
- * @param {string} title checkpoint title
- * @returns {{profileKey: string, overrides: object} | null}
+ * @param {string} profileId key into backends.a1111.checkpointProfiles
+ * @returns {{profileKey: string, overrides: object} | null} overrides carry
+ *   only generation params — checkpoint/name metadata is stripped.
  */
-export function resolveCheckpointProfile(settings, title) {
-    const entry = settings?.backends?.a1111?.checkpointProfiles?.[title];
+export function resolveCheckpointProfile(settings, profileId) {
+    const entry = settings?.backends?.a1111?.checkpointProfiles?.[profileId];
     if (!entry || typeof entry !== 'object') return null;
     const profileKey = PROFILES[entry.profile] ? entry.profile : null;
     if (!profileKey) return null;
-    const { profile, ...overrides } = entry;
+    const { profile, checkpoint, name, ...overrides } = entry;
     return { profileKey, overrides };
+}
+
+/**
+ * The one saved profile that drives generation (Settings → "Checkpoint
+ * profile (active)"). Null when none is selected, the row is gone, or the
+ * row is unusable (unknown prompt style / no checkpoint title).
+ * @param {object} settings live settings object (read-only here)
+ * @returns {{id: string, entry: {profile: string, checkpoint: string,
+ *            name?: string}} | null}
+ */
+export function getActiveProfile(settings) {
+    const a1111 = settings?.backends?.a1111;
+    const id = typeof a1111?.activeProfileId === 'string' ? a1111.activeProfileId : '';
+    if (!id) return null;
+    const entry = a1111?.checkpointProfiles?.[id];
+    if (!entry || typeof entry !== 'object') return null;
+    if (!PROFILES[entry.profile]) return null;
+    if (typeof entry.checkpoint !== 'string' || !entry.checkpoint) return null;
+    return { id, entry };
 }
 
 /**
  * Compute effective generation params through the full R1 precedence chain:
  *   PROFILES[profileKey]
  *   < settings.generation.params[profileKey]   (C0 per-profile overrides)
- *   < checkpointProfiles[checkpointTitle]      (per-checkpoint overrides)
+ *   < checkpointProfiles[profileId]            (saved-profile overrides)
  *   < markerOverrides                          (marker JSON size/steps/cfg)
  *   < llmOverrides                             (LLM <size> etc.)
  * Numeric values are clamped with the existing C0 policies (size [256,2048]
  * snapped to 64, steps [1,150], cfg [0,30]); width/height in marker/LLM
  * overrides apply only as a pair (aspect-ratio protection, same as C0).
- * @param {{profileKey: string, checkpointTitle?: string, settings: object,
- *          markerOverrides?: object, llmOverrides?: object}} args
+ * D14: the saved-profile layer is looked up by `profileId`; `checkpointTitle`
+ * is only stamped into params.checkpoint (the real server model title).
+ * @param {{profileKey: string, checkpointTitle?: string, profileId?: string,
+ *          settings: object, markerOverrides?: object, llmOverrides?: object}} args
  * @returns {{width: number, height: number, steps: number, cfg: number,
  *            sampler?: string, scheduler?: string, checkpoint?: string}}
  */
-export function mergeParams({ profileKey, checkpointTitle, settings, markerOverrides, llmOverrides }) {
+export function mergeParams({ profileKey, checkpointTitle, profileId, settings, markerOverrides, llmOverrides }) {
     const profile = PROFILES[profileKey] ?? PROFILES.anima;
     const params = {
         width: profile.width,
@@ -264,10 +296,10 @@ export function mergeParams({ profileKey, checkpointTitle, settings, markerOverr
         if (Number.isInteger(layer.seed) && layer.seed >= -1) params.seed = layer.seed;
     };
     applyLayer(settings?.generation?.params?.[profileKey], false);
-    if (checkpointTitle) {
-        applyLayer(settings?.backends?.a1111?.checkpointProfiles?.[checkpointTitle], false);
-        params.checkpoint = checkpointTitle;
+    if (profileId) {
+        applyLayer(settings?.backends?.a1111?.checkpointProfiles?.[profileId], false);
     }
+    if (checkpointTitle) params.checkpoint = checkpointTitle;
     applyLayer(markerOverrides, true);
     applyLayer(llmOverrides, true);
     return params;

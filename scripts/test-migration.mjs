@@ -124,6 +124,7 @@ test('v2 → v3 adds a1111 backend and comfy.connection without touching legacy 
         discovery: { at: 0, models: [], samplers: [], schedulers: [] },
         checkpointProfiles: {},
         transport: 'st-relay',
+        activeProfileId: '',
     });
     // Connection defaults to the legacy proxy.
     assert.equal(v2.backends.comfy.connection, 'legacy_proxy');
@@ -165,6 +166,7 @@ test('v0.1.0 legacy settings receive the a1111 section through full migration', 
         discovery: { at: 0, models: [], samplers: [], schedulers: [] },
         checkpointProfiles: {},
         transport: 'st-relay',
+        activeProfileId: '',
     });
     assert.equal(legacy.backends.comfy.connection, 'legacy_proxy');
     assert.equal(legacy.backends.comfy.username, 'u');
@@ -181,6 +183,7 @@ test('missing/corrupt comfy section is created without throwing', () => {
         discovery: { at: 0, models: [], samplers: [], schedulers: [] },
         checkpointProfiles: {},
         transport: 'st-relay',
+        activeProfileId: '',
     });
 });
 
@@ -468,6 +471,59 @@ test('v8 → v9 unifies backends.a1111.checkpoint and generation.checkpoint (bac
     runMigrations(bare);
     assert.equal(bare.backends.a1111.checkpoint, '');
     assert.equal(bare.generation.checkpoint, '');
+    assert.equal(runMigrations(bare), false);
+});
+
+// --- Test 29 (v9 → v10, D14): checkpointProfiles re-keyed by profile id ---
+test('v9 → v10 re-keys checkpointProfiles to ids, stamps checkpoint/name, derives activeProfileId', () => {
+    const v9 = {
+        settingsVersion: 9,
+        backends: { a1111: {
+            baseUrl: 'https://h', auth: 'k', checkpoint: 'Model B', transport: 'st-relay',
+            checkpointProfiles: {
+                'Model A': { profile: 'anima', steps: 20 },
+                'Model B': { profile: 'krea2', cfg: 4.5 },
+            },
+        } },
+        generation: { checkpoint: 'Model B' },
+    };
+    runMigrations(v9);
+    const rows = v9.backends.a1111.checkpointProfiles;
+    assert.deepEqual(Object.keys(rows), ['cp1', 'cp2']);
+    // Old title becomes the row's checkpoint; name defaults to the checkpoint.
+    assert.deepEqual(rows.cp1, { profile: 'anima', steps: 20, checkpoint: 'Model A', name: 'Model A' });
+    assert.deepEqual(rows.cp2, { profile: 'krea2', cfg: 4.5, checkpoint: 'Model B', name: 'Model B' });
+    // The row matching the unified checkpoint becomes active.
+    assert.equal(v9.backends.a1111.activeProfileId, 'cp2');
+    // The checkpoint keys themselves are untouched.
+    assert.equal(v9.backends.a1111.checkpoint, 'Model B');
+    assert.equal(v9.generation.checkpoint, 'Model B');
+});
+
+// --- Test 30 (v9 → v10): no matching row / empty map / corrupt entries ---
+test('v9 → v10 with no checkpoint match leaves activeProfileId empty; tolerates junk entries', () => {
+    const noMatch = {
+        settingsVersion: 9,
+        backends: { a1111: { checkpoint: 'Elsewhere', checkpointProfiles: { 'Model A': { profile: 'anima' } } } },
+    };
+    runMigrations(noMatch);
+    assert.equal(noMatch.backends.a1111.activeProfileId, '');
+    assert.deepEqual(noMatch.backends.a1111.checkpointProfiles.cp1, { profile: 'anima', checkpoint: 'Model A', name: 'Model A' });
+
+    // Non-object entries are dropped; empty map stays empty.
+    const junk = {
+        settingsVersion: 9,
+        backends: { a1111: { checkpoint: '', checkpointProfiles: { X: 'not-an-object', Y: null } } },
+    };
+    runMigrations(junk);
+    assert.deepEqual(junk.backends.a1111.checkpointProfiles, {});
+    assert.equal(junk.backends.a1111.activeProfileId, '');
+
+    // Bare object: structure stamped without throwing; idempotent re-run.
+    const bare = { settingsVersion: 9 };
+    runMigrations(bare);
+    assert.deepEqual(bare.backends.a1111.checkpointProfiles, {});
+    assert.equal(bare.backends.a1111.activeProfileId, '');
     assert.equal(runMigrations(bare), false);
 });
 

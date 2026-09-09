@@ -574,8 +574,8 @@ test('R3: cancellation is NOT persisted', async () => {
     assert.equal(saved.length, 0, 'cancelled tasks leave no record');
 });
 
-// ---- D2: Repro (record seed) vs Regen (seed -1) ------------------------------
-test('D2: restored frame exposes onRepro with the record seed; Regen stays -1', async () => {
+// ---- D14: Repro removed — restored frames expose Regen only ------------------
+test('D14: restored frame has no onRepro; Regen randomizes and keeps the record checkpoint', async () => {
     const record = {
         id: 'rec-1', chatId: 'A', messageId: 0, swipeId: 0, occurrence: 0,
         content: 'scene', prompt: 'p', negative: '', params: { width: 832 },
@@ -614,14 +614,11 @@ test('D2: restored frame exposes onRepro with the record seed; Regen stays -1', 
     await pipeline.onMarker(marker);
     await new Promise(r => setTimeout(r, 10)); // restoreImages settles
     assert.ok(frameActions, 'restored frame rendered');
-    assert.equal(typeof frameActions.onRepro, 'function', 'record with a real seed exposes Repro');
-    await frameActions.onRepro();
-    let task = [...queue._tasks.values()].at(-1);
-    assert.equal(task.prompt.params.seed, 777, 'Repro reuses the record seed');
-    assert.equal(task.prompt.params.checkpoint, 'saved-ckpt', 'Repro keeps the record checkpoint');
+    assert.equal(frameActions.onRepro, undefined, 'D14: Repro action removed even when the record has a real seed');
     await frameActions.onRegen();
-    task = [...queue._tasks.values()].at(-1);
+    const task = [...queue._tasks.values()].at(-1);
     assert.equal(task.prompt.params.seed, -1, 'Regen still randomizes');
+    assert.equal(task.prompt.params.checkpoint, 'saved-ckpt', 'Regen keeps the record checkpoint');
 });
 
 test('D2: onRepro is absent when the record has no usable seed', async () => {
@@ -720,7 +717,7 @@ test('D1: deleting the shown record from the lightbox swaps the slot image and k
     assert.deepEqual(deleted, ['rec-new']);
     assert.equal(lightboxCloses, 0, 'lightbox stays open after deleting the shown record');
     assert.equal(frameUrls.length, 2, 'slot re-rendered with the remaining record');
-    assert.equal(typeof frameActions.onRepro, 'function', 'remaining record seed backs Repro');
+    assert.equal(frameActions.onRepro, undefined, 'D14: no Repro action on the re-rendered frame');
     // Deleting the last record collapses the slot and closes the lightbox.
     await lightboxOpts.onDelete(older);
     assert.deepEqual(deleted, ['rec-new', 'rec-old']);
@@ -814,11 +811,11 @@ test('D4: restore after an edit shows the newest (edited) record', async () => {
     await new Promise(r => setTimeout(r, 10));
     assert.equal(frames.length, 1, 'restored exactly one frame');
     const actions = frames[0].actions;
-    // The restored entry carries the NEWEST record: its Repro uses seed 5 and
-    // its Regen re-enqueues the edited prompt.
-    await actions.onRepro();
-    let task = [...queue._tasks.values()].at(-1);
-    assert.equal(task.prompt.params.seed, 5, 'Repro uses the edited record seed');
+    // The restored entry carries the NEWEST record: Regen re-enqueues the
+    // edited prompt (D14: Repro removed; seed always randomizes on Regen).
+    await actions.onRegen();
+    const task = [...queue._tasks.values()].at(-1);
+    assert.equal(task.prompt.params.seed, -1, 'Regen randomizes the seed');
     assert.equal(task.prompt.prompt, 'edited prompt', 'restored envelope is the edited prompt');
 });
 

@@ -266,7 +266,7 @@ function attachClickBehavior(el, { onSingleClick, onDoubleClick } = {}) {
  * Swap a slot to the succeeded image frame. Wires the 300ms click/dblclick
  * disambiguation: single click opens a lightbox, double click regenerates.
  * Also adds an always-visible toolbar ABOVE the image with the explicit
- * View/Regen/Repro/Edit/Delete buttons (C10, reworked in D13: the old
+ * View/Regen/Edit/Delete buttons (C10, reworked in D13: the old
  * absolute-positioned hover overlay had no positioned frame ancestor, so it
  * covered the whole message block and blocked the host's edit-message
  * buttons; a normal-flow toolbar also works on touch screens where hover
@@ -290,7 +290,6 @@ export function renderImageFrame(slot, doc, objectUrl, actions = {}) {
     const toolbarActions = [
         ['View', actions.onView],
         ['Regen', actions.onRegen],
-        ['Repro', actions.onRepro], // D2: regenerate with the record's seed
         ['Edit', actions.onEdit],   // D4: edit prompt/params, then generate
         ['Delete', actions.onDelete],
     ].filter(([, handler]) => typeof handler === 'function');

@@ -67,9 +67,54 @@
     text-align: center;
 }
 
-.if-image-subtab.active {
-    background: var(--ifi-accent);
-    color: #000;
+/* D14: uniform buttons everywhere inside the drawer. ST's .menu_button is
+   display:flex + width:min-content, so every button hugged its own label and
+   rows looked ragged. One rule normalizes size, height and alignment. */
+.if-image-settings .menu_button {
+    display: inline-flex;
+    width: auto;
+    min-width: 84px;
+    min-height: 28px;
+    margin: 0;
+    padding: 4px 10px;
+    box-sizing: border-box;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    white-space: nowrap;
+}
+
+/* Compact buttons inside saved-profile / outfit / rule list rows. */
+.if-image-settings .if-image-cp-item-actions .menu_button {
+    min-width: 52px;
+    min-height: 24px;
+    padding: 2px 8px;
+}
+
+/* D14: selected/active buttons get an unambiguous high-contrast state.
+   color-mix lightens the theme accent enough that dark text always reads,
+   regardless of how dim the theme's quote color is. ST's host theme targets
+   these buttons with `#rm_extensions_block .menu_button { background:
+   ... !important }` (id specificity + !important), so our overrides need
+   !important AND id-level specificity — :is(#...) grants the id weight while
+   still matching wherever the drawer is mounted. */
+:is(#rm_extensions_block, #extensions_settings, #extensions_settings2, .if-image-settings) .if-image-tab.active,
+:is(#rm_extensions_block, #extensions_settings, #extensions_settings2, .if-image-settings) .if-image-subtab.active {
+    background: color-mix(in srgb, var(--ifi-accent) 55%, #ffffff) !important;
+    color: #14151f !important;
+    font-weight: 600;
+}
+
+/* D14: destructive buttons (replaces the old inline background:#552222). */
+:is(#rm_extensions_block, #extensions_settings, #extensions_settings2, .if-image-settings, body) .if-image-btn-danger.menu_button {
+    background: #5c2323 !important;
+    border-color: #7a3535 !important;
+    color: #f2d7d7 !important;
+}
+
+:is(#rm_extensions_block, #extensions_settings, #extensions_settings2, .if-image-settings, body) .if-image-btn-danger.menu_button:hover {
+    background: #7a2e2e !important;
+    color: #ffffff !important;
 }
 
 /* D9: per-checkpoint profile editor + saved-profile list (Backends tab,
@@ -141,11 +186,6 @@
     background: #553333;
     color: #f0d0d0;
     vertical-align: middle;
-}
-
-.if-image-tab.active {
-    background: var(--ifi-accent);
-    color: #000;
 }
 
 .if-image-panel {
@@ -253,6 +293,16 @@
 .if-image-note {
     font-size: 0.8em;
     color: var(--ifi-dim);
+}
+
+/* D14: read-only "what generation uses right now" box on the Generation tab. */
+.if-image-active-summary {
+    padding: 6px 8px;
+    border: 1px solid var(--ifi-border);
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.2);
+    font-size: 0.85em;
+    overflow-wrap: anywhere;
 }
 
 .if-image-check {
@@ -529,13 +579,16 @@
     background: #552222;
 }
 
-/* D4: edit-before-generate dialog */
+/* D4: edit-before-generate dialog.
+   D14: explicit colors — inside ST's generic popup the form inherited
+   low-contrast text/input colors and was unreadable on some themes. */
 .ifimg-edit-dialog {
     display: flex;
     flex-direction: column;
     gap: 8px;
     min-width: 320px;
     text-align: left;
+    color: var(--SmartThemeBodyColor, #e6e9f5);
 }
 
 .ifimg-edit-field {
@@ -545,10 +598,27 @@
     font-size: 0.85em;
 }
 
-.ifimg-edit-field textarea,
-.ifimg-edit-field input {
+.ifimg-edit-field > span {
+    color: var(--SmartThemeBodyColor, #e6e9f5);
+    opacity: 0.9;
+    font-weight: 600;
+}
+
+.ifimg-edit-dialog textarea,
+.ifimg-edit-dialog input {
     width: 100%;
     box-sizing: border-box;
+    background: rgba(0, 0, 0, 0.45);
+    color: var(--SmartThemeBodyColor, #e6e9f5);
+    border: 1px solid var(--SmartThemeBorderColor, #4a5375);
+    border-radius: 4px;
+    padding: 4px 6px;
+}
+
+.ifimg-edit-dialog textarea::placeholder,
+.ifimg-edit-dialog input::placeholder {
+    color: var(--SmartThemeBodyColor, #e6e9f5);
+    opacity: 0.45;
 }
 
 .ifimg-edit-assist {

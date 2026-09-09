@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { parseTriggers } from '../src/prompt/triggers.js';
 import { assemblePrompt, mergeProfileParams, applyMarkerParamOverrides, clampDim, clampSteps, clampCfg, resolveLockedSeed, resolveSizeKeyword } from '../src/prompt/render.js';
 import { PROFILES } from '../src/profiles.js';
-import { inferProfileKey, resolveCheckpointProfile, mergeParams, matchDiscoveredName, suggestCheckpointProfile, normalizeCheckpointProfile, SIZE_PRESETS, matchSizePreset } from '../src/backends/checkpoint-profiles.js';
+import { inferProfileKey, resolveCheckpointProfile, getActiveProfile, mergeParams, matchDiscoveredName, suggestCheckpointProfile, normalizeCheckpointProfile, SIZE_PRESETS, matchSizePreset } from '../src/backends/checkpoint-profiles.js';
 
 let passed = 0;
 let failed = 0;
@@ -187,13 +187,20 @@ test('suggestCheckpointProfile: without server defaults falls back to PROFILES n
     assert.equal(p.source, 'server');
 });
 
-test('normalizeCheckpointProfile: clamps numbers, drops blanks/invalid, rejects unknown style', () => {
+test('normalizeCheckpointProfile: clamps numbers, drops blanks/invalid, rejects unknown style, requires checkpoint (D14)', () => {
     assert.deepEqual(
-        normalizeCheckpointProfile({ profile: 'anima', width: '1000', height: '1216', steps: '999', cfg: '4.5', sampler: 'Euler a', scheduler: '' }),
-        { profile: 'anima', width: 1024, height: 1216, steps: 150, cfg: 4.5, sampler: 'Euler a' },
+        normalizeCheckpointProfile({ profile: 'anima', checkpoint: 'CkptA', name: ' Fast ', width: '1000', height: '1216', steps: '999', cfg: '4.5', sampler: 'Euler a', scheduler: '' }),
+        { profile: 'anima', checkpoint: 'CkptA', name: 'Fast', width: 1024, height: 1216, steps: 150, cfg: 4.5, sampler: 'Euler a' },
     );
-    assert.deepEqual(normalizeCheckpointProfile({ profile: 'krea2', width: '', height: 'abc' }), { profile: 'krea2' });
-    assert.equal(normalizeCheckpointProfile({ profile: 'nope' }), null);
+    // Blank name falls back to the checkpoint title.
+    assert.deepEqual(
+        normalizeCheckpointProfile({ profile: 'krea2', checkpoint: 'CkptB', name: '  ', width: '', height: 'abc' }),
+        { profile: 'krea2', checkpoint: 'CkptB', name: 'CkptB' },
+    );
+    // D14: no checkpoint -> not saveable.
+    assert.equal(normalizeCheckpointProfile({ profile: 'krea2' }), null);
+    assert.equal(normalizeCheckpointProfile({ profile: 'krea2', checkpoint: '   ' }), null);
+    assert.equal(normalizeCheckpointProfile({ profile: 'nope', checkpoint: 'X' }), null);
     assert.equal(normalizeCheckpointProfile(null), null);
 });
 
@@ -209,46 +216,68 @@ test('SIZE_PRESETS are 64-multiples inside the clamp range; matchSizePreset roun
     assert.equal(matchSizePreset('', ''), 'custom');
     assert.equal(new Set(SIZE_PRESETS.map(p => p.key)).size, SIZE_PRESETS.length, 'keys unique');
     // Suggestion for a saved row round-trips through the preset matcher.
-    const row = normalizeCheckpointProfile({ profile: 'anima', width: 832, height: 1216 });
+    const row = normalizeCheckpointProfile({ profile: 'anima', checkpoint: 'M', width: 832, height: 1216 });
     assert.equal(matchSizePreset(row.width, row.height), 'portrait');
 });
 
-test('resolveCheckpointProfile: returns {profileKey, overrides} or null', () => {
+test('resolveCheckpointProfile: keyed by profile id (D14); strips metadata; null on bad rows', () => {
     const settings = { backends: { a1111: { checkpointProfiles: {
-        'Anima | RDBT Anima': { profile: 'anima', steps: 20, sampler: 'Euler a' },
-        'Broken': { profile: 'not-a-profile' },
+        cp1: { profile: 'anima', checkpoint: 'Anima | RDBT Anima', name: 'Fast', steps: 20, sampler: 'Euler a' },
+        cp2: { profile: 'not-a-profile', checkpoint: 'X', name: 'Broken' },
     } } } };
-    assert.deepEqual(resolveCheckpointProfile(settings, 'Anima | RDBT Anima'), { profileKey: 'anima', overrides: { steps: 20, sampler: 'Euler a' } });
-    assert.equal(resolveCheckpointProfile(settings, 'Broken'), null);
-    assert.equal(resolveCheckpointProfile(settings, 'Unknown'), null);
-    assert.equal(resolveCheckpointProfile({}, 'Anything'), null);
+    assert.deepEqual(resolveCheckpointProfile(settings, 'cp1'), { profileKey: 'anima', overrides: { steps: 20, sampler: 'Euler a' } });
+    assert.equal(resolveCheckpointProfile(settings, 'cp2'), null);
+    assert.equal(resolveCheckpointProfile(settings, 'cp99'), null);
+    assert.equal(resolveCheckpointProfile({}, 'cp1'), null);
 });
 
-test('mergeParams: five-layer precedence PROFILES < settings < checkpoint < marker < LLM', () => {
+test('getActiveProfile: returns the selected usable row or null (D14)', () => {
+    const profiles = {
+        cp1: { profile: 'anima', checkpoint: 'CkptA', name: 'Fast', steps: 20 },
+        cp2: { profile: 'nope', checkpoint: 'CkptA', name: 'Broken style' },
+        cp3: { profile: 'anima', checkpoint: '', name: 'No checkpoint' },
+    };
+    const s = (activeProfileId) => ({ backends: { a1111: { activeProfileId, checkpointProfiles: profiles } } });
+    assert.deepEqual(getActiveProfile(s('cp1')), { id: 'cp1', entry: profiles.cp1 });
+    assert.equal(getActiveProfile(s('')), null, 'no selection');
+    assert.equal(getActiveProfile(s('cp99')), null, 'row deleted');
+    assert.equal(getActiveProfile(s('cp2')), null, 'unknown prompt style');
+    assert.equal(getActiveProfile(s('cp3')), null, 'no checkpoint title');
+    assert.equal(getActiveProfile({}), null);
+    assert.equal(getActiveProfile(null), null);
+});
+
+test('mergeParams: five-layer precedence PROFILES < settings < saved profile < marker < LLM (D14 profileId keying)', () => {
+    const title = 'Illustrious | New ERA Retro';
     const settings = {
         generation: { params: { illustrious: { steps: 30, cfg: 6, width: 896, height: 896 } } },
         backends: { a1111: { checkpointProfiles: {
-            'Illustrious | New ERA Retro': { profile: 'illustrious', steps: 24, sampler: 'DPM++ 2M', scheduler: 'karras' },
+            cp1: { profile: 'illustrious', checkpoint: title, name: 'Retro', steps: 24, sampler: 'DPM++ 2M', scheduler: 'karras' },
         } } },
     };
     // Layer 1+2: settings override beats the PROFILES default.
     let p = mergeParams({ profileKey: 'illustrious', settings });
     assert.equal(p.steps, 30);
     assert.equal(p.width, 896);
-    // Layer 3: checkpoint override beats settings for steps, inherits width.
-    p = mergeParams({ profileKey: 'illustrious', checkpointTitle: 'Illustrious | New ERA Retro', settings });
+    // Layer 3: saved-profile override (by profileId) beats settings for
+    // steps, inherits width; checkpointTitle only stamps params.checkpoint.
+    p = mergeParams({ profileKey: 'illustrious', checkpointTitle: title, profileId: 'cp1', settings });
     assert.equal(p.steps, 24);
     assert.equal(p.width, 896);
     assert.equal(p.sampler, 'DPM++ 2M');
     assert.equal(p.scheduler, 'karras');
-    assert.equal(p.checkpoint, 'Illustrious | New ERA Retro');
-    // Layer 4: marker JSON beats the checkpoint layer.
-    p = mergeParams({ profileKey: 'illustrious', checkpointTitle: 'Illustrious | New ERA Retro', settings, markerOverrides: { steps: 12, width: 1216, height: 832 } });
+    assert.equal(p.checkpoint, title);
+    // checkpointTitle without profileId: no saved-profile layer applied.
+    p = mergeParams({ profileKey: 'illustrious', checkpointTitle: title, settings });
+    assert.equal(p.steps, 30, 'no profileId -> settings layer wins');
+    assert.equal(p.checkpoint, title);
+    // Layer 4: marker JSON beats the saved-profile layer.
+    p = mergeParams({ profileKey: 'illustrious', checkpointTitle: title, profileId: 'cp1', settings, markerOverrides: { steps: 12, width: 1216, height: 832 } });
     assert.equal(p.steps, 12);
     assert.equal(p.width, 1216);
     assert.equal(p.height, 832);
     // Layer 5: LLM <size> beats everything.
-    p = mergeParams({ profileKey: 'illustrious', checkpointTitle: 'Illustrious | New ERA Retro', settings, markerOverrides: { steps: 12 }, llmOverrides: { width: 1024, height: 1024, cfg: 5 } });
+    p = mergeParams({ profileKey: 'illustrious', checkpointTitle: title, profileId: 'cp1', settings, markerOverrides: { steps: 12 }, llmOverrides: { width: 1024, height: 1024, cfg: 5 } });
     assert.equal(p.width, 1024);
     assert.equal(p.height, 1024);
     assert.equal(p.cfg, 5);
@@ -258,9 +287,9 @@ test('mergeParams: five-layer precedence PROFILES < settings < checkpoint < mark
 test('mergeParams: C0 clamps hold on every layer; lone marker width is ignored', () => {
     const settings = {
         generation: { params: { anima: { width: 4000, steps: 999 } } },
-        backends: { a1111: { checkpointProfiles: { M: { profile: 'anima', cfg: 99 } } } },
+        backends: { a1111: { checkpointProfiles: { cp1: { profile: 'anima', checkpoint: 'M', name: 'M', cfg: 99 } } } },
     };
-    const p = mergeParams({ profileKey: 'anima', checkpointTitle: 'M', settings, markerOverrides: { width: 1024 } });
+    const p = mergeParams({ profileKey: 'anima', checkpointTitle: 'M', profileId: 'cp1', settings, markerOverrides: { width: 1024 } });
     assert.equal(p.width, 2048);          // settings width clamped to max, marker lone width ignored
     assert.equal(p.steps, 150);           // clamped
     assert.equal(p.cfg, 30);              // checkpoint cfg clamped

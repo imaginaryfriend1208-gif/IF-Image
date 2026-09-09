@@ -254,12 +254,9 @@ export function createMarkerPipeline(deps) {
             onView: openView,
             onRegen: () => regenerate(entry),
         };
-        // D2: Repro = regenerate with the SHOWN image's actual seed (known
-        // from the saved record / task result). Hidden when seed is unknown
-        // or random (-1) — reproducing a random seed is meaningless.
-        if (Number.isInteger(entry.lastSeed) && entry.lastSeed >= 0) {
-            actions.onRepro = () => regenerate(entry, { seed: entry.lastSeed });
-        }
+        // (D14: the D2 Repro action — regenerate with the shown image's
+        // exact seed — was removed from the toolbar as unnecessary. The
+        // regenerate({seed}) path itself remains for gallery/record reuse.)
         // D4: Edit-before-generate. The dialog resolves to an envelope
         // override (or null on cancel); Generate re-enters the shared
         // generation path. The marker text in the message is NEVER modified —

@@ -42,10 +42,13 @@ export const defaultSettings = {
             // Phase R1: persisted discovery cache ({at: 0} = never ran).
             // Cleared on URL/auth change; never carries credentials.
             discovery: { at: 0, models: [], samplers: [], schedulers: [] },
-            // Phase R1: checkpoint title -> { profile, width?, height?,
-            // steps?, cfg?, sampler?, scheduler? }. Seeded from discovery,
-            // user edits always win and survive re-seeding.
+            // D14: unique profile id -> { name, checkpoint, profile,
+            // width?, height?, steps?, cfg?, sampler?, scheduler? }.
+            // Rows are created only by "Save profile"; one checkpoint can
+            // hold any number of profiles.
             checkpointProfiles: {},
+            // D14: which saved profile drives generation ('' = none).
+            activeProfileId: '',
         },
     },
     llm: {
