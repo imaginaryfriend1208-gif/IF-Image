@@ -38,7 +38,7 @@ export const EXTENSION_VERSION = '0.3.0';
  * @param {() => string} [args.getCurrentChatId] - C10: current chat id, for
  *   the Gallery tab's "current chat" filter.
  */
-export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQueue, regenerateImage, getCurrentChatId }) {
+export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQueue, regenerateImage, getCurrentChatId, planChatImages, applyPlacements, getChatContext, eventSource, event_types }) {
     const html = `
     <div class="if-image-settings">
         <div class="if-image-title">
@@ -120,6 +120,24 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             <h3>Active Profile</h3>
             <div class="if-image-note">Generation uses the checkpoint profile marked active in Settings → Stable Diffusion — one set of params for everything. Marker JSON triggers and LLM hints still override individual values per image.</div>
             <div id="if_main_active_profile" class="if-image-active-summary">No active profile.</div>
+
+            <hr class="if-image-sep"/>
+            <h3>Chat Image Placement (LLM)</h3>
+            <div class="if-image-note">Let the LLM plan image placements across the current chat. It reads the conversation, picks N visually significant moments, and injects image markers at those positions — the pipeline then generates images automatically.</div>
+            <div class="if-image-row">
+                <label for="if_plan_count">Number of images</label>
+                <input id="if_plan_count" type="number" min="1" max="6" value="3" class="text_pole" style="width:60px;">
+            </div>
+            <div class="if-image-row">
+                <label class="if-image-check">
+                    <input type="checkbox" id="if_plan_charonly" checked> Character messages only
+                </label>
+            </div>
+            <div class="if-image-row">
+                <button id="if_plan_run" class="menu_button" style="flex:1;">Plan & place images</button>
+                <button id="if_plan_undo" class="menu_button" title="Undo last placement">Undo</button>
+            </div>
+            <div class="if-image-result" id="if_plan_result"></div>
         </div>
 
         <!-- ============ LLM TAB ============ -->
@@ -900,6 +918,97 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     mainBackend.addEventListener('change', () => { settings.generation.backend = mainBackend.value; save(); syncTestGenVisibility(); });
     mainProfile.addEventListener('change', () => { settings.generation.profile = mainProfile.value; save(); syncTestGenVisibility(); });
     mainMode.addEventListener('change', () => { settings.generation.mode = mainMode.value; save(); });
+
+    // ================= Chat Placement Wiring =================
+    const planCount = $('if_plan_count');
+    const planCharOnly = $('if_plan_charonly');
+    const planRun = $('if_plan_run');
+    const planUndo = $('if_plan_undo');
+    const planResult = $('if_plan_result');
+    const chatPlace = settings.llm?.chatPlace ?? {};
+    let planAbort = null;
+    let lastPlacementSnapshots = []; // [{ messageId, prevMes }] for undo
+
+    if (planCount) {
+        planCount.value = chatPlace.count ?? 3;
+        planCount.addEventListener('change', () => {
+            const n = Math.min(6, Math.max(1, parseInt(planCount.value, 10) || 3));
+            planCount.value = n;
+            chatPlace.count = n;
+            save();
+        });
+    }
+    if (planCharOnly) {
+        planCharOnly.checked = chatPlace.onlyCharacter !== false;
+        planCharOnly.addEventListener('change', () => {
+            chatPlace.onlyCharacter = planCharOnly.checked;
+            save();
+        });
+    }
+    if (planRun) {
+        planRun.addEventListener('click', async () => {
+            if (typeof planChatImages !== 'function') {
+                planResult.textContent = 'Plan function not available.';
+                return;
+            }
+            const count = parseInt(planCount?.value, 10) || 3;
+            planRun.disabled = true;
+            planRun.textContent = 'Planning…';
+            planResult.textContent = `Asking LLM to plan ${count} image placements…`;
+            planAbort?.abort();
+            planAbort = new AbortController();
+            try {
+                const { placements, method, elapsedMs } = await planChatImages(count, { signal: planAbort.signal });
+                if (!placements.length) {
+                    planResult.textContent = `LLM returned no valid placements (${method}, ${(elapsedMs / 1000).toFixed(1)}s). Check LLM settings or try again.`;
+                    return;
+                }
+                // Snapshot current message text before injection (for undo)
+                const ctx = getChatContext?.() ?? null;
+                const chat = ctx?.chat ?? [];
+                lastPlacementSnapshots = placements
+                    .filter(p => chat[p.messageId])
+                    .map(p => ({ messageId: p.messageId, prevMes: chat[p.messageId].mes }));
+                const touched = typeof applyPlacements === 'function' ? applyPlacements(placements) : 0;
+                const skipped = placements.length - touched;
+                let msg = `Placed ${touched} image${touched !== 1 ? 's' : ''} (${method}, ${(elapsedMs / 1000).toFixed(1)}s)`;
+                if (skipped > 0) msg += ` — ${skipped} skipped (duplicate position)`;
+                planResult.textContent = msg;
+            } catch (err) {
+                if (err?.code === 'ABORTED' || err?.name === 'AbortError') return;
+                planResult.textContent = `Error: ${err?.message ?? String(err)}`;
+            } finally {
+                planRun.disabled = false;
+                planRun.textContent = 'Plan & place images';
+            }
+        });
+    }
+    if (planUndo) {
+        planUndo.addEventListener('click', () => {
+            if (!lastPlacementSnapshots.length) {
+                planResult.textContent = 'Nothing to undo.';
+                return;
+            }
+            const ctx = getChatContext?.() ?? null;
+            const chat = ctx?.chat ?? [];
+            let count = 0;
+            for (const snap of lastPlacementSnapshots) {
+                const message = chat[snap.messageId];
+                if (!message) continue;
+                message.mes = snap.prevMes;
+                count++;
+            }
+            try { ctx?.saveChat?.(); } catch {}
+            const msgUpdated = event_types?.MESSAGE_UPDATED;
+            if (msgUpdated) {
+                for (const snap of lastPlacementSnapshots) {
+                    eventSource?.emit?.(msgUpdated, snap.messageId);
+                }
+            }
+            planResult.textContent = `Undone ${count} placement${count !== 1 ? 's' : ''}.`;
+            lastPlacementSnapshots = [];
+        });
+    }
 
     // ================= Backends Tab Wiring =================
     const naiKey = $('if_nai_key');
