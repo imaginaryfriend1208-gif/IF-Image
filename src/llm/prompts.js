@@ -154,7 +154,13 @@ export function renderPersonaGenPrompt() {
   "name": "string",
   "countTag": "string, danbooru count tag e.g. \\"1boy\\", \\"1girl\\"",
   "booru": "string, comma-separated danbooru-style tags",
-  "natural": "string, one-paragraph prose description for photorealistic prompts"
+  "natural": "string, one-paragraph prose description for photorealistic prompts",
+  "aliases": ["array of alternative trigger keywords, e.g. \\"user\\", \\"narrator\\", \\"self\\""],
+  "dialectHints": {
+    "krea": { "stylePhrase": "string, krea-specific style phrase", "lighting": "string", "camera": "string" },
+    "anima": { "booruTags": "string, anima-specific booru tags", "artists": "string" },
+    "illus": { "artists": "string", "qualityPrefix": "string", "negativeTags": "string" }
+  }
 }`;
 }
 

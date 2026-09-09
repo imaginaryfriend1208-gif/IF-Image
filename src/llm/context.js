@@ -89,6 +89,17 @@ export function buildContext({ chat, settings, contextProfile, substituteParams,
         if (persona.name) parts.push(`Name: ${persona.name}`);
         if (persona.booru) parts.push(`Tags: ${persona.booru}`);
         if (persona.natural) parts.push(`Description: ${persona.natural}`);
+        if (Array.isArray(persona.aliases) && persona.aliases.length) {
+            parts.push(`Aliases: ${persona.aliases.join(', ')}`);
+        }
+        const h = persona.dialectHints;
+        if (h) {
+            const hintParts = [];
+            if (h.krea?.stylePhrase) hintParts.push(`Krea: ${h.krea.stylePhrase}`);
+            if (h.anima?.booruTags) hintParts.push(`Anima: ${h.anima.booruTags}`);
+            if (h.illus?.artists) hintParts.push(`Illus: ${h.illus.artists}`);
+            if (hintParts.length) parts.push(`Style hints: ${hintParts.join(' | ')}`);
+        }
         personaBlock = parts.join(' | ');
     }
 

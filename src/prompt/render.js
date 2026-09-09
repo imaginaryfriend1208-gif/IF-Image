@@ -294,9 +294,26 @@ export function renderPersonaForDialect(persona, dialect, modifiers = []) {
 
     // 'full'
     if (dialect === 'krea') {
-        return persona.natural || persona.facts || 'a companion';
+        // Krea: natural description + persona's own krea style hints
+        let text = persona.natural || persona.facts || 'a companion';
+        const h = persona.dialectHints?.krea;
+        if (h?.stylePhrase) text += `, ${h.stylePhrase}`;
+        if (h?.lighting) text += `, ${h.lighting}`;
+        if (h?.camera) text += `, ${h.camera}`;
+        return text;
     }
+    // Anima/Illustrious: countTag + booru + persona's own dialect hints
     const tags = [persona.countTag || '1boy', normalizeBooruTags(persona.booru || '')];
+    if (dialect === 'anima') {
+        const h = persona.dialectHints?.anima;
+        if (h?.booruTags) tags.push(normalizeBooruTags(h.booruTags));
+        if (h?.artists) tags.push(h.artists);
+    } else {
+        // illus
+        const h = persona.dialectHints?.illus;
+        if (h?.artists) tags.push(h.artists);
+        if (h?.qualityPrefix) tags.push(h.qualityPrefix);
+    }
     return tags.filter(Boolean).join(', ');
 }
 
@@ -406,6 +423,13 @@ export function assemblePrompt(parsedTriggers, dialectKey, baseProfile = {}) {
         if (h?.qualityPrefix) positiveParts.push(h.qualityPrefix);
         if (h?.artists) positiveParts.push(h.artists);
         if (h?.negativeTags) negativeParts.push(h.negativeTags);
+    }
+
+    // Persona illus negative tags (from persona.dialectHints.illus.negativeTags)
+    for (const item of parsedTriggers.characters || []) {
+        if (item.isPersona && item.persona?.dialectHints?.illus?.negativeTags) {
+            negativeParts.push(item.persona.dialectHints.illus.negativeTags);
+        }
     }
 
     if (baseProfile.negative) negativeParts.push(baseProfile.negative);

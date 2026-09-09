@@ -443,6 +443,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             <hr class="if-image-sep"/>
             <h3>Test Generate</h3>
             <div class="if-image-note" id="if_test_using">Uses the active profile above (or the fallback prompt style when none is saved).</div>
+            <div class="if-image-note" id="if_test_triggers" style="display:none;"></div>
             <div class="if-image-row">
                 <label for="if_test_prompt">Prompt</label>
                 <textarea id="if_test_prompt" class="text_pole textarea_compact" rows="3"></textarea>
@@ -600,6 +601,10 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 <input id="if_per_name" type="text" class="text_pole" value="Default User">
             </div>
             <div class="if-image-row">
+                <label for="if_per_aliases">Aliases (comma separated — auto-trigger when these appear in scene text)</label>
+                <input id="if_per_aliases" type="text" class="text_pole" placeholder="e.g. user, narrator, self">
+            </div>
+            <div class="if-image-row">
                 <label class="if-image-check">
                     <input type="checkbox" id="if_per_default"> Default persona ($me resolves to this one)
                 </label>
@@ -630,6 +635,43 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 <label for="if_per_avoid">Avoid Tags (comma separated, stripped by cleanup)</label>
                 <input id="if_per_avoid" type="text" class="text_pole" placeholder="e.g. beard, glasses">
             </div>
+
+            <hr class="if-image-sep"/>
+            <h4>Persona Dialect Hints (per-dialect style overrides)</h4>
+            <div class="if-image-note">Style fragments merged into the prompt when this persona is rendered in 'full' mode. Leave empty to inherit base booru/natural tags only.</div>
+            <div class="if-image-row">
+                <label for="if_per_krea_style">Krea: Style Phrase</label>
+                <input id="if_per_krea_style" type="text" class="text_pole" placeholder="e.g. cinematic, moody lighting">
+            </div>
+            <div class="if-image-row">
+                <label for="if_per_krea_light">Krea: Lighting</label>
+                <input id="if_per_krea_light" type="text" class="text_pole">
+            </div>
+            <div class="if-image-row">
+                <label for="if_per_krea_cam">Krea: Camera</label>
+                <input id="if_per_krea_cam" type="text" class="text_pole">
+            </div>
+            <div class="if-image-row">
+                <label for="if_per_anima_tags">Anima: Booru Tags</label>
+                <input id="if_per_anima_tags" type="text" class="text_pole">
+            </div>
+            <div class="if-image-row">
+                <label for="if_per_anima_artists">Anima: Artists</label>
+                <input id="if_per_anima_artists" type="text" class="text_pole">
+            </div>
+            <div class="if-image-row">
+                <label for="if_per_illus_artists">Illustrious: Artists / Tags</label>
+                <input id="if_per_illus_artists" type="text" class="text_pole">
+            </div>
+            <div class="if-image-row">
+                <label for="if_per_illus_quality">Illustrious: Quality Prefix</label>
+                <input id="if_per_illus_quality" type="text" class="text_pole">
+            </div>
+            <div class="if-image-row">
+                <label for="if_per_illus_neg">Illustrious: Negative Tags</label>
+                <input id="if_per_illus_neg" type="text" class="text_pole">
+            </div>
+
             <div class="if-image-row">
                 <button id="if_per_save" class="menu_button">Save Persona</button>
             </div>
@@ -1811,7 +1853,10 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
 
     // The "uses X" note under the Test Generate heading; re-rendered whenever
     // the connection, checkpoint, or a saved profile changes.
-    function syncTestGenVisibility() {
+    const testTriggers = $('if_test_triggers');
+    let triggerUpdateTimer = null;
+
+    async function syncTestGenVisibility() {
         syncMainActiveProfile();
         if (!testUsing) return;
         const setup = effectiveTestSetup();
@@ -1819,23 +1864,63 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         const p = setup.params;
         if (setup.backend === 'nai') {
             testUsing.textContent = `Uses NovelAI · ${style} · ${p.width}×${p.height} · ${p.steps} steps · cfg ${p.cfg}.`;
-            return;
-        }
-        if (setup.conn === 'a1111') {
+        } else if (setup.conn === 'a1111') {
             const label = setup.activeName || setup.checkpointTitle;
             testUsing.textContent = setup.checkpointTitle
                 ? `Uses ${label}${setup.hasActive ? '' : ' (no active profile — fallback style)'} · ${style} · ${p.width}×${p.height} · ${p.steps} steps · cfg ${p.cfg}.`
                 : 'No checkpoint selected — pick or save a checkpoint profile above first.';
-            return;
+        } else {
+            const model = settings.backends.comfy.proxyModel || '';
+            testUsing.textContent = model
+                ? `Uses Comfy proxy · ${model} · ${style} · ${p.width}×${p.height} · ${p.steps} steps · cfg ${p.cfg}.`
+                : 'No proxy model selected — click Refresh Models and pick one above first.';
         }
-        const model = settings.backends.comfy.proxyModel || '';
-        testUsing.textContent = model
-            ? `Uses Comfy proxy · ${model} · ${style} · ${p.width}×${p.height} · ${p.steps} steps · cfg ${p.cfg}.`
-            : 'No proxy model selected — click Refresh Models and pick one above first.';
+
+        // Parse the test prompt to show active triggers
+        await updateTriggerSummary();
+    }
+
+    async function updateTriggerSummary() {
+        if (!testTriggers) return;
+        const text = testPrompt.value.trim();
+        if (!text) { testTriggers.style.display = 'none'; return; }
+        try {
+            const roster = await getAllCharacters();
+            const styles = await getAllStyles();
+            const personas = await getAllPersonas();
+            const defaultPersona = personas.find(p => p.isDefault) || personas[0] || null;
+            const parsed = parseTriggers(text, { roster, styles, defaultPersona, personas });
+            const parts = [];
+            for (const item of parsed.characters) {
+                if (item.isPersona) {
+                    const label = item.persona?.name || 'Persona';
+                    const mods = item.modifiers?.length ? ` (${item.modifiers.join('|')})` : '';
+                    parts.push(`$me → ${label}${mods}`);
+                } else if (item.char) {
+                    const mods = item.modifiers?.length ? ` (${item.modifiers.join('|')})` : '';
+                    parts.push(`$${item.char.name}${mods}`);
+                }
+            }
+            for (const s of parsed.styles) {
+                parts.push(`{{style: ${s.name}}}`);
+            }
+            if (parsed.dialectOverride) parts.push(`{{dialect: ${parsed.dialectOverride}}}`);
+            if (parts.length) {
+                testTriggers.textContent = `Active triggers: ${parts.join(' · ')}`;
+                testTriggers.style.display = '';
+            } else {
+                testTriggers.style.display = 'none';
+            }
+        } catch { testTriggers.style.display = 'none'; }
     }
     syncTestGenVisibility();
 
-    testPrompt.addEventListener('input', () => { settings.test.prompt = testPrompt.value; save(); });
+    testPrompt.addEventListener('input', () => {
+        settings.test.prompt = testPrompt.value;
+        save();
+        if (triggerUpdateTimer) clearTimeout(triggerUpdateTimer);
+        triggerUpdateTimer = setTimeout(updateTriggerSummary, 300);
+    });
     testSeed.addEventListener('input', () => {
         settings.test.seed = Number.isFinite(Number(testSeed.value)) ? Number(testSeed.value) : -1;
         save();
@@ -2264,12 +2349,21 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     const perNewBtn = $('if_per_new');
     const perDelBtn = $('if_per_del');
     const perName = $('if_per_name');
+    const perAliases = $('if_per_aliases');
     const perDefault = $('if_per_default');
     const perPov = $('if_per_pov');
     const perBooru = $('if_per_booru');
     const perNatural = $('if_per_natural');
     const perFacts = $('if_per_facts');
     const perAvoid = $('if_per_avoid');
+    const perKreaStyle = $('if_per_krea_style');
+    const perKreaLight = $('if_per_krea_light');
+    const perKreaCam = $('if_per_krea_cam');
+    const perAnimaTags = $('if_per_anima_tags');
+    const perAnimaArtists = $('if_per_anima_artists');
+    const perIllusArtists = $('if_per_illus_artists');
+    const perIllusQuality = $('if_per_illus_quality');
+    const perIllusNeg = $('if_per_illus_neg');
     const perSaveBtn = $('if_per_save');
 
     const styleSelect = $('if_style_select');
@@ -2295,12 +2389,22 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     function populatePersonaForm(p) {
         activePersonaId = p?.id ?? null;
         perName.value = p?.name ?? 'Default User';
+        perAliases.value = (p?.aliases || []).join(', ');
         perDefault.checked = Boolean(p?.isDefault);
         perPov.value = p?.povMode ?? 'auto';
         perBooru.value = p?.booru ?? '';
         perNatural.value = p?.natural ?? '';
         perFacts.value = p?.facts ?? '';
         perAvoid.value = (p?.avoidTags || []).join(', ');
+        const h = p?.dialectHints;
+        perKreaStyle.value = h?.krea?.stylePhrase ?? '';
+        perKreaLight.value = h?.krea?.lighting ?? '';
+        perKreaCam.value = h?.krea?.camera ?? '';
+        perAnimaTags.value = h?.anima?.booruTags ?? '';
+        perAnimaArtists.value = h?.anima?.artists ?? '';
+        perIllusArtists.value = h?.illus?.artists ?? '';
+        perIllusQuality.value = h?.illus?.qualityPrefix ?? '';
+        perIllusNeg.value = h?.illus?.negativeTags ?? '';
     }
 
     function populateStyleForm(s) {
@@ -2374,12 +2478,25 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             const existing = currentPersonas.find(p => p.id === activePersonaId);
             const p = existing || createDefaultPersona(name);
             p.name = name;
+            p.aliases = perAliases.value.split(',').map(s => s.trim()).filter(Boolean);
             p.povMode = perPov.value;
             p.booru = perBooru.value.trim();
             p.natural = perNatural.value.trim();
             p.facts = perFacts.value.trim();
             p.avoidTags = perAvoid.value.split(',').map(s => s.trim()).filter(Boolean);
             p.isDefault = perDefault.checked;
+            p.dialectHints = p.dialectHints || {};
+            p.dialectHints.krea = p.dialectHints.krea || {};
+            p.dialectHints.krea.stylePhrase = perKreaStyle.value.trim();
+            p.dialectHints.krea.lighting = perKreaLight.value.trim();
+            p.dialectHints.krea.camera = perKreaCam.value.trim();
+            p.dialectHints.anima = p.dialectHints.anima || {};
+            p.dialectHints.anima.booruTags = perAnimaTags.value.trim();
+            p.dialectHints.anima.artists = perAnimaArtists.value.trim();
+            p.dialectHints.illus = p.dialectHints.illus || {};
+            p.dialectHints.illus.artists = perIllusArtists.value.trim();
+            p.dialectHints.illus.qualityPrefix = perIllusQuality.value.trim();
+            p.dialectHints.illus.negativeTags = perIllusNeg.value.trim();
             await savePersona(p);
             // Only one persona may be default at a time.
             if (p.isDefault) {
@@ -2907,7 +3024,8 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             const parsed = parseTriggers(text, {
                 roster,
                 styles,
-                defaultPersona: personas[0] || createDefaultPersona(),
+                defaultPersona: personas.find(p => p.isDefault) || personas[0] || createDefaultPersona(),
+                personas,
             });
 
             const dialects = [

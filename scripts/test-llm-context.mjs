@@ -146,6 +146,33 @@ test('persona block from roster', () => {
     assert.ok(result.personaBlock.includes('1boy'));
 });
 
+test('persona block includes aliases and dialectHints', () => {
+    const roster = {
+        characters: [],
+        persona: {
+            name: 'User',
+            booru: '1boy, black hair',
+            natural: 'a young man',
+            aliases: ['user', 'narrator'],
+            dialectHints: {
+                krea: { stylePhrase: 'cinematic' },
+                anima: { booruTags: 'leather jacket' },
+                illus: { artists: 'artistB' },
+            },
+        },
+    };
+    const result = buildContext({
+        chat: [],
+        settings: { generation: { sceneWindow: 4 } },
+        contextProfile: {},
+        roster,
+    });
+    assert.ok(result.personaBlock.includes('Aliases: user, narrator'));
+    assert.ok(result.personaBlock.includes('Krea: cinematic'));
+    assert.ok(result.personaBlock.includes('Anima: leather jacket'));
+    assert.ok(result.personaBlock.includes('Illus: artistB'));
+});
+
 test('includeCharCard=false suppresses character block', () => {
     const roster = { characters: [{ name: 'A', countTag: '1girl' }], persona: null };
     const result = buildContext({

@@ -98,7 +98,7 @@ jQuery(async () => {
             ]);
             if (epoch !== rosterEpoch) return;
             const persona = personas.find(p => p.isDefault) ?? personas[0] ?? null;
-            roster = { characters, styles, persona, outfits, replaceRules };
+            roster = { characters, styles, persona, personas, outfits, replaceRules };
         } catch (err) {
             if (epoch !== rosterEpoch) return;
             console.warn('[IF Image] Roster load failed:', err?.message ?? err);
@@ -161,6 +161,7 @@ jQuery(async () => {
             fullRoster: roster.characters,
             styles: roster.styles,
             defaultPersona: roster.persona,
+            personas: roster.personas,
             outfits: roster.outfits,
             onFallback: (tier, token) => notify('warning', `Character trigger "$${token}" resolved via ${tier} fallback (not active for this chat/card).`),
         });

@@ -237,6 +237,26 @@ export function parseTriggers(input, context = {}) {
         return match;
     });
 
+    // 5. Persona keyword detection — match any persona's aliases against the
+    // scene text (like character $Name matching). Skips the default persona
+    // (already matched by $me) and personas already in foundChars.
+    if (Array.isArray(context.personas)) {
+        const defaultId = context.defaultPersona?.id;
+        const alreadyMatchedIds = new Set(foundChars.filter(c => c.isPersona).map(c => c.persona?.id));
+        for (const p of context.personas) {
+            if (p.id === defaultId) continue; // $me handles default
+            if (alreadyMatchedIds.has(p.id)) continue;
+            const aliases = Array.isArray(p.aliases) ? p.aliases : [];
+            if (!aliases.length) continue;
+            // Build a temporary roster shape for matchCharacter
+            const probe = [{ name: p.name, aliases }];
+            const matched = matchCharacter(text, probe);
+            if (matched) {
+                foundChars.push({ isPersona: true, persona: p, modifiers: [] });
+            }
+        }
+    }
+
     // 5. $Name:mods directive — mods tokens are either recognized view
     // modifiers (back/front/full/side), 'nsfw', or an outfit name to
     // fuzzy-match against the character's outfits (own + common). An

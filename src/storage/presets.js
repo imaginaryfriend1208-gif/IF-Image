@@ -20,6 +20,18 @@ export function createDefaultPersona(name = 'Default User') {
         // edits (meta.updatedAt newer than syncedAt) block the next auto-sync
         // from silently overwriting them — see applyPersonaSync() below.
         syncedAt: null,
+        // Keyword triggers: when these appear in scene text, this persona is
+        // auto-injected (like character aliases). $me always resolves to the
+        // default persona regardless.
+        aliases: [],
+        // Per-dialect style hints (like Style presets). Used when persona is
+        // rendered in 'full' mode — e.g. persona's own krea/anima/illus
+        // dialect fragments get merged into the prompt.
+        dialectHints: {
+            krea: { stylePhrase: '', lighting: '', camera: '' },
+            anima: { booruTags: '', artists: '' },
+            illus: { artists: '', qualityPrefix: '', negativeTags: '' },
+        },
         meta: {
             version: 1,
             updatedAt: Date.now(),
@@ -46,6 +58,16 @@ export function applyPersonaSync(persona, synced, force = false) {
     if (typeof synced?.countTag === 'string' && synced.countTag.trim()) persona.countTag = synced.countTag.trim();
     if (typeof synced?.booru === 'string') persona.booru = synced.booru;
     if (typeof synced?.natural === 'string') persona.natural = synced.natural;
+    if (Array.isArray(synced?.aliases)) persona.aliases = synced.aliases.filter(a => typeof a === 'string' && a.trim());
+    if (synced?.dialectHints && typeof synced.dialectHints === 'object') {
+        persona.dialectHints = persona.dialectHints || {};
+        for (const dialect of ['krea', 'anima', 'illus']) {
+            const src = synced.dialectHints[dialect];
+            if (src && typeof src === 'object') {
+                persona.dialectHints[dialect] = { ...(persona.dialectHints[dialect] || {}), ...src };
+            }
+        }
+    }
     persona.syncedAt = Date.now();
     return { applied: true, persona };
 }

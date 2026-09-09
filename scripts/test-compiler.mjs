@@ -144,6 +144,75 @@ test('Persona hidden POV generates solo looking at viewer', () => {
     assert.ok(illusOut.prompt.includes('solo, looking at viewer'));
 });
 
+// 7b. Persona keyword detection: aliases auto-trigger when they appear in
+// scene text (like character aliases). The default persona is NOT re-matched
+// (it's already handled by $me); other personas match on their aliases.
+test('Persona keyword detection: aliases in scene text auto-inject the persona', () => {
+    const persona2 = {
+        id: 'p2',
+        name: 'Narrator',
+        aliases: ['narrator', 'storyteller'],
+        countTag: '1boy',
+        booru: 'glasses, suit',
+        natural: 'a man in a suit with glasses',
+    };
+    const personas = [defaultPersona, persona2];
+
+    // Alias "narrator" appears in the scene text → persona2 injected
+    const parsed = parseTriggers('the narrator walks in, holding a book', { roster, styles, defaultPersona, personas });
+    const personaItems = parsed.characters.filter(c => c.isPersona);
+    assert.equal(personaItems.length, 1);
+    assert.equal(personaItems[0].persona.id, 'p2');
+    assert.equal(parsed.residualPrompt, 'the narrator walks in, holding a book');
+
+    // Default persona is NOT auto-matched via aliases (only via $me)
+    const parsed2 = parseTriggers('the player sits down', { roster, styles, defaultPersona, personas });
+    assert.equal(parsed2.characters.filter(c => c.isPersona).length, 0);
+
+    // $me still resolves to the default persona
+    const parsed3 = parseTriggers('$me looks around', { roster, styles, defaultPersona, personas });
+    const meItems = parsed3.characters.filter(c => c.isPersona);
+    assert.equal(meItems.length, 1);
+    assert.equal(meItems[0].persona.id, 'p1');
+});
+
+// 7c. Persona dialectHints render in 'full' mode
+test('Persona dialectHints merge into full-mode rendering per dialect', () => {
+    const personaFull = {
+        id: 'p3',
+        name: 'Player',
+        povMode: 'full',
+        countTag: '1boy',
+        booru: 'short brown hair, leather jacket',
+        natural: 'a tall man in a leather jacket',
+        dialectHints: {
+            krea: { stylePhrase: 'cinematic lighting', lighting: 'golden hour', camera: '35mm' },
+            anima: { booruTags: 'leather jacket, confident', artists: 'artistA' },
+            illus: { artists: 'artistB', qualityPrefix: 'masterpiece', negativeTags: 'bad anatomy' },
+        },
+    };
+    const parsed = parseTriggers('$me standing by the window', { roster, styles, defaultPersona: personaFull, personas: [personaFull] });
+
+    const kreaOut = assemblePrompt(parsed, 'krea', PROFILES.krea2);
+    assert.ok(kreaOut.prompt.includes('a tall man in a leather jacket'));
+    assert.ok(kreaOut.prompt.includes('cinematic lighting'));
+    assert.ok(kreaOut.prompt.includes('golden hour'));
+    assert.ok(kreaOut.prompt.includes('35mm'));
+
+    const animaOut = assemblePrompt(parsed, 'anima', PROFILES.anima);
+    assert.ok(animaOut.prompt.includes('1boy'));
+    assert.ok(animaOut.prompt.includes('short brown hair'));
+    assert.ok(animaOut.prompt.includes('leather jacket, confident'));
+    assert.ok(animaOut.prompt.includes('artistA'));
+
+    const illusOut = assemblePrompt(parsed, 'illus', PROFILES.illustrious);
+    assert.ok(illusOut.prompt.includes('1boy'));
+    assert.ok(illusOut.prompt.includes('short brown hair'));
+    assert.ok(illusOut.prompt.includes('artistB'));
+    assert.ok(illusOut.prompt.includes('masterpiece'));
+    assert.ok(illusOut.negative.includes('bad anatomy'));
+});
+
 // 8. B1 regression: JSON trigger modifiers must be a string[] like $Name:mods
 test('JSON trigger ${char: Lyna, view: back, nsfw: true} renders back/nsfw variants', () => {
     const parsed = parseTriggers('${char: "Lyna", view: "back", nsfw: true, outfit: "casual"} at a bar', { roster, styles });
