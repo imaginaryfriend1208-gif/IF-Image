@@ -185,12 +185,20 @@ export function parseTriggers(input, context = {}) {
             }
             if (typeof parsed.size === 'string') {
                 const sizeMatch = parsed.size.match(/^\s*(\d+)\s*[xX*]\s*(\d+)\s*$/);
+                const keyword = parsed.size.trim().toLowerCase();
                 if (sizeMatch) {
                     paramOverrides.width = Number(sizeMatch[1]);
                     paramOverrides.height = Number(sizeMatch[2]);
                     consumed = true;
+                } else if (keyword === 'portrait' || keyword === 'landscape' || keyword === 'square') {
+                    // D3: orientation keyword. The numeric pair depends on
+                    // the profile, which is not known here — compile()
+                    // (index.js) resolves it AFTER the profile is picked.
+                    // A numeric "WxH" from another trigger beats the keyword.
+                    paramOverrides.sizeKeyword = keyword;
+                    consumed = true;
                 } else {
-                    console.warn(`[IF Image] Ignoring invalid "size" trigger value "${parsed.size}" (expected "WxH").`);
+                    console.warn(`[IF Image] Ignoring invalid "size" trigger value "${parsed.size}" (expected "WxH" or portrait/landscape/square).`);
                 }
             }
             if (parsed.steps !== undefined) {
@@ -202,6 +210,12 @@ export function parseTriggers(input, context = {}) {
                 const n = Number(parsed.cfg);
                 if (Number.isFinite(n)) { paramOverrides.cfg = n; consumed = true; }
                 else console.warn('[IF Image] Ignoring invalid "cfg" trigger value (not a number).');
+            }
+            // D2: marker-level seed override — integer >= -1 (-1 = random).
+            if (parsed.seed !== undefined) {
+                const n = Number(parsed.seed);
+                if (Number.isInteger(n) && n >= -1) { paramOverrides.seed = n; consumed = true; }
+                else console.warn('[IF Image] Ignoring invalid "seed" trigger value (expected an integer >= -1).');
             }
             if (consumed) return '';
         } catch {

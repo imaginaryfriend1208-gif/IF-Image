@@ -138,6 +138,99 @@ export const migrators = [
             s.generation.checkpoint = typeof a1111.checkpoint === 'string' ? a1111.checkpoint : '';
         }
     },
+
+    // 6 -> 7 (Phase D): every new Phase D settings key in ONE migrator.
+    // - generation.llmSize: how an LLM <size> hint interacts with a marker
+    //   JSON size — 'auto' (current behavior: LLM wins), 'ignore' (LLM size
+    //   discarded), 'force' (LLM wins even over marker size; equals 'auto'
+    //   today, kept distinct so 'auto' can later mean "only when the marker
+    //   has no size").
+    // - cache: image-store housekeeping; 0 = feature off for each knob
+    //   (ttlDays prune-by-age, maxMB prune-by-size, jpegQuality convert
+    //   new saves to JPEG when > 0).
+    // - backends.nai.variety: NAI Variety+ toggle (skip_cfg_above_sigma).
+    (s) => {
+        if (!s.generation) s.generation = {};
+        if (s.generation.llmSize === undefined) s.generation.llmSize = 'auto';
+        if (!s.cache || typeof s.cache !== 'object') {
+            s.cache = { ttlDays: 0, maxMB: 0, jpegQuality: 0 };
+        }
+        if (!s.backends) s.backends = {};
+        if (!s.backends.nai || typeof s.backends.nai !== 'object') {
+            s.backends.nai = { apiKey: '', model: 'nai-diffusion-4-5-full' };
+        }
+        if (s.backends.nai.variety === undefined) s.backends.nai.variety = false;
+    },
+
+    // 7 -> 8 (D9): checkpoint profiles become explicit. Up to v7 the
+    // Backends tab auto-seeded one checkpointProfiles row per discovered
+    // checkpoint (machine-generated from server hints), which made the map
+    // indistinguishable from user intent. From v8 a row exists only when the
+    // user clicked "Save profile", so the auto-seeded rows are dropped here;
+    // the checkpoint selection itself and the discovery cache are untouched.
+    // Also stamps backends.a1111.transport for pre-relay settings.
+    (s) => {
+        if (!s.backends) s.backends = {};
+        if (!s.backends.a1111 || typeof s.backends.a1111 !== 'object') {
+            s.backends.a1111 = { baseUrl: '', auth: '', checkpoint: '' };
+        }
+        s.backends.a1111.checkpointProfiles = {};
+        if (s.backends.a1111.transport !== 'direct') s.backends.a1111.transport = 'st-relay';
+    },
+
+    // 8 -> 9 (D11): the A1111 checkpoint selection becomes ONE value.
+    // generation.checkpoint (Main tab, read first by compile()) and
+    // backends.a1111.checkpoint (Backends tab, written by Save profile /
+    // Use / Test Gen) were separate keys, so a checkpoint chosen in the
+    // Backends tab did not drive marker generation when the Main tab still
+    // pointed elsewhere. From v9 the UI writes both keys through a single
+    // setter; this migrator reconciles settings that already diverged. The
+    // Backends-tab value wins when present — it is where discovery,
+    // profile-saving, and test generation all operate.
+    (s) => {
+        if (!s.backends) s.backends = {};
+        if (!s.backends.a1111 || typeof s.backends.a1111 !== 'object') {
+            s.backends.a1111 = { baseUrl: '', auth: '', checkpoint: '' };
+        }
+        if (!s.generation) s.generation = {};
+        const backend = typeof s.backends.a1111.checkpoint === 'string' ? s.backends.a1111.checkpoint : '';
+        const main = typeof s.generation.checkpoint === 'string' ? s.generation.checkpoint : '';
+        const unified = backend || main;
+        s.backends.a1111.checkpoint = unified;
+        s.generation.checkpoint = unified;
+    },
+
+    // 9 -> 10 (D14): checkpointProfiles becomes keyed by a unique PROFILE ID
+    // instead of the checkpoint title, so one checkpoint can hold multiple
+    // saved profiles. Each row gains `checkpoint` (the title it targets) and
+    // `name` (display label, defaults to the title). activeProfileId replaces
+    // the checkpoint selection as "which saved profile drives generation";
+    // the checkpoint keys stay in sync with the active row (executor
+    // compatibility). Old rows migrate 1:1 (id = 'cp1', 'cp2', ...).
+    (s) => {
+        if (!s.backends) s.backends = {};
+        if (!s.backends.a1111 || typeof s.backends.a1111 !== 'object') {
+            s.backends.a1111 = { baseUrl: '', auth: '', checkpoint: '' };
+        }
+        const a1111 = s.backends.a1111;
+        const old = a1111.checkpointProfiles && typeof a1111.checkpointProfiles === 'object'
+            ? a1111.checkpointProfiles : {};
+        const next = {};
+        let activeProfileId = '';
+        let n = 0;
+        for (const [title, entry] of Object.entries(old)) {
+            if (!entry || typeof entry !== 'object') continue;
+            // Already-migrated rows (carry their own checkpoint) keep it.
+            const checkpoint = typeof entry.checkpoint === 'string' && entry.checkpoint ? entry.checkpoint : title;
+            const name = typeof entry.name === 'string' && entry.name ? entry.name : checkpoint;
+            n += 1;
+            const id = `cp${n}`;
+            next[id] = { ...entry, checkpoint, name };
+            if (!activeProfileId && checkpoint === a1111.checkpoint) activeProfileId = id;
+        }
+        a1111.checkpointProfiles = next;
+        a1111.activeProfileId = activeProfileId;
+    },
 ];
 
 /** Current schema version = number of migrators applied from zero. */

@@ -13,6 +13,10 @@
 // matching content hash; if found, it skips generation entirely and lets the
 // DOM pass restore the persisted image instead.
 
+// Pure clamp helpers (no ST deps) — safe to import in offline tests. Used by
+// D4's edit-before-generate override sanitization.
+import { clampDim, clampSteps, clampCfg } from '../prompt/render.js';
+
 /**
  * @param {object} deps
  * @param {() => object} deps.getQueue - lazy getter for the createTaskQueue()
@@ -29,7 +33,7 @@
  * @param {(doc, info) => Node} deps.createSlotElement
  * @param {(slot, snapshot, doc, actions?) => void} deps.renderSlotState
  * @param {(slot, doc, objectUrl, actions?) => Node} deps.renderImageFrame
- * @param {(doc, src) => () => void} deps.openLightbox
+ * @param {(doc, opts: {records, index?, onDelete?, onRegenerate?, getObjectUrl?}) => () => void} deps.openLightbox
  * @param {(root, tags, onFound) => number} deps.replaceMarkers
  * @param {(content: string) => Promise<{entries: Array<{profileKey, envelope}>}>} [deps.rewrite]
  *   Assist-mode LLM hook. Called AFTER the IDB restore check misses, with the
@@ -57,6 +61,10 @@ export function createMarkerPipeline(deps) {
         // button for slots with nothing persisted and no live task. Without
         // it, such slots fall back to the old invisible idle placeholder.
         renderIdleChip,
+        // D4 (optional): edit-before-generate dialog. Receives the slot's
+        // current { prompt, negative, params, profileKey } and resolves to an
+        // envelope override { prompt?, negative?, params? } or null (cancel).
+        openEditDialog,
     } = deps;
 
     // key -> entry. Entry holds the DOM slot (may be detached after a
@@ -141,10 +149,101 @@ export function createMarkerPipeline(deps) {
         if (id && entry.slot) renderSlotState(entry.slot, { status: 'queued' }, doc);
     }
 
+    /**
+     * D4: apply an edit-dialog override onto an envelope without mutating it.
+     * prompt/negative replace only when strings; numeric params go through
+     * the standard clamp helpers (width/height as a pair); seed must be an
+     * integer >= -1. Unknown params fields are ignored.
+     */
+    function applyEnvelopeOverride(envelope, override) {
+        if (!override || typeof override !== 'object') return envelope;
+        const out = { ...envelope, params: { ...envelope.params } };
+        if (typeof override.prompt === 'string' && override.prompt.trim()) out.prompt = override.prompt.trim();
+        if (typeof override.negative === 'string') out.negative = override.negative.trim();
+        const p = override.params;
+        if (p && typeof p === 'object') {
+            const width = clampDim(p.width);
+            const height = clampDim(p.height);
+            if (width !== undefined && height !== undefined) {
+                out.params.width = width;
+                out.params.height = height;
+            }
+            const steps = clampSteps(p.steps);
+            if (steps !== undefined) out.params.steps = steps;
+            const cfg = clampCfg(p.cfg);
+            if (cfg !== undefined) out.params.cfg = cfg;
+            const seed = Number(p.seed);
+            if (Number.isInteger(seed) && seed >= -1) out.params.seed = seed;
+        }
+        return out;
+    }
+
     function bindImageActions(entry) {
-        const openView = () => {
+        const openView = async () => {
             if (activeLightbox) activeLightbox.close();
-            const close = openLightbox(doc, entry.objectUrl);
+            // D1: the lightbox browses every persisted image for this slot
+            // (same occurrence + marker hash), newest first. IDB errors fall
+            // back to the live record so View still works.
+            let records = [];
+            try {
+                const all = await getImagesForMessage(entry.chatId, entry.messageId, entry.swipeId);
+                records = all.filter(r => r.blob && r.occurrence === entry.occurrence && contentHash(r.content) === entry.hash);
+            } catch (err) {
+                console.warn('[IF Image] Lightbox record fetch failed:', err?.message ?? err);
+            }
+            // The entry may have been forgotten (chat switch) during the await.
+            if (slots.get(entry.key) !== entry) return;
+            if (!records.length) {
+                // Live task result whose save failed: view the in-memory URL.
+                records = [{
+                    id: entry.recordId ?? null,
+                    seed: entry.envelope?.params?.seed,
+                    checkpoint: entry.envelope?.params?.checkpoint,
+                    width: entry.envelope?.params?.width,
+                    height: entry.envelope?.params?.height,
+                    profileKey: entry.profileKey,
+                    blob: null,
+                }];
+            }
+            const startIndex = Math.max(0, records.findIndex(r => r.id === entry.recordId));
+            const deletedIds = new Set(); // the lightbox splices its own copy
+            const close = openLightbox(doc, {
+                records,
+                index: startIndex,
+                getObjectUrl: (record) => (record.id === entry.recordId && entry.objectUrl) ? entry.objectUrl : null,
+                onRegenerate: () => regenerate(entry),
+                onDelete: deleteImageRecord ? async (record) => {
+                    try {
+                        await deleteImageRecord(record.id);
+                    } catch (err) {
+                        notify('error', `Delete failed: ${err?.message ?? err}`);
+                        throw err; // lightbox keeps the record on failure
+                    }
+                    deletedIds.add(record.id);
+                    if (record.id !== entry.recordId) return;
+                    // The slot's shown image was deleted. Swap the slot to
+                    // the newest remaining record, or collapse when none.
+                    const remaining = records.filter(r => !deletedIds.has(r.id) && r.blob);
+                    if (remaining.length) {
+                        entry.recordId = remaining[0].id;
+                        if (Number.isInteger(remaining[0].seed)) entry.lastSeed = remaining[0].seed;
+                        // showImage() -> releaseUrl() would close the open
+                        // lightbox for this entry; the lightbox must stay open
+                        // and advance to the next record, so detach it while
+                        // the slot swaps its image, then reattach.
+                        const keepOpen = activeLightbox;
+                        activeLightbox = null;
+                        showImage(entry, remaining[0].blob);
+                        activeLightbox = keepOpen;
+                        return;
+                    }
+                    entry.recordId = null;
+                    releaseUrl(entry);
+                    if (!entry.slot) return;
+                    if (renderRegenerateChip) renderRegenerateChip(entry.slot, doc, () => regenerate(entry));
+                    else { entry.slot.dataset.ifimgState = 'idle'; entry.slot.textContent = ''; }
+                } : undefined,
+            });
             activeLightbox = { close, entry };
         };
         const actions = {
@@ -155,6 +254,32 @@ export function createMarkerPipeline(deps) {
             onView: openView,
             onRegen: () => regenerate(entry),
         };
+        // (D14: the D2 Repro action — regenerate with the shown image's
+        // exact seed — was removed from the toolbar as unnecessary. The
+        // regenerate({seed}) path itself remains for gallery/record reuse.)
+        // D4: Edit-before-generate. The dialog resolves to an envelope
+        // override (or null on cancel); Generate re-enters the shared
+        // generation path. The marker text in the message is NEVER modified —
+        // entry identity stays the rendered marker text.
+        if (typeof openEditDialog === 'function' && entry.envelope) {
+            actions.onEdit = async () => {
+                let override;
+                try {
+                    override = await openEditDialog({
+                        prompt: entry.envelope.prompt ?? '',
+                        negative: entry.envelope.negative ?? '',
+                        params: { ...(entry.envelope.params ?? {}) },
+                        profileKey: entry.profileKey,
+                    });
+                } catch (err) {
+                    console.warn('[IF Image] Edit dialog failed:', err?.message ?? err);
+                    return;
+                }
+                if (!override) return; // cancelled
+                if (slots.get(entry.key) !== entry) return; // superseded during await
+                startGeneration(entry, { envelopeOverride: override });
+            };
+        }
         // Delete only when the record id is known and a delete backend was
         // injected — restored frames and fresh saves both stamp recordId.
         if (deleteImageRecord && entry.recordId) {
@@ -176,14 +301,21 @@ export function createMarkerPipeline(deps) {
         return actions;
     }
 
-    async function regenerate(entry) {
+    /**
+     * Re-enqueue an entry's envelope. Default (Regen) uses seed -1; D2's
+     * Repro passes { seed: record.seed } to reproduce the exact image —
+     * that path also skips the assist/full LLM variation rewrite, because a
+     * different prompt would defeat reproduction.
+     * @param {{seed?: number}} [options]
+     */
+    async function regenerate(entry, { seed = -1 } = {}) {
         if (!entry?.envelope) return;
         releaseUrl(entry); // closes any open lightbox for this entry first (FIX 4)
         // Assist/Full: re-call the LLM with previous_prompt + a variation
         // hint so the regeneration is a genuine new take, not the same
         // prompt with a new seed. Direct mode keeps prompt/params, seed -1.
         const mode = getSettings().generation?.mode ?? 'direct';
-        if ((mode === 'assist' || mode === 'full') && typeof rewrite === 'function') {
+        if (seed < 0 && (mode === 'assist' || mode === 'full') && typeof rewrite === 'function') {
             entry.rewriting = true;
             if (entry.slot) renderSlotState(entry.slot, { status: 'running' }, doc);
             try {
@@ -204,7 +336,7 @@ export function createMarkerPipeline(deps) {
                 console.warn('[IF Image] Regenerate rewrite failed; reusing previous prompt:', err?.message ?? err);
             }
         }
-        const envelope = { ...entry.envelope, params: { ...entry.envelope.params, seed: -1 } };
+        const envelope = { ...entry.envelope, params: { ...entry.envelope.params, seed } };
         entry.envelope = envelope;
         const id = enqueue(entry, envelope);
         if (id && entry.slot) renderSlotState(entry.slot, { status: 'queued' }, doc);
@@ -227,6 +359,9 @@ export function createMarkerPipeline(deps) {
 
         if (snapshot.status === 'succeeded' && snapshot.result?.blob) {
             const result = snapshot.result;
+            // D2: remember the actual seed so the overlay's Repro can
+            // reproduce this exact image.
+            if (Number.isInteger(result.seed)) entry.lastSeed = result.seed;
             try {
                 entry.recordId = await saveImageRecord({
                     chatId: entry.chatId,
@@ -247,6 +382,8 @@ export function createMarkerPipeline(deps) {
                     blob: result.blob,
                     width: result.width,
                     height: result.height,
+                    // D4: user edited the prompt/params before generating.
+                    ...(entry.editedPrompt ? { editedPrompt: true } : {}),
                 });
             } catch (err) {
                 console.warn('[IF Image] Image record save failed:', err?.message ?? err);
@@ -330,11 +467,16 @@ export function createMarkerPipeline(deps) {
     let sequence = 0;
 
     /** Merge parser-derived overrides (Full-mode <ifimage> size/negative)
-     *  into a compiled envelope without mutating the original. */
+     *  into a compiled envelope without mutating the original.
+     *  D3: generation.llmSize gates the LLM <size> pair — 'ignore' discards
+     *  it; 'auto' and 'force' both apply it (identical today; 'auto' is
+     *  reserved to later mean "only when the marker set no size"). */
     function applyOverrides(envelope, overrides) {
         if (!overrides) return envelope;
         const params = { ...envelope.params };
-        if (Number.isFinite(overrides.width) && Number.isFinite(overrides.height)) {
+        const llmSize = getSettings().generation?.llmSize ?? 'auto';
+        if (llmSize !== 'ignore'
+            && Number.isFinite(overrides.width) && Number.isFinite(overrides.height)) {
             params.width = overrides.width;
             params.height = overrides.height;
         }
@@ -470,9 +612,15 @@ export function createMarkerPipeline(deps) {
      * chip descriptor `{ chatId, messageId, swipeId, occurrence, content,
      * slot?, failedRecordId? }` — the chip path compiles fresh (compile →
      * overrides) and registers a new entry, replacing any stale one.
+     *
+     * D4: `options.envelopeOverride` replaces the envelope's prompt/negative/
+     * params (clamped through the standard helpers) before enqueueing, and
+     * marks the entry so the saved record carries editedPrompt: true. The
+     * marker text/identity is never touched.
+     * @param {{envelopeOverride?: object}} [options]
      * @returns {object|null} the live entry, or null if compile failed.
      */
-    function startGeneration(entryInfo) {
+    function startGeneration(entryInfo, { envelopeOverride } = {}) {
         const settings = getSettings();
         let entry = entryInfo;
         if (!entry.envelope) {
@@ -509,6 +657,14 @@ export function createMarkerPipeline(deps) {
                 failedRecordId: entryInfo.failedRecordId ?? previous?.failedRecordId ?? null,
             };
             slots.set(key, entry);
+        }
+
+        // D4: user-edited prompt/params replace the compiled envelope. The
+        // flag sticks on the entry so the eventual success record is marked.
+        if (envelopeOverride) {
+            releaseUrl(entry); // closes any open lightbox for this entry (FIX 4)
+            entry.envelope = applyEnvelopeOverride(entry.envelope, envelopeOverride);
+            entry.editedPrompt = true;
         }
 
         // Dry-run: log the final envelope, never enqueue.
@@ -704,6 +860,8 @@ export function createMarkerPipeline(deps) {
                 }
             }
             entry.recordId = record.id;
+            // D2: the record's seed backs the overlay's Repro action.
+            if (Number.isInteger(record.seed)) entry.lastSeed = record.seed;
             showImage(entry, record.blob);
         }
     }

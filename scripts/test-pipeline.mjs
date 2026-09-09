@@ -433,12 +433,13 @@ test('R2: restore rehydrates the record checkpoint; regenerate reuses it', async
 // ---- R3: idle/failed chips + failure persistence ----------------------------
 
 /** Pipeline with renderIdleChip/deleteImageRecord injected and IDB writes captured. */
-function makeR3Pipeline({ records = [] } = {}) {
+function makeR3Pipeline({ records = [], openEditDialog } = {}) {
     const queue = makeQueue();
     const saved = [];
     const deleted = [];
     const idleChips = []; // { slot, onGenerate }
     const failedRenders = []; // { slot, snapshot, onRetry }
+    const frames = []; // { slot, url, actions } (D4)
     let recSeq = 0;
     const pipeline = createMarkerPipeline({
         getQueue: () => queue,
@@ -459,11 +460,12 @@ function makeR3Pipeline({ records = [] } = {}) {
             slot.dataset.ifimgState = snapshot?.status || 'queued';
             if (snapshot?.status === 'failed') failedRenders.push({ slot, snapshot, onRetry: actions.onRetry });
         },
-        renderImageFrame: () => {},
+        renderImageFrame: (slot, d, url, actions) => { frames.push({ slot, url, actions }); },
         renderIdleChip: (slot, d, { onGenerate } = {}) => {
             slot.dataset.ifimgState = 'idle';
             idleChips.push({ slot, onGenerate });
         },
+        openEditDialog,
         openLightbox: () => () => {},
         replaceMarkers: (root, tags, onFound) => {
             const slot = onFound({ occurrence: 0, content: 'scene' });
@@ -475,7 +477,7 @@ function makeR3Pipeline({ records = [] } = {}) {
         getSettings: () => ({ enabled: true, generation: { enabled: true, mode: 'direct', startTag: 'image###', endTag: '###' } }),
         getCurrentChatId: () => 'A',
     });
-    return { pipeline, queue, saved, deleted, idleChips, failedRenders };
+    return { pipeline, queue, saved, deleted, idleChips, failedRenders, frames };
 }
 
 test('R3: no record and no live task renders the idle chip; Generate enqueues exactly once', async () => {
@@ -570,6 +572,263 @@ test('R3: cancellation is NOT persisted', async () => {
     const taskId = [...queue._tasks.keys()][0];
     await pipeline.onTaskStateChange({ id: taskId, status: 'cancelled' });
     assert.equal(saved.length, 0, 'cancelled tasks leave no record');
+});
+
+// ---- D14: Repro removed — restored frames expose Regen only ------------------
+test('D14: restored frame has no onRepro; Regen randomizes and keeps the record checkpoint', async () => {
+    const record = {
+        id: 'rec-1', chatId: 'A', messageId: 0, swipeId: 0, occurrence: 0,
+        content: 'scene', prompt: 'p', negative: '', params: { width: 832 },
+        backend: 'a1111', profileKey: 'anima', checkpoint: 'saved-ckpt', seed: 777,
+        blob: new Blob(['x']),
+    };
+    const queue = makeQueue();
+    let frameActions = null;
+    const pipeline = createMarkerPipeline({
+        getQueue: () => queue,
+        setTimeoutImpl: (fn) => { fn(); return 0; },
+        compile: c => ({ profileKey: 'anima', envelope: { prompt: c, negative: '', params: { seed: -1 } } }),
+        getImagesForMessage: async () => [record],
+        saveImageRecord: async () => 'rec-2',
+        contentHash,
+        defaultBackendKind: () => 'a1111', defaultProfileKey: () => 'anima',
+        notify: () => {}, doc,
+        createSlotElement: (d, info) => {
+            const s = d.createElement('span');
+            s.dataset.ifimgOcc = String(info.occurrence);
+            return s;
+        },
+        renderSlotState: () => {},
+        renderImageFrame: (slot, d, url, actions) => { frameActions = actions; },
+        openLightbox: () => () => {},
+        replaceMarkers: (root, tags, onFound) => {
+            const slot = onFound({ occurrence: 0, content: 'scene' });
+            root.childNodes = [slot];
+            return 1;
+        },
+        getMessage: () => ({ swipe_id: 0 }),
+        getMessageElement: () => el('DIV', 'image### scene ###'),
+        getSettings: () => ({ enabled: true, generation: { enabled: true, mode: 'direct', startTag: 'image###', endTag: '###' } }),
+        getCurrentChatId: () => 'A',
+    });
+    await pipeline.onMarker(marker);
+    await new Promise(r => setTimeout(r, 10)); // restoreImages settles
+    assert.ok(frameActions, 'restored frame rendered');
+    assert.equal(frameActions.onRepro, undefined, 'D14: Repro action removed even when the record has a real seed');
+    await frameActions.onRegen();
+    const task = [...queue._tasks.values()].at(-1);
+    assert.equal(task.prompt.params.seed, -1, 'Regen still randomizes');
+    assert.equal(task.prompt.params.checkpoint, 'saved-ckpt', 'Regen keeps the record checkpoint');
+});
+
+test('D2: onRepro is absent when the record has no usable seed', async () => {
+    const record = {
+        id: 'rec-1', chatId: 'A', messageId: 0, swipeId: 0, occurrence: 0,
+        content: 'scene', prompt: 'p', negative: '', params: {},
+        backend: 'a1111', profileKey: 'anima', seed: -1, blob: new Blob(['x']),
+    };
+    const queue = makeQueue();
+    let frameActions = null;
+    const pipeline = createMarkerPipeline({
+        getQueue: () => queue,
+        setTimeoutImpl: (fn) => { fn(); return 0; },
+        compile: c => ({ profileKey: 'anima', envelope: { prompt: c, negative: '', params: { seed: -1 } } }),
+        getImagesForMessage: async () => [record],
+        saveImageRecord: async () => 'rec-2',
+        contentHash,
+        defaultBackendKind: () => 'a1111', defaultProfileKey: () => 'anima',
+        notify: () => {}, doc,
+        createSlotElement: (d, info) => {
+            const s = d.createElement('span');
+            s.dataset.ifimgOcc = String(info.occurrence);
+            return s;
+        },
+        renderSlotState: () => {},
+        renderImageFrame: (slot, d, url, actions) => { frameActions = actions; },
+        openLightbox: () => () => {},
+        replaceMarkers: (root, tags, onFound) => {
+            const slot = onFound({ occurrence: 0, content: 'scene' });
+            root.childNodes = [slot];
+            return 1;
+        },
+        getMessage: () => ({ swipe_id: 0 }),
+        getMessageElement: () => el('DIV', 'image### scene ###'),
+        getSettings: () => ({ enabled: true, generation: { enabled: true, mode: 'direct', startTag: 'image###', endTag: '###' } }),
+        getCurrentChatId: () => 'A',
+    });
+    await pipeline.onMarker(marker);
+    await new Promise(r => setTimeout(r, 10));
+    assert.ok(frameActions);
+    assert.equal(frameActions.onRepro, undefined, 'seed -1 record gets no Repro');
+});
+
+test('D1: deleting the shown record from the lightbox swaps the slot image and keeps the lightbox open', async () => {
+    const mk = (id, seed) => ({
+        id, chatId: 'A', messageId: 0, swipeId: 0, occurrence: 0,
+        content: 'scene', prompt: 'p', negative: '', params: {},
+        backend: 'a1111', profileKey: 'anima', seed, blob: new Blob([id]),
+        timestamp: seed,
+    });
+    const newest = mk('rec-new', 2);
+    const older = mk('rec-old', 1);
+    const queue = makeQueue();
+    let frameActions = null;
+    const frameUrls = [];
+    let lightboxOpts = null;
+    let lightboxCloses = 0;
+    const deleted = [];
+    const pipeline = createMarkerPipeline({
+        getQueue: () => queue,
+        setTimeoutImpl: (fn) => { fn(); return 0; },
+        compile: c => ({ profileKey: 'anima', envelope: { prompt: c, negative: '', params: { seed: -1 } } }),
+        getImagesForMessage: async () => [newest, older],
+        saveImageRecord: async () => 'rec-x',
+        deleteImageRecord: async (id) => { deleted.push(id); },
+        contentHash,
+        defaultBackendKind: () => 'a1111', defaultProfileKey: () => 'anima',
+        notify: () => {}, doc,
+        createSlotElement: (d, info) => {
+            const s = d.createElement('span');
+            s.dataset.ifimgOcc = String(info.occurrence);
+            return s;
+        },
+        renderSlotState: () => {},
+        renderImageFrame: (slot, d, url, actions) => { frameActions = actions; frameUrls.push(url); },
+        openLightbox: (d, opts) => { lightboxOpts = opts; return () => { lightboxCloses += 1; }; },
+        replaceMarkers: (root, tags, onFound) => {
+            const slot = onFound({ occurrence: 0, content: 'scene' });
+            root.childNodes = [slot];
+            return 1;
+        },
+        getMessage: () => ({ swipe_id: 0 }),
+        getMessageElement: () => el('DIV', 'image### scene ###'),
+        getSettings: () => ({ enabled: true, generation: { enabled: true, mode: 'direct', startTag: 'image###', endTag: '###' } }),
+        getCurrentChatId: () => 'A',
+    });
+    await pipeline.onMarker(marker);
+    await new Promise(r => setTimeout(r, 10));
+    assert.ok(frameActions, 'restored frame rendered');
+    await frameActions.onView();
+    assert.ok(lightboxOpts, 'lightbox opened');
+    assert.equal(lightboxOpts.records.length, 2);
+    assert.equal(lightboxOpts.index, 0, 'opens on the shown (newest) record');
+    // Delete the record the slot currently shows.
+    await lightboxOpts.onDelete(newest);
+    assert.deepEqual(deleted, ['rec-new']);
+    assert.equal(lightboxCloses, 0, 'lightbox stays open after deleting the shown record');
+    assert.equal(frameUrls.length, 2, 'slot re-rendered with the remaining record');
+    assert.equal(frameActions.onRepro, undefined, 'D14: no Repro action on the re-rendered frame');
+    // Deleting the last record collapses the slot and closes the lightbox.
+    await lightboxOpts.onDelete(older);
+    assert.deepEqual(deleted, ['rec-new', 'rec-old']);
+    assert.equal(lightboxCloses, 1, 'lightbox closed once the slot has no record left');
+});
+
+// ---- D3: generation.llmSize gates the LLM <size> override --------------------
+test('D3: llmSize "ignore" discards the LLM width/height but keeps the negative', async () => {
+    const { pipeline, queue } = makePipeline({
+        settings: {
+            enabled: true,
+            generation: { enabled: true, mode: 'direct', startTag: 'image###', endTag: '###', llmSize: 'ignore' },
+        },
+    });
+    await pipeline.onMarker({ ...marker, overrides: { width: 512, height: 768, negative: 'extra neg' } });
+    assert.equal(queue._tasks.size, 1);
+    const task = [...queue._tasks.values()][0];
+    assert.equal(task.prompt.params.width, undefined, 'LLM width discarded');
+    assert.equal(task.prompt.params.height, undefined, 'LLM height discarded');
+    assert.match(task.prompt.negative, /extra neg/, 'negative override still applies');
+});
+
+test('D3: llmSize "auto" (and unset) applies the LLM width/height', async () => {
+    for (const llmSize of ['auto', undefined]) {
+        const { pipeline, queue } = makePipeline({
+            settings: {
+                enabled: true,
+                generation: { enabled: true, mode: 'direct', startTag: 'image###', endTag: '###', llmSize },
+            },
+        });
+        await pipeline.onMarker({ ...marker, overrides: { width: 512, height: 768 } });
+        const task = [...queue._tasks.values()][0];
+        assert.equal(task.prompt.params.width, 512, `width applied for llmSize=${llmSize}`);
+        assert.equal(task.prompt.params.height, 768, `height applied for llmSize=${llmSize}`);
+    }
+});
+
+// ---- D4: edit before generate -------------------------------------------------
+test('D4: edited envelope reaches the queue clamped; record gets editedPrompt; marker identity unchanged', async () => {
+    const override = {
+        prompt: '  edited prompt  ',
+        negative: 'neg2',
+        // Out-of-range values must pass through the standard clamps.
+        params: { width: 500, height: 900, steps: 200, cfg: 50, seed: 5 },
+    };
+    const { pipeline, queue, saved, frames } = makeR3Pipeline({ openEditDialog: async () => override });
+    await pipeline.onMarker(marker);
+    const firstId = [...queue._tasks.keys()][0];
+    await pipeline.onTaskStateChange({
+        id: firstId, status: 'succeeded',
+        result: { blob: new Blob(['x']), seed: 42, backend: 'a1111', profileKey: 'anima', width: 832, height: 1216 },
+    });
+    assert.equal(saved.length, 1);
+    assert.equal(saved[0].editedPrompt, undefined, 'un-edited generation carries no flag');
+    const actions = frames.at(-1).actions;
+    assert.equal(typeof actions.onEdit, 'function', 'frame exposes Edit when a dialog is injected');
+
+    await actions.onEdit();
+    assert.equal(queue._tasks.size, 2, 'Generate from the dialog enqueues a new task');
+    const edited = [...queue._tasks.values()].at(-1);
+    assert.equal(edited.prompt.prompt, 'edited prompt', 'prompt replaced (trimmed)');
+    assert.equal(edited.prompt.negative, 'neg2');
+    assert.equal(edited.prompt.params.width, 512, 'width clamped to 64px grid');
+    assert.equal(edited.prompt.params.height, 896);
+    assert.equal(edited.prompt.params.steps, 150, 'steps clamped to 150');
+    assert.equal(edited.prompt.params.cfg, 30, 'cfg clamped to 30');
+    assert.equal(edited.prompt.params.seed, 5);
+
+    await pipeline.onTaskStateChange({
+        id: edited.id, status: 'succeeded',
+        result: { blob: new Blob(['y']), seed: 5, backend: 'a1111', profileKey: 'anima', width: 512, height: 896 },
+    });
+    assert.equal(saved.length, 2);
+    assert.equal(saved[1].editedPrompt, true, 'edited generation record is flagged');
+    assert.equal(saved[1].content, 'scene', 'record identity stays the ORIGINAL marker text');
+    assert.equal(saved[1].prompt, 'edited prompt');
+});
+
+test('D4: restore after an edit shows the newest (edited) record', async () => {
+    const base = {
+        chatId: 'A', messageId: 0, swipeId: 0, occurrence: 0, content: 'scene',
+        negative: '', params: {}, backend: 'a1111', profileKey: 'anima',
+    };
+    // getImagesForMessage returns newest first; the edited record is newest.
+    const records = [
+        { ...base, id: 'rec-edited', prompt: 'edited prompt', editedPrompt: true, seed: 5, blob: new Blob(['new']) },
+        { ...base, id: 'rec-old', prompt: 'original prompt', seed: 9, blob: new Blob(['old']) },
+    ];
+    const { pipeline, queue, frames } = makeR3Pipeline({ records });
+    pipeline.attachSlots('A', 0);
+    await new Promise(r => setTimeout(r, 10));
+    assert.equal(frames.length, 1, 'restored exactly one frame');
+    const actions = frames[0].actions;
+    // The restored entry carries the NEWEST record: Regen re-enqueues the
+    // edited prompt (D14: Repro removed; seed always randomizes on Regen).
+    await actions.onRegen();
+    const task = [...queue._tasks.values()].at(-1);
+    assert.equal(task.prompt.params.seed, -1, 'Regen randomizes the seed');
+    assert.equal(task.prompt.prompt, 'edited prompt', 'restored envelope is the edited prompt');
+});
+
+test('D4: cancelling the edit dialog enqueues nothing', async () => {
+    const { pipeline, queue, frames } = makeR3Pipeline({ openEditDialog: async () => null });
+    await pipeline.onMarker(marker);
+    const firstId = [...queue._tasks.keys()][0];
+    await pipeline.onTaskStateChange({
+        id: firstId, status: 'succeeded',
+        result: { blob: new Blob(['x']), seed: 1, backend: 'a1111', profileKey: 'anima', width: 832, height: 1216 },
+    });
+    await frames.at(-1).actions.onEdit();
+    assert.equal(queue._tasks.size, 1, 'cancel = no new task');
 });
 
 // ---- Snapshot never contains credentials -----------------------------------

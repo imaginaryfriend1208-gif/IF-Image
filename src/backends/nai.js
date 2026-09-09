@@ -111,14 +111,18 @@ export function describeNaiError(status, bodyText) {
 export class NaiClient {
     /**
      * @param {() => string} getApiKey
+     * @param {() => {variety?: boolean}} [getOptions] - D5: optional live
+     *   options getter (settings-backed). `variety: true` enables Variety+
+     *   (skip_cfg_above_sigma). Single-argument construction keeps working.
      */
-    constructor(getApiKey) {
+    constructor(getApiKey, getOptions = () => ({})) {
         this.getApiKey = getApiKey;
+        this.getOptions = getOptions;
     }
 
     authHeaders() {
         const key = this.getApiKey();
-        if (!key) throw new Error('NovelAI API token is not set. Add it in the Backends tab.');
+        if (!key) throw new Error('NovelAI API token is not set. Add it in the Settings tab (NovelAI).');
         return { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' };
     }
 
@@ -161,6 +165,10 @@ export class NaiClient {
         // NAI accepts seeds up to 4294967295; `| 0` would wrap anything over 2^31 - 1.
         const seed = opts.seed >= 0 ? Math.trunc(Number(opts.seed)) : Math.floor(Math.random() * 9999999999);
 
+        // D5: Variety+ — the ST-mirrored sigma formula, only when enabled.
+        let variety = false;
+        try { variety = this.getOptions?.().variety === true; } catch { variety = false; }
+
         const characters = Array.isArray(opts.characters) ? opts.characters.filter(Boolean) : [];
         const isMultiChar = characters.length >= 2;
         const centers = isMultiChar ? computeCharacterCenters(characters.length) : [];
@@ -202,7 +210,7 @@ export class NaiClient {
                 sm: false,
                 sm_dyn: false,
                 uncond_scale: 1,
-                skip_cfg_above_sigma: null,
+                skip_cfg_above_sigma: variety ? calculateSkipCfgAboveSigma(width, height, model) : null,
                 use_coords: isMultiChar,
                 characterPrompts,
                 reference_image_multiple: [],

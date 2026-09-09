@@ -4,9 +4,10 @@
 
 import { createLlmClient, LlmError } from './client.js';
 import { buildContext } from './context.js';
-import { renderSystemPrompt, renderUserPrompt, DIALECT_RULES, REQUEST_PROMPT_RENDERERS } from './prompts.js';
+import { renderSystemPrompt, renderUserPrompt, renderChatPlacePrompt, DIALECT_RULES, REQUEST_PROMPT_RENDERERS } from './prompts.js';
 import { parseLlmReply } from './parser.js';
 import { resolveRequestMapping } from './profiles.js';
+import { validatePlacements } from './placements.js';
 import { resolveProfileKey } from '../prompt/render.js';
 import { PROFILES } from '../profiles.js';
 
@@ -321,8 +322,101 @@ export function createEngine({
         return { persona: parsed, raw: result.text, elapsedMs: result.elapsedMs };
     }
 
+    // ------------------------------------------------------------------
+    // chat_place: LLM plans N image placements across the current chat.
+    // ------------------------------------------------------------------
+
+    /**
+     * LLM plans N image placements across the current chat.
+     * @param {number} count - number of images to place (1..6)
+     * @param {{ signal?: AbortSignal }} [opts]
+     * @returns {Promise<{ placements: Array<{ messageId: number, prompt: string, negative?: string, width?: number, height?: number }>, method: string, elapsedMs: number }>}
+     */
+    async function planChatImages(count, { signal } = {}) {
+        const settings = getSettings();
+        const ctx = getContext();
+        const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+        const chatPlaceSettings = settings.llm?.chatPlace ?? {};
+        const onlyCharacter = chatPlaceSettings.onlyCharacter !== false;
+
+        // Build full-chat context (wider scene window for placement planning)
+        const maxWindow = Math.min(40, Math.max(2, chatPlaceSettings.maxChatWindow ?? 40));
+        const contextResult = buildContext({
+            chat,
+            settings,
+            contextProfile: { sceneWindow: maxWindow, scope: 'scene' },
+            substituteParams,
+            roster: typeof roster === 'function' ? roster() : (roster ?? {}),
+        });
+
+        // Resolve dialect rules (same logic as rewrite())
+        const configuredProfileKey = settings.generation?.profile || 'anima';
+        const { profileKey } = resolveProfileKey(null, configuredProfileKey);
+        const profile = PROFILES[profileKey] ?? PROFILES.anima;
+        const dialectKey = profile.dialect ?? 'anima';
+        const dialectRules = DIALECT_RULES[dialectKey] ?? DIALECT_RULES.anima;
+
+        // Build character cards text
+        const rosterData = typeof roster === 'function' ? roster() : (roster ?? {});
+        const chars = rosterData.characters ?? [];
+        const charBlock = chars.map(c => {
+            const parts = [];
+            if (c.name) parts.push(`Name: ${c.name}`);
+            if (c.countTag) parts.push(`Count: ${c.countTag}`);
+            if (c.booru) parts.push(`Tags: ${c.booru}`);
+            if (c.facts) parts.push(`Facts: ${c.facts}`);
+            return parts.join(' | ');
+        }).join('\n');
+
+        // Persona block
+        const persona = rosterData.persona ?? null;
+        let personaBlock = '';
+        if (persona) {
+            const parts = [];
+            if (persona.name) parts.push(`Name: ${persona.name}`);
+            if (persona.booru) parts.push(`Tags: ${persona.booru}`);
+            if (persona.natural) parts.push(`Description: ${persona.natural}`);
+            personaBlock = parts.join(' | ');
+        }
+
+        // System prompt
+        const systemPrompt = renderChatPlacePrompt({
+            count,
+            dialect_rules: dialectRules,
+            character_cards: charBlock,
+            persona_block: personaBlock,
+        });
+
+        // User prompt: full scene text
+        const userPrompt = `Plan ${count} image placements for this conversation.\n\n${contextResult.sceneText}`;
+
+        // Resolve API profile (chat_place → fallback to image_gen mapping)
+        const mapping = resolveRequestMapping(settings, 'chat_place');
+        const fallbackMapping = resolveRequestMapping(settings, 'image_gen');
+        const profileId = mapping.apiProfile?.id
+            ?? fallbackMapping.apiProfile?.id
+            ?? settings.llm?.defaultApiProfileId
+            ?? '';
+
+        // LLM call
+        const result = await client.request({
+            type: 'chat_place',
+            systemPrompt,
+            userPrompt,
+            profileId,
+            signal,
+        });
+
+        // Parse and validate
+        const parsed = parseJsonLoose(result.text);
+        const placements = validatePlacements(parsed, chat, count, { onlyCharacter });
+
+        return { placements, method: result.method, elapsedMs: result.elapsedMs };
+    }
+
     return {
         rewrite, regenerate,
         generateCharacterDesign, modifyCharacter, modifyTags, translateFacts, syncPersonaFromSt,
+        planChatImages,
     };
 }

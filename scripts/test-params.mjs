@@ -3,9 +3,9 @@
 // Run: node scripts/test-params.mjs
 import assert from 'node:assert/strict';
 import { parseTriggers } from '../src/prompt/triggers.js';
-import { assemblePrompt, mergeProfileParams, applyMarkerParamOverrides, clampDim, clampSteps, clampCfg } from '../src/prompt/render.js';
+import { assemblePrompt, mergeProfileParams, applyMarkerParamOverrides, clampDim, clampSteps, clampCfg, resolveLockedSeed, resolveSizeKeyword } from '../src/prompt/render.js';
 import { PROFILES } from '../src/profiles.js';
-import { inferProfileKey, seedCheckpointProfiles, resolveCheckpointProfile, mergeParams } from '../src/backends/checkpoint-profiles.js';
+import { inferProfileKey, resolveCheckpointProfile, getActiveProfile, mergeParams, matchDiscoveredName, suggestCheckpointProfile, normalizeCheckpointProfile, SIZE_PRESETS, matchSizePreset } from '../src/backends/checkpoint-profiles.js';
 
 let passed = 0;
 let failed = 0;
@@ -167,65 +167,117 @@ test('R1: 10 real magimo titles infer the correct profile', () => {
     }
 });
 
-test('seedCheckpointProfiles: adds missing titles with inferred profile + mapped defaults', () => {
-    const models = [
-        { title: 'Krea 2 | Turbo18+', family: 'krea2', defaults: { steps: 8, cfg: 1, width: 1344, height: 768, sampler: 'Euler a', scheduler: 'simple' } },
-        { title: 'Mystery Model' },
-    ];
-    const seeded = seedCheckpointProfiles({}, models, 'anima');
-    assert.deepEqual(seeded['Krea 2 | Turbo18+'], { profile: 'krea2', width: 1344, height: 768, steps: 8, cfg: 1, sampler: 'Euler a', scheduler: 'simple' });
-    assert.deepEqual(seeded['Mystery Model'], { profile: 'anima' });
+test('suggestCheckpointProfile: server defaults win, mapped + clamped, sampler aligned; source=server', () => {
+    const model = { title: 'Krea 2 | Turbo18+', family: 'krea2', defaults: { steps: 8, cfg: 1, width: 1344, height: 768, sampler: 'euler', scheduler: 'simple' } };
+    const s = suggestCheckpointProfile(model, 'anima', { samplers: ['Euler', 'Euler a'], schedulers: ['Automatic', 'simple'] });
+    assert.deepEqual(s, { profile: 'krea2', width: 1344, height: 768, steps: 8, cfg: 1, sampler: 'Euler', scheduler: 'simple', source: 'server' });
 });
 
-test('seedCheckpointProfiles: user edits survive re-seed (existing entries untouched, new object)', () => {
-    const existing = { 'Krea 2 | Turbo18+': { profile: 'anima', steps: 30 } };
-    const models = [
-        { title: 'Krea 2 | Turbo18+', family: 'krea2', defaults: { steps: 8 } },
-        { title: 'Anima | RDBT Anima', family: 'anima' },
-    ];
-    const seeded = seedCheckpointProfiles(existing, models, 'anima');
-    assert.notEqual(seeded, existing, 'must return a NEW object');
-    assert.deepEqual(seeded['Krea 2 | Turbo18+'], { profile: 'anima', steps: 30 }, 'user edit kept byte-identical');
-    assert.deepEqual(existing, { 'Krea 2 | Turbo18+': { profile: 'anima', steps: 30 } }, 'input never mutated');
-    assert.deepEqual(seeded['Anima | RDBT Anima'], { profile: 'anima' });
+test('suggestCheckpointProfile: without server defaults falls back to PROFILES numbers; source=profile; no sampler keys', () => {
+    const s = suggestCheckpointProfile({ title: 'Anima | RDBT Anima' }, 'krea2');
+    assert.deepEqual(s, { profile: 'anima', width: PROFILES.anima.width, height: PROFILES.anima.height, steps: PROFILES.anima.steps, cfg: PROFILES.anima.cfg, source: 'profile' });
+    assert.equal('sampler' in s, false);
+    // Unknown title -> fallback key; null model tolerated.
+    assert.equal(suggestCheckpointProfile({ title: 'Mystery' }, 'illustrious').profile, 'illustrious');
+    assert.equal(suggestCheckpointProfile(null, 'anima').profile, 'anima');
+    // Partial server defaults: missing numbers come from the profile.
+    const p = suggestCheckpointProfile({ title: 'Krea 2 | X', defaults: { steps: 4 } }, 'anima');
+    assert.equal(p.steps, 4);
+    assert.equal(p.width, PROFILES.krea2.width);
+    assert.equal(p.source, 'server');
 });
 
-test('resolveCheckpointProfile: returns {profileKey, overrides} or null', () => {
+test('normalizeCheckpointProfile: clamps numbers, drops blanks/invalid, rejects unknown style, requires checkpoint (D14)', () => {
+    assert.deepEqual(
+        normalizeCheckpointProfile({ profile: 'anima', checkpoint: 'CkptA', name: ' Fast ', width: '1000', height: '1216', steps: '999', cfg: '4.5', sampler: 'Euler a', scheduler: '' }),
+        { profile: 'anima', checkpoint: 'CkptA', name: 'Fast', width: 1024, height: 1216, steps: 150, cfg: 4.5, sampler: 'Euler a' },
+    );
+    // Blank name falls back to the checkpoint title.
+    assert.deepEqual(
+        normalizeCheckpointProfile({ profile: 'krea2', checkpoint: 'CkptB', name: '  ', width: '', height: 'abc' }),
+        { profile: 'krea2', checkpoint: 'CkptB', name: 'CkptB' },
+    );
+    // D14: no checkpoint -> not saveable.
+    assert.equal(normalizeCheckpointProfile({ profile: 'krea2' }), null);
+    assert.equal(normalizeCheckpointProfile({ profile: 'krea2', checkpoint: '   ' }), null);
+    assert.equal(normalizeCheckpointProfile({ profile: 'nope', checkpoint: 'X' }), null);
+    assert.equal(normalizeCheckpointProfile(null), null);
+});
+
+test('SIZE_PRESETS are 64-multiples inside the clamp range; matchSizePreset round-trips and reports custom', () => {
+    assert.ok(SIZE_PRESETS.length >= 6);
+    for (const p of SIZE_PRESETS) {
+        assert.equal(clampDim(p.width), p.width, p.key);
+        assert.equal(clampDim(p.height), p.height, p.key);
+        assert.equal(matchSizePreset(p.width, p.height), p.key);
+        assert.equal(matchSizePreset(String(p.width), String(p.height)), p.key, 'string input from form fields');
+    }
+    assert.equal(matchSizePreset(832, 832), 'custom');
+    assert.equal(matchSizePreset('', ''), 'custom');
+    assert.equal(new Set(SIZE_PRESETS.map(p => p.key)).size, SIZE_PRESETS.length, 'keys unique');
+    // Suggestion for a saved row round-trips through the preset matcher.
+    const row = normalizeCheckpointProfile({ profile: 'anima', checkpoint: 'M', width: 832, height: 1216 });
+    assert.equal(matchSizePreset(row.width, row.height), 'portrait');
+});
+
+test('resolveCheckpointProfile: keyed by profile id (D14); strips metadata; null on bad rows', () => {
     const settings = { backends: { a1111: { checkpointProfiles: {
-        'Anima | RDBT Anima': { profile: 'anima', steps: 20, sampler: 'Euler a' },
-        'Broken': { profile: 'not-a-profile' },
+        cp1: { profile: 'anima', checkpoint: 'Anima | RDBT Anima', name: 'Fast', steps: 20, sampler: 'Euler a' },
+        cp2: { profile: 'not-a-profile', checkpoint: 'X', name: 'Broken' },
     } } } };
-    assert.deepEqual(resolveCheckpointProfile(settings, 'Anima | RDBT Anima'), { profileKey: 'anima', overrides: { steps: 20, sampler: 'Euler a' } });
-    assert.equal(resolveCheckpointProfile(settings, 'Broken'), null);
-    assert.equal(resolveCheckpointProfile(settings, 'Unknown'), null);
-    assert.equal(resolveCheckpointProfile({}, 'Anything'), null);
+    assert.deepEqual(resolveCheckpointProfile(settings, 'cp1'), { profileKey: 'anima', overrides: { steps: 20, sampler: 'Euler a' } });
+    assert.equal(resolveCheckpointProfile(settings, 'cp2'), null);
+    assert.equal(resolveCheckpointProfile(settings, 'cp99'), null);
+    assert.equal(resolveCheckpointProfile({}, 'cp1'), null);
 });
 
-test('mergeParams: five-layer precedence PROFILES < settings < checkpoint < marker < LLM', () => {
+test('getActiveProfile: returns the selected usable row or null (D14)', () => {
+    const profiles = {
+        cp1: { profile: 'anima', checkpoint: 'CkptA', name: 'Fast', steps: 20 },
+        cp2: { profile: 'nope', checkpoint: 'CkptA', name: 'Broken style' },
+        cp3: { profile: 'anima', checkpoint: '', name: 'No checkpoint' },
+    };
+    const s = (activeProfileId) => ({ backends: { a1111: { activeProfileId, checkpointProfiles: profiles } } });
+    assert.deepEqual(getActiveProfile(s('cp1')), { id: 'cp1', entry: profiles.cp1 });
+    assert.equal(getActiveProfile(s('')), null, 'no selection');
+    assert.equal(getActiveProfile(s('cp99')), null, 'row deleted');
+    assert.equal(getActiveProfile(s('cp2')), null, 'unknown prompt style');
+    assert.equal(getActiveProfile(s('cp3')), null, 'no checkpoint title');
+    assert.equal(getActiveProfile({}), null);
+    assert.equal(getActiveProfile(null), null);
+});
+
+test('mergeParams: five-layer precedence PROFILES < settings < saved profile < marker < LLM (D14 profileId keying)', () => {
+    const title = 'Illustrious | New ERA Retro';
     const settings = {
         generation: { params: { illustrious: { steps: 30, cfg: 6, width: 896, height: 896 } } },
         backends: { a1111: { checkpointProfiles: {
-            'Illustrious | New ERA Retro': { profile: 'illustrious', steps: 24, sampler: 'DPM++ 2M', scheduler: 'karras' },
+            cp1: { profile: 'illustrious', checkpoint: title, name: 'Retro', steps: 24, sampler: 'DPM++ 2M', scheduler: 'karras' },
         } } },
     };
     // Layer 1+2: settings override beats the PROFILES default.
     let p = mergeParams({ profileKey: 'illustrious', settings });
     assert.equal(p.steps, 30);
     assert.equal(p.width, 896);
-    // Layer 3: checkpoint override beats settings for steps, inherits width.
-    p = mergeParams({ profileKey: 'illustrious', checkpointTitle: 'Illustrious | New ERA Retro', settings });
+    // Layer 3: saved-profile override (by profileId) beats settings for
+    // steps, inherits width; checkpointTitle only stamps params.checkpoint.
+    p = mergeParams({ profileKey: 'illustrious', checkpointTitle: title, profileId: 'cp1', settings });
     assert.equal(p.steps, 24);
     assert.equal(p.width, 896);
     assert.equal(p.sampler, 'DPM++ 2M');
     assert.equal(p.scheduler, 'karras');
-    assert.equal(p.checkpoint, 'Illustrious | New ERA Retro');
-    // Layer 4: marker JSON beats the checkpoint layer.
-    p = mergeParams({ profileKey: 'illustrious', checkpointTitle: 'Illustrious | New ERA Retro', settings, markerOverrides: { steps: 12, width: 1216, height: 832 } });
+    assert.equal(p.checkpoint, title);
+    // checkpointTitle without profileId: no saved-profile layer applied.
+    p = mergeParams({ profileKey: 'illustrious', checkpointTitle: title, settings });
+    assert.equal(p.steps, 30, 'no profileId -> settings layer wins');
+    assert.equal(p.checkpoint, title);
+    // Layer 4: marker JSON beats the saved-profile layer.
+    p = mergeParams({ profileKey: 'illustrious', checkpointTitle: title, profileId: 'cp1', settings, markerOverrides: { steps: 12, width: 1216, height: 832 } });
     assert.equal(p.steps, 12);
     assert.equal(p.width, 1216);
     assert.equal(p.height, 832);
     // Layer 5: LLM <size> beats everything.
-    p = mergeParams({ profileKey: 'illustrious', checkpointTitle: 'Illustrious | New ERA Retro', settings, markerOverrides: { steps: 12 }, llmOverrides: { width: 1024, height: 1024, cfg: 5 } });
+    p = mergeParams({ profileKey: 'illustrious', checkpointTitle: title, profileId: 'cp1', settings, markerOverrides: { steps: 12 }, llmOverrides: { width: 1024, height: 1024, cfg: 5 } });
     assert.equal(p.width, 1024);
     assert.equal(p.height, 1024);
     assert.equal(p.cfg, 5);
@@ -235,13 +287,124 @@ test('mergeParams: five-layer precedence PROFILES < settings < checkpoint < mark
 test('mergeParams: C0 clamps hold on every layer; lone marker width is ignored', () => {
     const settings = {
         generation: { params: { anima: { width: 4000, steps: 999 } } },
-        backends: { a1111: { checkpointProfiles: { M: { profile: 'anima', cfg: 99 } } } },
+        backends: { a1111: { checkpointProfiles: { cp1: { profile: 'anima', checkpoint: 'M', name: 'M', cfg: 99 } } } },
     };
-    const p = mergeParams({ profileKey: 'anima', checkpointTitle: 'M', settings, markerOverrides: { width: 1024 } });
+    const p = mergeParams({ profileKey: 'anima', checkpointTitle: 'M', profileId: 'cp1', settings, markerOverrides: { width: 1024 } });
     assert.equal(p.width, 2048);          // settings width clamped to max, marker lone width ignored
     assert.equal(p.steps, 150);           // clamped
     assert.equal(p.cfg, 30);              // checkpoint cfg clamped
     assert.equal(p.height, PROFILES.anima.height); // untouched inherits profile
+});
+
+// --- D2: marker seed + character seed lock ---------------------------------
+test('D2: ${seed:7} parses into paramOverrides.seed and reaches params', () => {
+    const parsed = parseTriggers('${seed: 7} a scene');
+    assert.equal(parsed.paramOverrides.seed, 7);
+    const params = { width: 832, height: 1216, steps: 20, cfg: 5, seed: -1 };
+    applyMarkerParamOverrides(params, parsed.paramOverrides);
+    assert.equal(params.seed, 7);
+});
+
+test('D2: invalid seed values are ignored (float, below -1, non-numeric)', () => {
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+        for (const bad of ['1.5', '-2', '"abc"']) {
+            const parsed = parseTriggers(`\${seed: ${bad}} x`);
+            assert.equal(parsed.paramOverrides.seed, undefined, `seed ${bad} must be dropped`);
+        }
+        // -1 (explicit random) is valid.
+        assert.equal(parseTriggers('${seed: -1} x').paramOverrides.seed, -1);
+    } finally { console.warn = warn; }
+});
+
+test('D2: mergeParams carries a marker seed through the a1111 layer chain', () => {
+    const settings = { generation: { params: {} }, backends: { a1111: { checkpointProfiles: { M: { profile: 'anima' } } } } };
+    const p = mergeParams({ profileKey: 'anima', checkpointTitle: 'M', settings, markerOverrides: { seed: 1234 } });
+    assert.equal(p.seed, 1234);
+    const p2 = mergeParams({ profileKey: 'anima', checkpointTitle: 'M', settings, markerOverrides: {} });
+    assert.equal(p2.seed, undefined, 'no marker seed -> merge adds none');
+});
+
+test('D2: resolveLockedSeed applies for exactly one character', () => {
+    const locked = { char: { lock: { seed: 42, params: null } } };
+    assert.equal(resolveLockedSeed([locked], {}), 42);
+    assert.equal(resolveLockedSeed([locked], undefined), 42);
+});
+
+test('D2: resolveLockedSeed never applies for two+ characters or unlocked chars', () => {
+    const locked = { char: { lock: { seed: 42, params: null } } };
+    const other = { char: { lock: { seed: 7, params: null } } };
+    assert.equal(resolveLockedSeed([locked, other], {}), undefined, 'two chars -> no lock');
+    assert.equal(resolveLockedSeed([], {}), undefined, 'no chars -> no lock');
+    assert.equal(resolveLockedSeed([{ char: { lock: { seed: -1, params: null } } }], {}), undefined, 'lock -1 = unlocked');
+    assert.equal(resolveLockedSeed([{ isPersona: true, persona: {} }], {}), undefined, 'persona entry has no char.lock');
+});
+
+test('D2: marker seed beats the character lock', () => {
+    const locked = { char: { lock: { seed: 42, params: null } } };
+    assert.equal(resolveLockedSeed([locked], { seed: 7 }), undefined, 'marker seed present -> lock skipped');
+    assert.equal(resolveLockedSeed([locked], { seed: -1 }), undefined, 'explicit random marker seed also beats the lock');
+});
+
+// --- D3: size keyword --------------------------------------------------------
+test('D3: ${size: portrait|landscape|square} parses into sizeKeyword', () => {
+    assert.equal(parseTriggers('${size: "portrait"} x').paramOverrides.sizeKeyword, 'portrait');
+    assert.equal(parseTriggers('${size: "LANDSCAPE"} x').paramOverrides.sizeKeyword, 'landscape');
+    assert.equal(parseTriggers('${size: "square"} x').paramOverrides.sizeKeyword, 'square');
+    // Numeric WxH still parses as before (no keyword set).
+    const numeric = parseTriggers('${size: "640x960"} x').paramOverrides;
+    assert.equal(numeric.width, 640);
+    assert.equal(numeric.sizeKeyword, undefined);
+    // Invalid keyword still warns and is dropped.
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+        assert.equal(parseTriggers('${size: "diagonal"} x').paramOverrides.sizeKeyword, undefined);
+    } finally { console.warn = warn; }
+});
+
+test('D3: resolveSizeKeyword maps per profile and strips the keyword', () => {
+    assert.deepEqual(resolveSizeKeyword({ sizeKeyword: 'portrait' }, 'anima'), { width: 832, height: 1216 });
+    assert.deepEqual(resolveSizeKeyword({ sizeKeyword: 'landscape' }, 'anima'), { width: 1216, height: 832 });
+    assert.deepEqual(resolveSizeKeyword({ sizeKeyword: 'portrait' }, 'krea2'), { width: 768, height: 1344 });
+    assert.deepEqual(resolveSizeKeyword({ sizeKeyword: 'square' }, 'illustrious'), { width: 1024, height: 1024 });
+    // Unknown profile: keyword dropped, nothing invented.
+    assert.deepEqual(resolveSizeKeyword({ sizeKeyword: 'square' }, 'nope'), {});
+});
+
+test('D3: numeric WxH beats the keyword; input never mutated; no keyword = passthrough', () => {
+    const both = { sizeKeyword: 'square', width: 640, height: 960, steps: 10 };
+    assert.deepEqual(resolveSizeKeyword(both, 'anima'), { width: 640, height: 960, steps: 10 });
+    assert.equal(both.sizeKeyword, 'square', 'input object untouched');
+    const plain = { steps: 10 };
+    assert.equal(resolveSizeKeyword(plain, 'anima'), plain, 'no keyword returns the same object');
+});
+
+test('matchDiscoveredName: aligns ComfyUI-style ids with the server spelling; keeps unknowns verbatim', () => {
+    const samplers = ['Euler', 'Euler a', 'DPM++ 2M', 'DPM++ 2M SDE', 'DPM++ 2M SDE Karras'];
+    assert.equal(matchDiscoveredName('euler', samplers), 'Euler');
+    assert.equal(matchDiscoveredName('Euler', samplers), 'Euler', 'exact match wins');
+    assert.equal(matchDiscoveredName('euler_ancestral', samplers), 'Euler a');
+    assert.equal(matchDiscoveredName('euler a', samplers), 'Euler a');
+    assert.equal(matchDiscoveredName('dpmpp_2m', samplers), 'DPM++ 2M');
+    assert.equal(matchDiscoveredName('dpmpp_2m_sde', samplers), 'DPM++ 2M SDE');
+    assert.equal(matchDiscoveredName('dpmpp_2m_sde_karras', samplers), 'DPM++ 2M SDE Karras');
+    assert.equal(matchDiscoveredName('uni_pc', samplers), 'uni_pc', 'no match: original kept');
+    assert.equal(matchDiscoveredName('euler', []), 'euler', 'empty list: original kept');
+    assert.equal(matchDiscoveredName('euler', undefined), 'euler');
+    assert.equal(matchDiscoveredName('', samplers), '');
+    assert.equal(matchDiscoveredName('sgm_uniform', ['Automatic', 'simple', 'sgm_uniform']), 'sgm_uniform');
+    assert.equal(matchDiscoveredName('SGM Uniform', ['Automatic', 'simple', 'sgm_uniform']), 'sgm_uniform');
+});
+
+test('suggestCheckpointProfile: sampler/scheduler names pass through untouched without discovered lists', () => {
+    const model = { title: 'Krea 2 | X', family: 'krea2', defaults: { steps: 8, sampler: 'euler', scheduler: 'simple' } };
+    const plain = suggestCheckpointProfile(model, 'anima');
+    assert.equal(plain.sampler, 'euler');
+    const aligned = suggestCheckpointProfile(model, 'anima', { samplers: ['Euler', 'Euler a'], schedulers: ['Automatic', 'simple'] });
+    assert.equal(aligned.sampler, 'Euler');
+    assert.equal(aligned.scheduler, 'simple');
 });
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`);

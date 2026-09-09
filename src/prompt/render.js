@@ -86,6 +86,57 @@ export function applyMarkerParamOverrides(params, overrides) {
     if (steps !== undefined) params.steps = steps;
     const cfg = clampCfg(overrides.cfg);
     if (cfg !== undefined) params.cfg = cfg;
+    // D2: marker seed (already validated as integer >= -1 by parseTriggers).
+    if (Number.isInteger(overrides.seed) && overrides.seed >= -1) params.seed = overrides.seed;
+}
+
+/**
+ * D3: per-profile numeric sizes for the portrait/landscape/square keyword.
+ * krea2 is landscape-native (1344x768); anima/illustrious are portrait-
+ * native (832x1216). square is 1024x1024 everywhere.
+ */
+const KEYWORD_SIZES = {
+    krea2: { portrait: [768, 1344], landscape: [1344, 768], square: [1024, 1024] },
+    anima: { portrait: [832, 1216], landscape: [1216, 832], square: [1024, 1024] },
+    illustrious: { portrait: [832, 1216], landscape: [1216, 832], square: [1024, 1024] },
+};
+
+/**
+ * D3: resolve paramOverrides.sizeKeyword into a numeric width/height pair
+ * for the given profile, returning a NEW overrides object (input never
+ * mutated). A numeric "WxH" already present (width+height) beats the
+ * keyword. Called by compile() AFTER the profile key is known, so both the
+ * a1111 mergeParams path and the legacy/NAI applyMarkerParamOverrides path
+ * receive plain numbers. Unknown keywords/profiles leave overrides as-is.
+ * @param {object} overrides parseTriggers().paramOverrides
+ * @param {string} profileKey krea2 | anima | illustrious
+ * @returns {object} overrides with width/height filled and sizeKeyword removed
+ */
+export function resolveSizeKeyword(overrides, profileKey) {
+    if (!overrides || typeof overrides !== 'object') return overrides ?? {};
+    const { sizeKeyword, ...rest } = overrides;
+    if (!sizeKeyword) return overrides;
+    if (Number.isFinite(overrides.width) && Number.isFinite(overrides.height)) return rest;
+    const pair = KEYWORD_SIZES[profileKey]?.[sizeKeyword];
+    if (!pair) return rest;
+    return { ...rest, width: pair[0], height: pair[1] };
+}
+
+/**
+ * D2: character seed lock. Returns the locked seed to use, or undefined.
+ * Applies ONLY when exactly one character resolved (with two or more, the
+ * locks would fight), that character's lock.seed is a non-negative integer,
+ * and the marker did not set its own seed (marker JSON beats the lock).
+ * @param {Array<{char?: {lock?: {seed?: number}}}>} characters parseTriggers().characters
+ * @param {object} [markerOverrides] parseTriggers().paramOverrides
+ * @returns {number|undefined}
+ */
+export function resolveLockedSeed(characters, markerOverrides) {
+    if (Number.isInteger(markerOverrides?.seed) && markerOverrides.seed >= -1) return undefined;
+    const list = Array.isArray(characters) ? characters : [];
+    if (list.length !== 1) return undefined;
+    const lockSeed = list[0]?.char?.lock?.seed;
+    return (Number.isInteger(lockSeed) && lockSeed >= 0) ? lockSeed : undefined;
 }
 
 /**

@@ -32,36 +32,237 @@
     font-size: 0.85em;
 }
 
+/* Tab bar: a grid of equal-sized buttons (ST's .menu_button defaults to
+   width:min-content, which made every tab a different size). */
 .if-image-tabs {
-    display: flex;
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
     gap: 4px;
 }
 
-/* R4: per-checkpoint profile table (Backends tab, A1111 block). */
-.if-image-cp-table {
-    width: 100%;
-    border-collapse: collapse;
+.if-image-tabs .if-image-tab {
+    width: auto;
+    margin: 0;
+    padding: 4px 6px;
+    font-size: 0.85em;
+    justify-content: center;
+    text-align: center;
+    white-space: nowrap;
+}
+
+/* Settings sub-tabs: one connection per sub-tab (SD | NovelAI). */
+.if-image-subtabs {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px;
+    margin-bottom: 4px;
+}
+
+.if-image-subtabs .if-image-subtab {
+    width: auto;
+    margin: 0;
+    padding: 4px 6px;
+    font-size: 0.85em;
+    justify-content: center;
+    text-align: center;
+}
+
+/* D14: uniform buttons everywhere inside the drawer. ST's .menu_button is
+   display:flex + width:min-content, so every button hugged its own label and
+   rows looked ragged. One rule normalizes size, height and alignment. */
+.if-image-settings .menu_button:not(.menu_button_icon) {
+    display: inline-flex;
+    width: auto;
+    min-width: 84px;
+    min-height: 28px;
+    margin: 0;
+    padding: 4px 10px;
+    box-sizing: border-box;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    white-space: nowrap;
+}
+
+/* D14: ST-style icon buttons (import/export etc.) keep the host's compact
+   square sizing — the uniform min-width above must not stretch them. */
+.if-image-heading-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.if-image-heading-row h3 {
+    margin: 4px 0 2px;
+}
+
+.if-image-icon-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: auto;
+}
+
+.if-image-icon-actions select {
+    width: auto;
+    min-height: 24px;
     font-size: 0.85em;
 }
 
-.if-image-cp-table th,
-.if-image-cp-table td {
-    padding: 2px 4px;
-    text-align: left;
-    border-bottom: 1px solid var(--SmartThemeBorderColor, #3b4261);
-}
-
-.if-image-cp-table input,
-.if-image-cp-table select {
-    width: 100%;
+/* Compact buttons inside saved-profile / outfit / rule list rows. */
+.if-image-settings .if-image-cp-item-actions .menu_button {
     min-width: 52px;
-    box-sizing: border-box;
+    min-height: 24px;
+    padding: 2px 8px;
 }
 
-.if-image-tab.active {
-    background: var(--ifi-accent);
-    color: #000;
+/* D14: selected/active buttons get an unambiguous high-contrast state.
+   color-mix lightens the theme accent enough that dark text always reads,
+   regardless of how dim the theme's quote color is. ST's host theme targets
+   these buttons with `#rm_extensions_block .menu_button { background:
+   ... !important }` (id specificity + !important), so our overrides need
+   !important AND id-level specificity — :is(#...) grants the id weight while
+   still matching wherever the drawer is mounted. */
+:is(#rm_extensions_block, #extensions_settings, #extensions_settings2, .if-image-settings) .if-image-tab.active,
+:is(#rm_extensions_block, #extensions_settings, #extensions_settings2, .if-image-settings) .if-image-subtab.active {
+    background: color-mix(in srgb, var(--ifi-accent) 55%, #ffffff) !important;
+    color: #14151f !important;
+    font-weight: 600;
+}
+
+/* D14: destructive buttons (replaces the old inline background:#552222). */
+:is(#rm_extensions_block, #extensions_settings, #extensions_settings2, .if-image-settings, body) .if-image-btn-danger.menu_button {
+    background: #5c2323 !important;
+    border-color: #7a3535 !important;
+    color: #f2d7d7 !important;
+}
+
+:is(#rm_extensions_block, #extensions_settings, #extensions_settings2, .if-image-settings, body) .if-image-btn-danger.menu_button:hover {
+    background: #7a2e2e !important;
+    color: #ffffff !important;
+}
+
+/* D9: per-checkpoint profile editor + saved-profile list (Backends tab,
+   A1111 block). */
+.if-image-cp-editor {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 8px;
+    padding: 6px 8px;
+    border: 1px solid var(--ifi-border);
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.15);
+}
+
+.if-image-cp-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 6px;
+}
+
+/* D14: make the saved-profiles section stand out — bold heading and bold
+   profile names in the rows. */
+.if-image-cp-list h3 {
+    font-weight: 700;
+}
+
+.if-image-cp-item {
+    padding: 4px 8px;
+    border: 1px solid var(--ifi-border);
+    border-radius: 6px;
+    font-size: 0.85em;
+}
+
+/* Row layout moved to an inner wrapper so the inline editor can sit
+   full-width UNDER the name/actions line. */
+.if-image-cp-item-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.if-image-cp-item.active {
+    outline: 1px solid var(--ifi-accent);
+}
+
+/* D14: compact in-row editor (small numeric fields + sampler/scheduler)
+   shown under a saved profile when its Edit button is toggled on. */
+.if-image-cp-inline {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 6px;
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px dashed var(--ifi-border);
+}
+
+.if-image-cp-inline-field {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 0.85em;
+    color: var(--ifi-dim);
+}
+
+/* Colors come from ST's .text_pole theme styling; only sizing here. */
+.if-image-cp-inline-field input {
+    width: 64px;
+    min-height: 24px;
+    padding: 1px 4px;
+}
+
+.if-image-cp-inline-field select {
+    max-width: 130px;
+    min-height: 24px;
+    padding: 1px 4px;
+}
+
+.if-image-settings .if-image-cp-inline .menu_button {
+    min-width: 52px;
+    min-height: 24px;
+    padding: 2px 8px;
+}
+
+.if-image-cp-item-main {
+    flex: 1;
+    min-width: 0;
+}
+
+.if-image-cp-item-title {
+    overflow-wrap: anywhere;
+    font-weight: 700;
+}
+
+.if-image-cp-item-sub {
+    color: var(--ifi-dim);
+    font-size: 0.9em;
+    overflow-wrap: anywhere;
+}
+
+.if-image-cp-item-actions {
+    display: flex;
+    gap: 4px;
+    flex: none;
+}
+
+.if-image-cp-item-actions .menu_button {
+    margin: 0;
+    padding: 2px 8px;
+}
+
+.if-image-cp-badge {
+    display: inline-block;
+    margin-left: 4px;
+    padding: 0 5px;
+    border-radius: 6px;
+    font-size: 0.8em;
+    background: #553333;
+    color: #f0d0d0;
+    vertical-align: middle;
 }
 
 .if-image-panel {
@@ -88,6 +289,10 @@
     color: var(--ifi-dim);
 }
 
+/* D14: colors/borders/radius come from ST's theme (all controls carry
+   .text_pole, which the host themes like every native select/input) —
+   overriding them here made the dropdowns look foreign. Only layout is
+   normalized. */
 .if-image-row input[type="text"],
 .if-image-row input[type="password"],
 .if-image-row input[type="number"],
@@ -95,11 +300,6 @@
 .if-image-row textarea {
     width: 100%;
     min-height: 28px;
-    padding: 2px 6px;
-    border-radius: 4px;
-    background: color-mix(in srgb, var(--ifi-bg) 85%, #000);
-    border: 1px solid var(--ifi-border);
-    color: var(--ifi-text);
 }
 
 .if-image-radios {
@@ -171,6 +371,16 @@
     color: var(--ifi-dim);
 }
 
+/* D14: read-only "what generation uses right now" box on the Generation tab. */
+.if-image-active-summary {
+    padding: 6px 8px;
+    border: 1px solid var(--ifi-border);
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.2);
+    font-size: 0.85em;
+    overflow-wrap: anywhere;
+}
+
 .if-image-check {
     display: flex;
     align-items: center;
@@ -230,27 +440,25 @@
     display: block;
 }
 
-.if-image-frame-overlay {
-    position: absolute;
-    inset: 0;
+/* D13: action toolbar rendered in normal flow ABOVE the in-chat image.
+   Replaces the old absolute-inset hover overlay, which (with no positioned
+   frame ancestor) stretched over the whole message block, blocking the
+   host's edit-message buttons — and hover never worked on touch anyway. */
+.ifimg-toolbar {
     display: flex;
-    align-items: flex-end;
-    justify-content: center;
+    flex-wrap: wrap;
+    align-items: center;
     gap: 4px;
-    padding: 4px;
-    opacity: 0;
-    transition: opacity 0.15s;
-    background: linear-gradient(to top, rgba(0, 0, 0, 0.6), transparent 60%);
+    margin: 2px 0;
 }
 
-.ifimg-frame:hover .if-image-frame-overlay,
-.if-image-gallery-thumb:hover .if-image-frame-overlay {
-    opacity: 1;
-}
-
-.if-image-frame-overlay button {
+.ifimg-toolbar button {
     font-size: 0.75em;
-    padding: 2px 6px;
+    padding: 2px 8px;
+}
+
+.ifimg-toolbar .ifimg-tb-delete {
+    background: #552222;
 }
 
 
@@ -363,17 +571,157 @@
 .ifimg-lightbox {
     position: fixed;
     inset: 0;
+    /* D12: explicit viewport size. In SillyTavern a fixed element sized
+       only by inset:0 computes to height 0, so the flex centering
+       collapsed and the content sat at the top edge. 100dvh tracks the
+       real visible height on mobile (URL-bar show/hide); vh is the
+       fallback for engines without dvh. */
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
     z-index: 10000;
     background: rgba(0, 0, 0, 0.85);
     display: flex;
     align-items: center;
     justify-content: center;
+    padding: 12px;
+    box-sizing: border-box;
     cursor: zoom-out;
 }
 
 .ifimg-lightbox img {
-    max-width: 96vw;
-    max-height: 96vh;
+    max-width: min(90vw, 100%);
+    max-height: 70dvh;
     object-fit: contain;
     border-radius: 6px;
+}
+
+/* D1: full lightbox — nav arrows, caption, action row. The inner container
+   stops click propagation so only the backdrop closes. */
+.ifimg-lightbox-inner {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    cursor: default;
+    max-width: 100%;
+    /* D12: never taller than the overlay; scroll instead of overflowing
+       off-screen on short/mobile viewports. */
+    max-height: 100%;
+    overflow-y: auto;
+}
+
+.ifimg-lb-stage {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    max-width: 100%;
+    min-width: 0;
+}
+
+.ifimg-lb-stage img {
+    min-width: 0;
+    flex: 0 1 auto;
+}
+
+.ifimg-lb-prev,
+.ifimg-lb-next {
+    font-size: 1.6em;
+    padding: 4px 12px;
+    flex: none;
+}
+
+.ifimg-lb-caption {
+    color: #ddd;
+    font-size: 0.85em;
+    text-align: center;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+}
+
+.ifimg-lb-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
+}
+
+.ifimg-lb-download {
+    text-decoration: none;
+}
+
+.ifimg-lb-delete {
+    background: #552222;
+}
+
+/* D4: edit-before-generate dialog.
+   D14: explicit colors — inside ST's generic popup the form inherited
+   low-contrast text/input colors and was unreadable on some themes. */
+.ifimg-edit-dialog {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 320px;
+    text-align: left;
+    color: var(--SmartThemeBodyColor, #e6e9f5);
+}
+
+.ifimg-edit-field {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 0.85em;
+}
+
+.ifimg-edit-field > span {
+    color: var(--SmartThemeBodyColor, #e6e9f5);
+    opacity: 0.9;
+    font-weight: 600;
+}
+
+.ifimg-edit-dialog textarea,
+.ifimg-edit-dialog input {
+    width: 100%;
+    box-sizing: border-box;
+    background: rgba(0, 0, 0, 0.45);
+    color: var(--SmartThemeBodyColor, #e6e9f5);
+    border: 1px solid var(--SmartThemeBorderColor, #4a5375);
+    border-radius: 4px;
+    padding: 4px 6px;
+}
+
+.ifimg-edit-dialog textarea::placeholder,
+.ifimg-edit-dialog input::placeholder {
+    color: var(--SmartThemeBodyColor, #e6e9f5);
+    opacity: 0.45;
+}
+
+.ifimg-edit-assist {
+    display: flex;
+    gap: 6px;
+}
+
+.ifimg-edit-assist input {
+    flex: 1;
+    min-width: 0;
+}
+
+.ifimg-edit-params {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.ifimg-edit-num {
+    flex: 1;
+    min-width: 70px;
+}
+
+.ifimg-edit-inner {
+    background: var(--SmartThemeBlurTintColor, #1a1a1a);
+    padding: 16px;
+    border-radius: 8px;
+    max-height: 90vh;
+    overflow-y: auto;
 }

@@ -6,20 +6,20 @@ import { getSettings, saveSettings } from './src/settings.js';
 import { NaiClient } from './src/backends/nai.js';
 import { ComfyProxyClient } from './src/backends/comfy.js';
 import { A1111Client } from './src/backends/a1111.js';
-import { renderDrawer } from './src/ui.js';
+import { renderDrawer, createEditDialog } from './src/ui.js';
 import { createMarkerRuntime } from './src/runtime/events.js';
 import { createTaskQueue } from './src/runtime/tasks.js';
 import { createExecutor } from './src/runtime/executor.js';
 import { createMarkerPipeline } from './src/runtime/marker-pipeline.js';
 import { replaceMarkers, createSlotElement, renderSlotState, renderImageFrame, renderRegenerateChip, renderIdleChip, openLightbox, contentHash } from './src/runtime/insert.js';
-import { saveImageRecord, getImagesForMessage, getImageRecord, deleteImageRecord } from './src/storage/images.js';
+import { saveImageRecord, getImagesForMessage, getImageRecord, deleteImageRecord, getStorageStats, pruneImages, toJpegBlob } from './src/storage/images.js';
 import { getAllCharacters } from './src/storage/chars.js';
 import { getAllStyles, getAllPersonas, getReplaceRules } from './src/storage/presets.js';
 import { getAllOutfits } from './src/storage/outfits.js';
 import { resolveActiveCharacters } from './src/prompt/binding.js';
 import { parseTriggers } from './src/prompt/triggers.js';
-import { assemblePrompt, resolveProfileKey, mergeProfileParams, applyMarkerParamOverrides } from './src/prompt/render.js';
-import { resolveCheckpointProfile, mergeParams } from './src/backends/checkpoint-profiles.js';
+import { assemblePrompt, resolveProfileKey, mergeProfileParams, applyMarkerParamOverrides, resolveLockedSeed, resolveSizeKeyword } from './src/prompt/render.js';
+import { getActiveProfile, mergeParams } from './src/backends/checkpoint-profiles.js';
 import { cleanupEnvelope } from './src/prompt/cleanup.js';
 import { applyReplaceRules } from './src/prompt/replace.js';
 import { PROFILES } from './src/profiles.js';
@@ -38,7 +38,11 @@ import { getContext } from '../../../st-context.js';
 
 const settings = getSettings();
 
-const nai = new NaiClient(() => settings.backends.nai.apiKey);
+// D5: the second (optional) argument surfaces the Variety+ toggle live.
+const nai = new NaiClient(
+    () => settings.backends.nai.apiKey,
+    () => ({ variety: settings.backends.nai.variety === true }),
+);
 const comfy = new ComfyProxyClient({
     getBaseUrl: () => settings.backends.comfy.baseUrl,
     getUsername: () => settings.backends.comfy.username,
@@ -50,6 +54,11 @@ const comfy = new ComfyProxyClient({
 const a1111 = new A1111Client({
     getBaseUrl: () => settings.backends.a1111.baseUrl,
     getAuth: () => settings.backends.a1111.auth,
+    // 'st-relay' routes through SillyTavern's /api/sd/* like the built-in
+    // Image Generation extension (no backend CORS needed); 'direct' keeps
+    // the browser-to-backend path. Read live so the UI toggle applies at once.
+    getTransport: () => settings.backends.a1111.transport,
+    getRequestHeaders: () => getContext().getRequestHeaders(),
 });
 
 function notify(kind, message) {
@@ -98,6 +107,33 @@ jQuery(async () => {
     refreshRoster();
 
     // ------------------------------------------------------------------
+    // D6: image cache management.
+    // - Save wrapper: fresh blobs are JPEG-converted when
+    //   settings.cache.jpegQuality > 0 (never converts existing records;
+    //   failure records have no blob and pass through untouched).
+    // - Startup prune: fire-and-forget by ttlDays/maxMB when either > 0.
+    // ------------------------------------------------------------------
+    async function saveImageRecordWithCache(record) {
+        const quality = Number(settings.cache?.jpegQuality ?? 0);
+        if (record?.blob && quality > 0) {
+            return saveImageRecord({ ...record, blob: await toJpegBlob(record.blob, quality) });
+        }
+        return saveImageRecord(record);
+    }
+    {
+        const ttlDays = Number(settings.cache?.ttlDays ?? 0);
+        const maxMB = Number(settings.cache?.maxMB ?? 0);
+        if (ttlDays > 0 || maxMB > 0) {
+            pruneImages({
+                olderThanMs: ttlDays > 0 ? ttlDays * 86400000 : undefined,
+                maxBytes: maxMB > 0 ? maxMB * 1024 * 1024 : undefined,
+            }).then(({ deleted, bytesFreed }) => {
+                if (deleted > 0) console.log(`[IF Image] Cache prune: ${deleted} records, ${(bytesFreed / 1048576).toFixed(1)} MB freed.`);
+            }).catch(err => console.warn('[IF Image] Cache prune failed:', err?.message ?? err));
+        }
+    }
+
+    // ------------------------------------------------------------------
     // C4: active character resolution. The current card id (avatar
     // filename) and chat id gate which characters resolveActiveCharacters()
     // returns as the "active" subset fed to parseTriggers; characters bound
@@ -128,16 +164,19 @@ jQuery(async () => {
             outfits: roster.outfits,
             onFallback: (tier, token) => notify('warning', `Character trigger "$${token}" resolved via ${tier} fallback (not active for this chat/card).`),
         });
-        // R2: with the A1111-compatible SD connection, the selected
-        // checkpoint's profile becomes the configured default (still beaten
-        // by a marker {{dialect}} override). The checkpoint itself is NEVER
-        // derived from the profile — only the reverse.
+        // R2/D14: with the A1111-compatible SD connection, the ACTIVE saved
+        // profile (Settings tab) supplies both the checkpoint title and the
+        // prompt style (still beaten by a marker {{dialect}} override). With
+        // no active profile the persisted checkpoint selection is used with
+        // the fallback prompt style. The checkpoint is NEVER derived from a
+        // profile/family name — only the reverse.
         const backendKind = defaultBackendKind();
+        const activeProfile = backendKind === 'a1111' ? getActiveProfile(settings) : null;
         const checkpointTitle = backendKind === 'a1111'
-            ? (settings.generation?.checkpoint || settings.backends.a1111.checkpoint || '')
+            ? (activeProfile?.entry.checkpoint
+                || settings.generation?.checkpoint || settings.backends.a1111.checkpoint || '')
             : '';
-        const checkpointProfile = checkpointTitle ? resolveCheckpointProfile(settings, checkpointTitle) : null;
-        const configuredProfileKey = checkpointProfile?.profileKey ?? defaultProfileKey();
+        const configuredProfileKey = activeProfile?.entry.profile ?? defaultProfileKey();
         const { profileKey } = resolveProfileKey(parsed.dialectOverride, configuredProfileKey);
         const baseProfile = PROFILES[profileKey] ?? PROFILES.anima;
         const effectiveProfile = mergeProfileParams(baseProfile, settings.generation?.params?.[profileKey]);
@@ -158,6 +197,13 @@ jQuery(async () => {
         envelope = applyReplaceRules(envelope, rules, 'final', ruleCtx);
 
         const params = { ...envelope.params, seed: -1 };
+        // D3: resolve a portrait/landscape/square keyword into the numeric
+        // pair for THIS profile, so both param paths below see plain numbers.
+        const markerOverrides = resolveSizeKeyword(parsed.paramOverrides, profileKey);
+        // D2: character seed lock (single resolved character only; marker
+        // JSON seed beats the lock) — logic lives in render.js for testing.
+        const lockedSeed = resolveLockedSeed(parsed.characters, markerOverrides);
+        if (lockedSeed !== undefined) params.seed = lockedSeed;
         if (backendKind === 'a1111' && checkpointTitle) {
             // R2: five-layer numeric precedence (PROFILES < settings params
             // < checkpoint profile < marker JSON; LLM <size> is applied
@@ -167,13 +213,14 @@ jQuery(async () => {
             const merged = mergeParams({
                 profileKey,
                 checkpointTitle,
+                profileId: activeProfile?.id,
                 settings,
-                markerOverrides: parsed.paramOverrides,
+                markerOverrides,
             });
             Object.assign(params, merged);
         } else {
             // Legacy proxy and NAI paths: unchanged C0 behavior.
-            applyMarkerParamOverrides(params, parsed.paramOverrides);
+            applyMarkerParamOverrides(params, markerOverrides);
         }
         return {
             profileKey,
@@ -232,11 +279,21 @@ jQuery(async () => {
         activeLlmAborts.clear();
     }
 
+    // D4: edit-before-generate dialog. ui.js owns the DOM/popup; the LLM
+    // assist goes through exactly one callback (engine.modifyTags) so ui.js
+    // never imports the engine.
+    const openEditDialog = createEditDialog({
+        getContext: () => getContext(),
+        modifyTags: (tagList, instruction, opts) => engine.modifyTags(tagList, instruction, opts),
+        notify,
+        profiles: PROFILES,
+    });
+
     const pipeline = createMarkerPipeline({
         getQueue: () => queue,
         compile,
         getImagesForMessage,
-        saveImageRecord,
+        saveImageRecord: saveImageRecordWithCache,
         contentHash,
         defaultBackendKind,
         defaultProfileKey,
@@ -248,6 +305,7 @@ jQuery(async () => {
         renderRegenerateChip,
         renderIdleChip,
         openLightbox,
+        openEditDialog,
         deleteImageRecord,
         replaceMarkers,
         rewrite: rewriteWithAbort,
@@ -294,11 +352,16 @@ jQuery(async () => {
     // content lineage as the source record — so it restores in-chat like any
     // other generation for that marker.
     // ------------------------------------------------------------------
-    async function regenerateImageRecord(record) {
+    /**
+     * Re-enqueue a gallery record and save the result as a NEW record.
+     * D2: options.seed — pass record.seed to reproduce the exact image
+     * (gallery "Repro"); default -1 keeps the classic random regenerate.
+     */
+    async function regenerateImageRecord(record, { seed = -1 } = {}) {
         if (!record) throw new Error('regenerateImageRecord: record is required.');
         const backendKind = record.backend || defaultBackendKind();
         const profileKey = record.profileKey || defaultProfileKey();
-        const params = { ...(record.params || {}), seed: -1 };
+        const params = { ...(record.params || {}), seed };
         // R2: a regenerated image must use the same model as the original.
         // Fall back to the current selection only when the record has none
         // (pre-R2 records).
@@ -322,7 +385,7 @@ jQuery(async () => {
         const result = await new Promise((resolve, reject) => {
             regenWaiters.set(taskId, { resolve, reject });
         });
-        return saveImageRecord({
+        return saveImageRecordWithCache({
             chatId: record.chatId,
             messageId: record.messageId,
             swipeId: record.swipeId,
@@ -408,6 +471,48 @@ jQuery(async () => {
         settings, save: saveSettings, nai, comfy, a1111, genLog, getQueue: () => queue,
         regenerateImage: regenerateImageRecord,
         getCurrentChatId: () => getContext().getCurrentChatId(),
+        getChatContext: () => getContext(),
+        eventSource,
+        event_types,
+        planChatImages: async (count, { signal } = {}) => {
+            const controller = new AbortController();
+            activeLlmAborts.add(controller);
+            if (signal) signal.addEventListener('abort', () => controller.abort(), { once: true });
+            logEvent('llm_request', { content: `[chat_place × ${count}]` });
+            try {
+                const result = await engine.planChatImages(count, { signal: controller.signal });
+                logEvent('llm_reply', { method: result.method, placements: result.placements.length });
+                return result;
+            } finally {
+                activeLlmAborts.delete(controller);
+            }
+        },
+        applyPlacements: (placements) => {
+            const ctx = getContext();
+            const chat = ctx.chat ?? [];
+            const mode = settings.generation?.mode ?? 'direct';
+            const tags = settings.generation ?? {};
+            const startTag = tags.startTag ?? 'image###';
+            const endTag = tags.endTag ?? '###';
+            const touched = new Set();
+            // Inject from the end so earlier indices stay stable.
+            for (const p of [...placements].reverse()) {
+                const message = chat[p.messageId];
+                if (!message || touched.has(p.messageId)) continue;
+                const promptText = p.prompt.split(endTag).join(' ').trim();
+                const marker = mode === 'direct'
+                    ? `${startTag} ${promptText} ${endTag}`
+                    : `<ifimage>${promptText}</ifimage>`;
+                const sep = message.mes && !/\s$/.test(message.mes) ? '\n' : '';
+                message.mes = `${message.mes ?? ''}${sep}${marker}`;
+                touched.add(p.messageId);
+            }
+            try { ctx.saveChat?.(); } catch (err) { console.warn('[IF Image] saveChat after placement failed:', err?.message ?? err); }
+            for (const id of touched) {
+                eventSource.emit(event_types.MESSAGE_UPDATED, id);
+            }
+            return touched.size;
+        },
     });
     $('#extensions_settings2').append(drawer);
     notify('info', 'IF Image loaded. Configure backends in the extensions drawer.');

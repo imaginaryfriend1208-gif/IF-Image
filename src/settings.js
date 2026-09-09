@@ -14,6 +14,8 @@ export const defaultSettings = {
         nai: {
             apiKey: '',
             model: 'nai-diffusion-4-5-full',
+            // Phase D5: Variety+ (skip_cfg_above_sigma) toggle.
+            variety: false,
         },
         comfy: {
             // 'legacy_proxy' = user's own comfy-cloud-forge-proxy (username/
@@ -30,15 +32,23 @@ export const defaultSettings = {
         a1111: {
             baseUrl: '',
             auth: '',
+            // 'st-relay': requests go through SillyTavern's own /api/sd/*
+            // server endpoints (no CORS needed on the backend — the same
+            // path ST's Image Generation extension uses). 'direct': the
+            // browser calls the backend itself (backend must send CORS).
+            transport: 'st-relay',
             // Discovered checkpoint title; set explicitly via Refresh Models.
             checkpoint: '',
             // Phase R1: persisted discovery cache ({at: 0} = never ran).
             // Cleared on URL/auth change; never carries credentials.
             discovery: { at: 0, models: [], samplers: [], schedulers: [] },
-            // Phase R1: checkpoint title -> { profile, width?, height?,
-            // steps?, cfg?, sampler?, scheduler? }. Seeded from discovery,
-            // user edits always win and survive re-seeding.
+            // D14: unique profile id -> { name, checkpoint, profile,
+            // width?, height?, steps?, cfg?, sampler?, scheduler? }.
+            // Rows are created only by "Save profile"; one checkpoint can
+            // hold any number of profiles.
             checkpointProfiles: {},
+            // D14: which saved profile drives generation ('' = none).
+            activeProfileId: '',
         },
     },
     llm: {
@@ -48,6 +58,12 @@ export const defaultSettings = {
         defaultMethod: 'direct',
         defaultApiProfileId: '',
         injectionStyle: 'compact',
+        // Phase CP: chat image placement (LLM plans N images across the chat).
+        chatPlace: {
+            count: 3,
+            onlyCharacter: true,
+            maxChatWindow: 40,
+        },
     },
     generation: {
         mode: 'direct',       // direct | assist | full
@@ -72,6 +88,15 @@ export const defaultSettings = {
             anima: {},
             illustrious: {},
         },
+        // Phase D3: LLM <size> hint policy — 'auto' | 'ignore' | 'force'
+        // ('auto' currently equals 'force'; see migrator v7 note).
+        llmSize: 'auto',
+    },
+    // Phase D6: image-store housekeeping (0 = off per knob).
+    cache: {
+        ttlDays: 0,
+        maxMB: 0,
+        jpegQuality: 0,
     },
     test: {
         prompt: '',

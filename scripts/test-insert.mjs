@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { renderedSegments, extractMarkers } from '../src/runtime/events.js';
-import { replaceMarkers, createSlotElement, renderSlotState, renderImageFrame, renderRegenerateChip, renderIdleChip, contentHash } from '../src/runtime/insert.js';
+import { replaceMarkers, createSlotElement, renderSlotState, renderImageFrame, renderRegenerateChip, renderIdleChip, openLightbox, contentHash } from '../src/runtime/insert.js';
 
 // ---- Minimal DOM stub ----------------------------------------------------
 class Node {
@@ -64,6 +64,53 @@ class Element extends Node {
     get textContent() { return this.childNodes.map(c => c.nodeType === 3 ? c.nodeValue : c.textContent).join(''); }
 }
 const doc = { createElement: tag => new Element(tag.toUpperCase()) };
+
+// D1: lightbox needs a document with body, doc-level key listeners, and
+// URL.createObjectURL/revokeObjectURL. The URL stub records every call so
+// tests can assert full revocation.
+function makeLightboxEnv() {
+    const body = new Element('BODY');
+    const docListeners = {};
+    const ldoc = {
+        body,
+        createElement: tag => new Element(tag.toUpperCase()),
+        addEventListener: (type, fn) => { (docListeners[type] ??= []).push(fn); },
+        removeEventListener: (type, fn) => {
+            const list = docListeners[type] || [];
+            const idx = list.indexOf(fn);
+            if (idx >= 0) list.splice(idx, 1);
+        },
+        pressKey: key => { for (const fn of [...(docListeners.keydown || [])]) fn({ key }); },
+    };
+    const created = [];
+    const revoked = [];
+    const realCreate = URL.createObjectURL;
+    const realRevoke = URL.revokeObjectURL;
+    let seq = 0;
+    URL.createObjectURL = () => { const u = `blob:stub-${++seq}`; created.push(u); return u; };
+    URL.revokeObjectURL = (u) => { revoked.push(u); };
+    const restore = () => {
+        URL.createObjectURL = realCreate;
+        URL.revokeObjectURL = realRevoke;
+    };
+    return { ldoc, body, created, revoked, restore };
+}
+
+const lbRecord = (id, seed = 1) => ({
+    id, seed, checkpoint: `ckpt-${id}`, width: 832, height: 1216,
+    profileKey: 'anima', blob: { fake: true, name: id },
+});
+const captionOf = body => {
+    const overlay = body.childNodes[0];
+    const inner = overlay.childNodes[0];
+    return inner.childNodes.find(c => c.className === 'ifimg-lb-caption');
+};
+const lbButton = (body, cls) => {
+    const inner = body.childNodes[0].childNodes[0];
+    const all = [];
+    (function walk(n) { for (const c of n.childNodes || []) { all.push(c); walk(c); } })(inner);
+    return all.find(c => typeof c.className === 'string' && c.className.includes(cls)) ?? null;
+};
 const el = (tag, ...children) => {
     const e = new Element(tag);
     for (const c of children) e.appendChild(typeof c === 'string' ? new Text(c) : c);
@@ -200,26 +247,29 @@ test('failed slot error message never leaks credentials passed through snapshot 
     assert.ok(!slot.textContent.includes('Basic '));
 });
 
-// ---- C10: hover overlay + regenerate chip ---------------------------------
+// ---- C10/D13: action toolbar + regenerate chip -----------------------------
 
-const overlayOf = frame => frame.childNodes.find(c => c.className === 'if-image-frame-overlay') ?? null;
-const overlayBtn = (frame, label) => overlayOf(frame)?.childNodes.find(b => b.textContent === label) ?? null;
+const toolbarOf = frame => frame.childNodes.find(c => c.className === 'ifimg-toolbar') ?? null;
+const toolbarBtn = (frame, label) => toolbarOf(frame)?.childNodes.find(b => b.textContent === label) ?? null;
 
-test('C10 overlay: View/Regen/Delete buttons render only for supplied actions', () => {
+test('D13 toolbar: View/Regen/Delete buttons render only for supplied actions, above the image', () => {
     const slot = createSlotElement(doc, { occurrence: 0, content: 'a' });
     const frame = renderImageFrame(slot, doc, 'blob:x', {
         onView: () => {}, onRegen: () => {}, onDelete: () => {},
     });
-    const overlay = overlayOf(frame);
-    assert.ok(overlay, 'overlay div present');
-    assert.deepEqual(overlay.childNodes.map(b => b.textContent), ['View', 'Regen', 'Delete']);
-    // No overlay actions supplied -> no overlay at all (pre-C10 shape preserved).
+    const toolbar = toolbarOf(frame);
+    assert.ok(toolbar, 'toolbar div present');
+    assert.deepEqual(toolbar.childNodes.map(b => b.textContent), ['View', 'Regen', 'Delete']);
+    // The toolbar precedes the image in the frame (sits above it in flow).
+    assert.ok(frame.childNodes.indexOf(toolbar) < frame.childNodes.findIndex(c => c.tagName === 'IMG'),
+        'toolbar comes before the img');
+    // No toolbar actions supplied -> no toolbar at all (pre-C10 shape preserved).
     const slot2 = createSlotElement(doc, { occurrence: 1, content: 'b' });
     const frame2 = renderImageFrame(slot2, doc, 'blob:y', { onSingleClick: () => {} });
-    assert.equal(overlayOf(frame2), null);
+    assert.equal(toolbarOf(frame2), null);
 });
 
-test('C10 overlay: View fires only onView, never regen, and stops propagation', async () => {
+test('D13 toolbar: View fires only onView, never regen, and stops propagation', async () => {
     const slot = createSlotElement(doc, { occurrence: 0, content: 'a' });
     const events = [];
     const frame = renderImageFrame(slot, doc, 'blob:x', {
@@ -229,7 +279,7 @@ test('C10 overlay: View fires only onView, never regen, and stops propagation', 
         onRegen: () => events.push('regen'),
         onDelete: () => events.push('delete'),
     });
-    const event = overlayBtn(frame, 'View').dispatch('click');
+    const event = toolbarBtn(frame, 'View').dispatch('click');
     assert.ok(event.propagationStopped, 'button click stops propagation');
     await new Promise(r => setTimeout(r, 350)); // outlive the 300ms single-click timer
     assert.deepEqual(events, ['view']);
@@ -274,13 +324,114 @@ test('R3: aria-hidden removed for visible content, restored for spinner states',
     assert.equal(slot.getAttribute('aria-hidden'), null, 'regenerate chip is visible');
 });
 
-test('C10 overlay: Delete fires onDelete; caller collapses slot to a regenerate chip', () => {
+// ---- D1: full lightbox ------------------------------------------------------
+
+test('D1: prev/next and arrow keys wrap around; caption tracks the record', () => {
+    const { ldoc, body, restore } = makeLightboxEnv();
+    try {
+        const close = openLightbox(ldoc, { records: [lbRecord('a'), lbRecord('b'), lbRecord('c')] });
+        assert.match(captionOf(body).textContent, /ckpt-a/);
+        assert.match(captionOf(body).textContent, /1\/3/);
+        lbButton(body, 'ifimg-lb-next').dispatch('click');
+        assert.match(captionOf(body).textContent, /ckpt-b/);
+        ldoc.pressKey('ArrowRight');
+        assert.match(captionOf(body).textContent, /ckpt-c/);
+        ldoc.pressKey('ArrowRight'); // wraps to first
+        assert.match(captionOf(body).textContent, /ckpt-a/);
+        ldoc.pressKey('ArrowLeft'); // wraps back to last
+        assert.match(captionOf(body).textContent, /ckpt-c/);
+        close();
+    } finally { restore(); }
+});
+
+test('D1: Escape and backdrop close; clicking the content does not', () => {
+    const { ldoc, body, restore } = makeLightboxEnv();
+    try {
+        openLightbox(ldoc, { records: [lbRecord('a')] });
+        const overlay = body.childNodes[0];
+        const inner = overlay.childNodes[0];
+        inner.dispatch('click'); // stopPropagation → still open
+        assert.equal(body.childNodes.length, 1, 'content click keeps the lightbox open');
+        ldoc.pressKey('Escape');
+        assert.equal(body.childNodes.length, 0, 'Escape closes');
+        openLightbox(ldoc, { records: [lbRecord('b')] });
+        body.childNodes[0].dispatch('click'); // backdrop
+        assert.equal(body.childNodes.length, 0, 'backdrop click closes');
+    } finally { restore(); }
+});
+
+test('D1: delete middle record shows the next; deleting the last closes', async () => {
+    const { ldoc, body, restore } = makeLightboxEnv();
+    try {
+        const deleted = [];
+        openLightbox(ldoc, {
+            records: [lbRecord('a'), lbRecord('b'), lbRecord('c')],
+            index: 1, // start on 'b'
+            onDelete: (r) => { deleted.push(r.id); },
+        });
+        const del = lbButton(body, 'ifimg-lb-delete');
+        del.dispatch('click');
+        await new Promise(r => setTimeout(r, 0));
+        assert.deepEqual(deleted, ['b']);
+        assert.match(captionOf(body).textContent, /ckpt-c/, 'next record shown after delete');
+        del.dispatch('click');
+        await new Promise(r => setTimeout(r, 0));
+        assert.match(captionOf(body).textContent, /ckpt-a/, 'delete on last index wraps to first');
+        del.dispatch('click');
+        await new Promise(r => setTimeout(r, 0));
+        assert.equal(body.childNodes.length, 0, 'deleting the final record closes the lightbox');
+        assert.deepEqual(deleted, ['b', 'c', 'a']);
+    } finally { restore(); }
+});
+
+test('D1: every object URL created by the lightbox is revoked on nav and close', () => {
+    const { ldoc, created, revoked, restore } = makeLightboxEnv();
+    try {
+        const close = openLightbox(ldoc, { records: [lbRecord('a'), lbRecord('b')] });
+        ldoc.pressKey('ArrowRight');
+        ldoc.pressKey('ArrowRight');
+        close();
+        assert.ok(created.length >= 6, 'display+download URL per shown record');
+        assert.deepEqual([...revoked].sort(), [...created].sort(), 'all created URLs revoked');
+    } finally { restore(); }
+});
+
+test('D1: caller-supplied getObjectUrl is used and never revoked; Regen closes', () => {
+    const { ldoc, body, created, revoked, restore } = makeLightboxEnv();
+    try {
+        let regen = 0;
+        openLightbox(ldoc, {
+            records: [lbRecord('a')],
+            getObjectUrl: () => 'blob:caller-owned',
+            onRegenerate: () => { regen += 1; },
+        });
+        lbButton(body, 'ifimg-lb-regen').dispatch('click');
+        assert.equal(regen, 1);
+        assert.equal(body.childNodes.length, 0, 'Regen closes the lightbox');
+        assert.ok(!revoked.includes('blob:caller-owned'), 'caller URL never revoked');
+        assert.deepEqual([...revoked].sort(), [...created].sort(), 'owned URLs still revoked');
+    } finally { restore(); }
+});
+
+test('D1: opening a second lightbox closes the first', () => {
+    const { ldoc, body, restore } = makeLightboxEnv();
+    try {
+        openLightbox(ldoc, { records: [lbRecord('a')] });
+        openLightbox(ldoc, { records: [lbRecord('b')] });
+        assert.equal(body.childNodes.length, 1, 'only one overlay in the DOM');
+        assert.match(captionOf(body).textContent, /ckpt-b/);
+        ldoc.pressKey('Escape');
+        assert.equal(body.childNodes.length, 0);
+    } finally { restore(); }
+});
+
+test('D13 toolbar: Delete fires onDelete; caller collapses slot to a regenerate chip', () => {
     const slot = createSlotElement(doc, { occurrence: 0, content: 'a' });
     let regenerated = 0;
     const frame = renderImageFrame(slot, doc, 'blob:x', {
         onDelete: () => renderRegenerateChip(slot, doc, () => regenerated++),
     });
-    overlayBtn(frame, 'Delete').dispatch('click');
+    toolbarBtn(frame, 'Delete').dispatch('click');
     assert.equal(slot.dataset.ifimgState, 'idle');
     assert.equal(slot.childNodes[0].className, 'ifimg-chip ifimg-chip-regenerate');
     assert.equal(slot.childNodes[0].textContent, 'Image deleted');

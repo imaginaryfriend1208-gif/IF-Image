@@ -127,7 +127,7 @@ await test('computeCharacterCenters: a single character gets a centered default'
 // --- NaiClient payload shape (single-char byte-identical, multi-char extended) ---
 // NaiClient.generate() makes a real fetch call; we only need to inspect the
 // request body, so stub global.fetch to capture it without a network call.
-async function buildNaiBody(opts) {
+async function buildNaiBody(opts, getOptions) {
     const { NaiClient } = await import('../src/backends/nai.js');
     let capturedBody = null;
     const originalFetch = global.fetch;
@@ -139,7 +139,11 @@ async function buildNaiBody(opts) {
         };
     };
     try {
-        const client = new NaiClient(() => 'pst-test');
+        // D5: single-argument construction must keep working — only pass the
+        // options getter when the test supplies one.
+        const client = getOptions
+            ? new NaiClient(() => 'pst-test', getOptions)
+            : new NaiClient(() => 'pst-test');
         try { await client.generate(opts); } catch { /* pngFromNaiZip on an empty buffer throws; body capture already happened */ }
     } finally {
         global.fetch = originalFetch;
@@ -169,6 +173,30 @@ await test('NaiClient payload: 2 characters fill characterPrompts + char_caption
     assert.equal(body.parameters.v4_prompt.caption.char_captions[0].char_caption, '1girl, silver hair');
     assert.deepEqual(body.parameters.v4_prompt.caption.char_captions[0].centers, [{ x: 0.3, y: 0.5 }]);
     assert.equal(body.parameters.v4_negative_prompt.caption.char_captions.length, 2);
+});
+
+// --- D5: Variety+ (skip_cfg_above_sigma) --------------------------------------
+await test('D5: Variety+ off (default and single-arg construction) keeps skip_cfg_above_sigma null', async () => {
+    const base = { prompt: 'a scene', negative: 'bad', width: 832, height: 1216, steps: 20, seed: 1 };
+    const single = await buildNaiBody(base);
+    assert.equal(single.parameters.skip_cfg_above_sigma, null, 'single-arg construction: null');
+    const off = await buildNaiBody(base, () => ({ variety: false }));
+    assert.deepEqual(off, single, 'variety:false body is byte-identical to the single-arg body');
+});
+
+await test('D5: Variety+ on sets skip_cfg_above_sigma to the sigma formula value', async () => {
+    const body = await buildNaiBody(
+        { prompt: 'a scene', negative: 'bad', width: 832, height: 1216, steps: 20, seed: 1, model: 'nai-diffusion-4-5-full' },
+        () => ({ variety: true }),
+    );
+    // sqrt((832*1216) / (832*1216)) * 58 = 58 for the reference size on v4.5.
+    assert.equal(body.parameters.skip_cfg_above_sigma, 58);
+    // Non-4.5 model uses the v3/v4 magic number (19).
+    const v4 = await buildNaiBody(
+        { prompt: 'a scene', negative: 'bad', width: 832, height: 1216, steps: 20, seed: 1, model: 'nai-diffusion-4-full' },
+        () => ({ variety: true }),
+    );
+    assert.equal(v4.parameters.skip_cfg_above_sigma, 19);
 });
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`);

@@ -123,6 +123,8 @@ test('v2 → v3 adds a1111 backend and comfy.connection without touching legacy 
         baseUrl: '', auth: '', checkpoint: '',
         discovery: { at: 0, models: [], samplers: [], schedulers: [] },
         checkpointProfiles: {},
+        transport: 'st-relay',
+        activeProfileId: '',
     });
     // Connection defaults to the legacy proxy.
     assert.equal(v2.backends.comfy.connection, 'legacy_proxy');
@@ -163,6 +165,8 @@ test('v0.1.0 legacy settings receive the a1111 section through full migration', 
         baseUrl: '', auth: '', checkpoint: '',
         discovery: { at: 0, models: [], samplers: [], schedulers: [] },
         checkpointProfiles: {},
+        transport: 'st-relay',
+        activeProfileId: '',
     });
     assert.equal(legacy.backends.comfy.connection, 'legacy_proxy');
     assert.equal(legacy.backends.comfy.username, 'u');
@@ -178,6 +182,8 @@ test('missing/corrupt comfy section is created without throwing', () => {
         baseUrl: '', auth: '', checkpoint: '',
         discovery: { at: 0, models: [], samplers: [], schedulers: [] },
         checkpointProfiles: {},
+        transport: 'st-relay',
+        activeProfileId: '',
     });
 });
 
@@ -328,7 +334,7 @@ test('v5 → v6 with blank a1111.checkpoint stamps generation.checkpoint = ""', 
 });
 
 // --- Test 21: v6 fields already present are never overwritten ---
-test('existing v6 discovery/checkpointProfiles/generation.checkpoint survive migration untouched', () => {
+test('existing v6 discovery survives migration; pre-v8 checkpointProfiles are reset; v9 unifies the checkpoint', () => {
     const s = {
         settingsVersion: 5,
         generation: { checkpoint: 'User Choice' },
@@ -342,9 +348,12 @@ test('existing v6 discovery/checkpointProfiles/generation.checkpoint survive mig
         },
     };
     runMigrations(s);
-    assert.equal(s.generation.checkpoint, 'User Choice');
+    // v9 reconciles the two diverged checkpoint keys; the Backends-tab value wins.
+    assert.equal(s.generation.checkpoint, 'Old Field');
+    assert.equal(s.backends.a1111.checkpoint, 'Old Field');
     assert.equal(s.backends.a1111.discovery.at, 123);
-    assert.deepEqual(s.backends.a1111.checkpointProfiles, { M: { profile: 'krea2', steps: 8 } });
+    // v8 intentionally drops pre-v8 rows (they were auto-seeded, not user intent).
+    assert.deepEqual(s.backends.a1111.checkpointProfiles, {});
 });
 
 // --- Test 22: v0.1.0 through full migration reaches v6 ---
@@ -355,6 +364,167 @@ test('v0.1.0 legacy reaches v6 with all R1 fields present', () => {
     assert.deepEqual(legacy.backends.a1111.discovery, { at: 0, models: [], samplers: [], schedulers: [] });
     assert.deepEqual(legacy.backends.a1111.checkpointProfiles, {});
     assert.equal(legacy.generation.checkpoint, '');
+});
+
+// --- Test 23: v6 → v7 adds llmSize / cache / nai.variety with defaults ---
+test('v6 → v7 stamps generation.llmSize, cache block, and backends.nai.variety', () => {
+    const v6 = {
+        settingsVersion: 6,
+        backends: { nai: { apiKey: 'k', model: 'm' }, comfy: {}, a1111: { baseUrl: '', auth: '', checkpoint: '', discovery: { at: 0, models: [], samplers: [], schedulers: [] }, checkpointProfiles: {} } },
+        generation: { checkpoint: '' },
+    };
+    const ran = runMigrations(v6);
+    assert.equal(ran, true);
+    assert.equal(v6.settingsVersion, CURRENT_VERSION);
+    assert.equal(v6.generation.llmSize, 'auto');
+    assert.deepEqual(v6.cache, { ttlDays: 0, maxMB: 0, jpegQuality: 0 });
+    assert.equal(v6.backends.nai.variety, false);
+    assert.equal(v6.backends.nai.apiKey, 'k', 'existing nai fields untouched');
+});
+
+// --- Test 24: v7 is idempotent; user values never overwritten ---
+test('v7 re-run and existing user values survive untouched', () => {
+    const s = {
+        settingsVersion: 6,
+        backends: { nai: { apiKey: '', model: '', variety: true }, comfy: {}, a1111: {} },
+        generation: { llmSize: 'ignore' },
+        cache: { ttlDays: 30, maxMB: 200, jpegQuality: 85 },
+    };
+    runMigrations(s);
+    assert.equal(s.generation.llmSize, 'ignore');
+    assert.deepEqual(s.cache, { ttlDays: 30, maxMB: 200, jpegQuality: 85 });
+    assert.equal(s.backends.nai.variety, true);
+    // Re-run at current version: no change, no error.
+    assert.equal(runMigrations(s), false);
+});
+
+// --- Test 25: v0.1.0 legacy reaches v7 with the Phase D fields ---
+test('v0.1.0 legacy reaches v7 with llmSize/cache/variety present', () => {
+    const legacy = { enabled: true, backends: { nai: { apiKey: 'pst-test' }, comfy: { baseUrl: 'http://x', username: 'u', password: 'p', profile: 'anima' } } };
+    runMigrations(legacy);
+    assert.equal(legacy.settingsVersion, CURRENT_VERSION);
+    assert.equal(legacy.generation.llmSize, 'auto');
+    assert.deepEqual(legacy.cache, { ttlDays: 0, maxMB: 0, jpegQuality: 0 });
+    assert.equal(legacy.backends.nai.variety, false);
+});
+
+// --- Test 26: v7 → v8 drops auto-seeded checkpointProfiles, keeps checkpoint + discovery, stamps transport ---
+test('v7 → v8 clears checkpointProfiles, keeps checkpoint/discovery, stamps transport st-relay', () => {
+    const v7 = {
+        settingsVersion: 7,
+        backends: {
+            nai: {}, comfy: {},
+            a1111: {
+                baseUrl: 'https://host.example', auth: 'k', checkpoint: 'Krea 2 | A',
+                discovery: { at: 5, models: [{ title: 'Krea 2 | A' }], samplers: ['Euler'], schedulers: ['simple'] },
+                checkpointProfiles: { 'Krea 2 | A': { profile: 'krea2', steps: 8 }, 'Old': { profile: 'anima' } },
+            },
+        },
+        generation: { checkpoint: 'Krea 2 | A' },
+    };
+    const ran = runMigrations(v7);
+    assert.equal(ran, true);
+    assert.equal(v7.settingsVersion, CURRENT_VERSION);
+    assert.deepEqual(v7.backends.a1111.checkpointProfiles, {});
+    assert.equal(v7.backends.a1111.checkpoint, 'Krea 2 | A');
+    assert.equal(v7.generation.checkpoint, 'Krea 2 | A');
+    assert.equal(v7.backends.a1111.discovery.at, 5);
+    assert.equal(v7.backends.a1111.auth, 'k');
+    assert.equal(v7.backends.a1111.transport, 'st-relay');
+});
+
+test('v7 → v8 keeps an explicit direct transport and tolerates a missing a1111 section', () => {
+    const s = { settingsVersion: 7, backends: { a1111: { transport: 'direct', checkpointProfiles: { X: { profile: 'anima' } } } } };
+    runMigrations(s);
+    assert.equal(s.backends.a1111.transport, 'direct');
+    assert.deepEqual(s.backends.a1111.checkpointProfiles, {});
+    const bare = { settingsVersion: 7 };
+    runMigrations(bare);
+    assert.deepEqual(bare.backends.a1111.checkpointProfiles, {});
+    assert.equal(bare.backends.a1111.transport, 'st-relay');
+    assert.equal(runMigrations(bare), false);
+});
+
+// --- Test 28 (v8 → v9): the two checkpoint keys are unified ---
+test('v8 → v9 unifies backends.a1111.checkpoint and generation.checkpoint (backend value wins)', () => {
+    const diverged = {
+        settingsVersion: 8,
+        backends: { a1111: { baseUrl: 'https://h', auth: 'k', checkpoint: 'Backends Pick', transport: 'st-relay', checkpointProfiles: {} } },
+        generation: { checkpoint: 'Main Pick' },
+    };
+    runMigrations(diverged);
+    assert.equal(diverged.backends.a1111.checkpoint, 'Backends Pick');
+    assert.equal(diverged.generation.checkpoint, 'Backends Pick');
+
+    // Backends blank, Main set: the Main value is kept (never lose a selection).
+    const mainOnly = {
+        settingsVersion: 8,
+        backends: { a1111: { baseUrl: '', auth: '', checkpoint: '', transport: 'st-relay', checkpointProfiles: {} } },
+        generation: { checkpoint: 'Main Pick' },
+    };
+    runMigrations(mainOnly);
+    assert.equal(mainOnly.backends.a1111.checkpoint, 'Main Pick');
+    assert.equal(mainOnly.generation.checkpoint, 'Main Pick');
+
+    // Bare object: both stamped to '' without throwing; idempotent re-run.
+    const bare = { settingsVersion: 8 };
+    runMigrations(bare);
+    assert.equal(bare.backends.a1111.checkpoint, '');
+    assert.equal(bare.generation.checkpoint, '');
+    assert.equal(runMigrations(bare), false);
+});
+
+// --- Test 29 (v9 → v10, D14): checkpointProfiles re-keyed by profile id ---
+test('v9 → v10 re-keys checkpointProfiles to ids, stamps checkpoint/name, derives activeProfileId', () => {
+    const v9 = {
+        settingsVersion: 9,
+        backends: { a1111: {
+            baseUrl: 'https://h', auth: 'k', checkpoint: 'Model B', transport: 'st-relay',
+            checkpointProfiles: {
+                'Model A': { profile: 'anima', steps: 20 },
+                'Model B': { profile: 'krea2', cfg: 4.5 },
+            },
+        } },
+        generation: { checkpoint: 'Model B' },
+    };
+    runMigrations(v9);
+    const rows = v9.backends.a1111.checkpointProfiles;
+    assert.deepEqual(Object.keys(rows), ['cp1', 'cp2']);
+    // Old title becomes the row's checkpoint; name defaults to the checkpoint.
+    assert.deepEqual(rows.cp1, { profile: 'anima', steps: 20, checkpoint: 'Model A', name: 'Model A' });
+    assert.deepEqual(rows.cp2, { profile: 'krea2', cfg: 4.5, checkpoint: 'Model B', name: 'Model B' });
+    // The row matching the unified checkpoint becomes active.
+    assert.equal(v9.backends.a1111.activeProfileId, 'cp2');
+    // The checkpoint keys themselves are untouched.
+    assert.equal(v9.backends.a1111.checkpoint, 'Model B');
+    assert.equal(v9.generation.checkpoint, 'Model B');
+});
+
+// --- Test 30 (v9 → v10): no matching row / empty map / corrupt entries ---
+test('v9 → v10 with no checkpoint match leaves activeProfileId empty; tolerates junk entries', () => {
+    const noMatch = {
+        settingsVersion: 9,
+        backends: { a1111: { checkpoint: 'Elsewhere', checkpointProfiles: { 'Model A': { profile: 'anima' } } } },
+    };
+    runMigrations(noMatch);
+    assert.equal(noMatch.backends.a1111.activeProfileId, '');
+    assert.deepEqual(noMatch.backends.a1111.checkpointProfiles.cp1, { profile: 'anima', checkpoint: 'Model A', name: 'Model A' });
+
+    // Non-object entries are dropped; empty map stays empty.
+    const junk = {
+        settingsVersion: 9,
+        backends: { a1111: { checkpoint: '', checkpointProfiles: { X: 'not-an-object', Y: null } } },
+    };
+    runMigrations(junk);
+    assert.deepEqual(junk.backends.a1111.checkpointProfiles, {});
+    assert.equal(junk.backends.a1111.activeProfileId, '');
+
+    // Bare object: structure stamped without throwing; idempotent re-run.
+    const bare = { settingsVersion: 9 };
+    runMigrations(bare);
+    assert.deepEqual(bare.backends.a1111.checkpointProfiles, {});
+    assert.equal(bare.backends.a1111.activeProfileId, '');
+    assert.equal(runMigrations(bare), false);
 });
 
 // --- Summary ---

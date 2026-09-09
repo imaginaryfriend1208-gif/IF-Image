@@ -8,6 +8,7 @@ import {
     A1111Client, A1111Error,
     utf8Base64, buildBasicAuthHeader, normalizeBaseUrl,
     normalizeModels, resolveCheckpoint, summarizeValidationError,
+    reshapeRelayBody,
 } from '../src/backends/a1111.js';
 import { ComfyProxyClient } from '../src/backends/comfy.js';
 
@@ -624,4 +625,219 @@ test('A1111Client requires cfg accessors and a fetch implementation', () => {
     } finally {
         Object.defineProperty(globalThis, 'fetch', { value: realFetch, configurable: true });
     }
+});
+
+// ---------------------------------------------------------------------------
+// ST-relay transport (browser -> SillyTavern /api/sd/* -> backend)
+// ---------------------------------------------------------------------------
+
+/** Relay mock: routes keyed by "POST /api/sd/<name>"; records parsed bodies. */
+function makeRelayClient(routes, log = [], cfg = {}) {
+    const fetchImpl = async (url, init = {}) => {
+        const body = init.body ? JSON.parse(init.body) : null;
+        log.push({ url, method: init.method ?? 'GET', headers: init.headers, body, signal: init.signal });
+        const key = `${init.method ?? 'GET'} ${url}`;
+        const route = routes[key];
+        if (!route) throw new Error(`mock: no route for ${key}`);
+        return typeof route === 'function' ? route(body, init) : route;
+    };
+    return new A1111Client({
+        getBaseUrl: () => cfg.baseUrl ?? 'https://sd.example.com',
+        getAuth: () => cfg.auth ?? 'dummy-secret',
+        getTransport: () => cfg.transport ?? 'st-relay',
+        getRequestHeaders: () => ({ 'X-CSRF-Token': 'csrf-dummy' }),
+        fetchImpl,
+    });
+}
+
+const RELAY_ROUTES = {
+    'POST /api/sd/get-model': textResponse('Krea 2 | A'),
+    'POST /api/sd/models': jsonResponse([{ value: 'Krea 2 | A', text: 'Krea 2 | A' }, { value: 'Anima | B', text: 'Anima | B' }]),
+    'POST /api/sd/samplers': jsonResponse(['Euler', 'Euler a', 'DPM++ 2M']),
+    'POST /api/sd/schedulers': jsonResponse(['Automatic', 'simple', 'karras']),
+    'POST /api/sd/generate': jsonResponse({ images: ['aGVsbG8='], parameters: {}, info: JSON.stringify({ seed: 4321 }) }),
+};
+
+test('relay: transport() defaults to direct without a getter and never throws', () => {
+    const plain = new A1111Client({ getBaseUrl: () => 'x', getAuth: () => '', fetchImpl: async () => {} });
+    assert.equal(plain.transport(), 'direct');
+    const bad = new A1111Client({ getBaseUrl: () => 'x', getAuth: () => '', getTransport: () => { throw new Error('boom'); }, fetchImpl: async () => {} });
+    assert.equal(bad.transport(), 'direct');
+    assert.equal(makeRelayClient({}).transport(), 'st-relay');
+    assert.equal(makeRelayClient({}, [], { transport: 'nonsense' }).transport(), 'direct');
+});
+
+test('relay: discovery posts {url, auth} to /api/sd/* with ST headers and never touches the backend origin', async () => {
+    const log = [];
+    const client = makeRelayClient(RELAY_ROUTES, log);
+    const discovery = await client.discover();
+    assert.deepEqual(discovery.models.map(m => m.title), ['Krea 2 | A', 'Anima | B']);
+    assert.deepEqual(discovery.samplers, ['Euler', 'Euler a', 'DPM++ 2M']);
+    assert.deepEqual(discovery.schedulers, ['Automatic', 'simple', 'karras']);
+    assert.equal(discovery.enrichment, 'none', '/internal/models is not relayable and must be tolerated');
+    assert.ok(log.length >= 3);
+    for (const call of log) {
+        assert.equal(call.method, 'POST');
+        assert.match(call.url, /^\/api\/sd\//, 'relay endpoint only');
+        assert.ok(!/sd\.example\.com/.test(call.url), 'backend origin never fetched directly');
+        assert.equal(call.body.url, 'https://sd.example.com');
+        assert.equal(call.body.auth, 'dummy-secret', 'auth string passed verbatim for the server to encode');
+        assert.equal(call.headers['X-CSRF-Token'], 'csrf-dummy');
+        assert.equal(call.headers['Content-Type'], 'application/json');
+        assert.equal(call.headers['Authorization'], undefined, 'no Basic header on the relay hop');
+    }
+});
+
+test('relay: options() reshapes /get-model text into {sd_model_checkpoint}; JSON-string form too', async () => {
+    const a = makeRelayClient(RELAY_ROUTES);
+    assert.deepEqual(await a.options(), { sd_model_checkpoint: 'Krea 2 | A' });
+    const b = makeRelayClient({ ...RELAY_ROUTES, 'POST /api/sd/get-model': jsonResponse('Anima | B') });
+    assert.deepEqual(await b.options(), { sd_model_checkpoint: 'Anima | B' });
+    const probe = await a.testConnection();
+    assert.equal(probe.currentCheckpoint, 'Krea 2 | A');
+    assert.equal(probe.models.length, 2);
+});
+
+test('relay: txt2img posts the full payload plus url/auth to /api/sd/generate and parses the image', async () => {
+    const log = [];
+    const client = makeRelayClient(RELAY_ROUTES, log);
+    const result = await client.txt2img({ prompt: 'p', negative_prompt: 'n', checkpoint: 'Krea 2 | A', seed: 7, width: 1344, height: 768, steps: 8, cfg_scale: 1, sampler_name: 'Euler', scheduler: 'simple' });
+    assert.equal(result.info.seed, 4321);
+    assert.ok(result.image instanceof Blob);
+    const call = log.at(-1);
+    assert.equal(call.url, '/api/sd/generate');
+    assert.equal(call.body.url, 'https://sd.example.com');
+    assert.equal(call.body.auth, 'dummy-secret');
+    assert.equal(call.body.prompt, 'p');
+    assert.equal(call.body.seed, 7);
+    assert.equal(call.body.override_settings.sd_model_checkpoint, 'Krea 2 | A');
+    assert.equal(call.body.override_settings_restore_afterwards, true);
+    assert.equal(call.body.sampler_name, 'Euler');
+    assert.equal(call.body.scheduler, 'simple');
+});
+
+test('relay: generate is never aborted mid-flight (ST would POST /interrupt); abort surfaces after settle', async () => {
+    const log = [];
+    let release;
+    const gate = new Promise(r => { release = r; });
+    const routes = {
+        ...RELAY_ROUTES,
+        'POST /api/sd/generate': async (body, init) => {
+            await gate;
+            assert.equal(init.signal.aborted, false, 'fetch signal must NOT be aborted for generate');
+            return jsonResponse({ images: ['aGVsbG8='], info: '{"seed":1}' });
+        },
+    };
+    const client = makeRelayClient(routes, log);
+    const ac = new AbortController();
+    const pending = client.txt2img({ prompt: 'p', checkpoint: 'Krea 2 | A' }, { signal: ac.signal });
+    ac.abort();
+    release();
+    await assert.rejects(pending, err => err.code === 'A1111_ABORTED' && /discarded/.test(err.message));
+    assert.equal(log.at(-1).signal.aborted, false);
+});
+
+test('relay: discovery honors abort immediately; pre-aborted signal never fetches', async () => {
+    const log = [];
+    let release;
+    const gate = new Promise(r => { release = r; });
+    const routes = {
+        ...RELAY_ROUTES,
+        'POST /api/sd/models': async (body, init) => {
+            await gate;
+            if (init.signal.aborted) { const e = new Error('aborted'); e.name = 'AbortError'; throw e; }
+            return jsonResponse([]);
+        },
+    };
+    const client = makeRelayClient(routes, log);
+    const ac = new AbortController();
+    const pending = client.models({ signal: ac.signal });
+    ac.abort();
+    release();
+    await assert.rejects(pending, err => err.code === 'A1111_ABORTED');
+    const pre = new AbortController();
+    pre.abort();
+    const before = log.length;
+    await assert.rejects(client.models({ signal: pre.signal }), err => err.code === 'A1111_ABORTED');
+    assert.equal(log.length, before, 'no fetch when already aborted');
+});
+
+test('relay: 500 maps to A1111_HTTP with a server-console pointer and an http:// redirect hint', async () => {
+    const routes = { ...RELAY_ROUTES, 'POST /api/sd/models': textResponse('Internal Server Error', 500) };
+    await assert.rejects(makeRelayClient(routes).models(), err =>
+        err.code === 'A1111_HTTP' && /SillyTavern server console/.test(err.message) && !/http:\/\//.test(err.message));
+    await assert.rejects(makeRelayClient(routes, [], { baseUrl: 'http://sd.example.com' }).models(), err =>
+        err.code === 'A1111_HTTP' && /https:\/\/ URL directly/.test(err.message));
+});
+
+test('relay: generate 500 is diagnosed with one model-list probe (refused job vs. bad URL/key), key never echoed', async () => {
+    // Backend reachable: probe succeeds -> "job refused" wording, no /interrupt, exactly one probe.
+    const log = [];
+    const routes = { ...RELAY_ROUTES, 'POST /api/sd/generate': textResponse('Internal Server Error', 500) };
+    await assert.rejects(makeRelayClient(routes, log).txt2img({ prompt: 'p', checkpoint: 'Krea 2 | A' }), err => {
+        assert.equal(err.code, 'A1111_HTTP');
+        assert.match(err.message, /refused this generation job/);
+        assert.match(err.message, /missing on the server/);
+        assert.equal(err.message.includes('dummy-secret'), false);
+        return true;
+    });
+    assert.deepEqual(log.map(c => c.url), ['/api/sd/generate', '/api/sd/models']);
+    assert.ok(log.every(c => !/interrupt/.test(c.url)));
+    // Probe also fails -> "check URL/key" wording.
+    const log2 = [];
+    const routes2 = { ...routes, 'POST /api/sd/models': textResponse('Internal Server Error', 500) };
+    await assert.rejects(makeRelayClient(routes2, log2).txt2img({ prompt: 'p', checkpoint: 'Krea 2 | A' }), err =>
+        err.code === 'A1111_HTTP' && /check the API base URL and the key/.test(err.message));
+    // Probe throws -> neutral console pointer; still A1111_HTTP.
+    const routes3 = { ...routes, 'POST /api/sd/models': () => { throw new TypeError('Failed to fetch'); } };
+    await assert.rejects(makeRelayClient(routes3).txt2img({ prompt: 'p', checkpoint: 'Krea 2 | A' }), err =>
+        err.code === 'A1111_HTTP' && /server console/.test(err.message));
+});
+
+test('relay: 401/403 from ST itself maps to A1111_AUTH without echoing the key; network error maps to A1111_NETWORK', async () => {
+    const routes = { ...RELAY_ROUTES, 'POST /api/sd/models': textResponse('Forbidden', 403) };
+    await assert.rejects(makeRelayClient(routes).models(), err => err.code === 'A1111_AUTH' && !/dummy-secret/.test(err.message));
+    const net = new A1111Client({
+        getBaseUrl: () => 'https://sd.example.com', getAuth: () => 'dummy-secret', getTransport: () => 'st-relay',
+        fetchImpl: async () => { throw new TypeError('Failed to fetch'); },
+    });
+    await assert.rejects(net.models(), err => err.code === 'A1111_NETWORK' && /relay/.test(err.message) && !/dummy-secret/.test(err.message));
+});
+
+test('relay: /internal/models has no relay route -> A1111_CONFIG (discover() ignores it)', async () => {
+    const client = makeRelayClient(RELAY_ROUTES);
+    await assert.rejects(client.internalModels(), err => err.code === 'A1111_CONFIG');
+});
+
+test('relay: malformed relay bodies are rejected as A1111_MALFORMED', async () => {
+    const routes = { ...RELAY_ROUTES, 'POST /api/sd/models': textResponse('<html>login</html>') };
+    await assert.rejects(makeRelayClient(routes).models(), err => err.code === 'A1111_MALFORMED');
+    const routes2 = { ...RELAY_ROUTES, 'POST /api/sd/generate': textResponse('not json') };
+    await assert.rejects(makeRelayClient(routes2).txt2img({ prompt: 'p', checkpoint: 'Krea 2 | A' }), err => err.code === 'A1111_MALFORMED');
+});
+
+test('reshapeRelayBody: shapes models/names/options/raw and rejects junk', () => {
+    assert.deepEqual(JSON.parse(reshapeRelayBody('models', JSON.stringify([{ value: 'A', text: 'A' }, 'B', {}, null]))),
+        [{ title: 'A', model_name: 'A' }, { title: 'B', model_name: 'B' }]);
+    assert.deepEqual(JSON.parse(reshapeRelayBody('names', JSON.stringify(['Euler', { name: 'DPM++ 2M' }, 3, null]))),
+        [{ name: 'Euler' }, { name: 'DPM++ 2M' }]);
+    assert.deepEqual(JSON.parse(reshapeRelayBody('options', ' Krea 2 | A ')), { sd_model_checkpoint: 'Krea 2 | A' });
+    assert.deepEqual(JSON.parse(reshapeRelayBody('options', JSON.stringify({ sd_model_checkpoint: 'X' }))), { sd_model_checkpoint: 'X' });
+    assert.deepEqual(JSON.parse(reshapeRelayBody('options', JSON.stringify({ other: 1 }))), { sd_model_checkpoint: '' });
+    assert.equal(reshapeRelayBody('raw', '{"images":[]}'), '{"images":[]}');
+    assert.equal(reshapeRelayBody('raw', 'nope'), null);
+    assert.equal(reshapeRelayBody('models', '{"not":"array"}'), null);
+    assert.equal(reshapeRelayBody('unknown', '[]'), null);
+});
+
+test('direct transport is unchanged when getTransport says direct', async () => {
+    const log = [];
+    const client = new A1111Client({
+        getBaseUrl: () => 'https://sd.example.com', getAuth: () => 'dummy-secret', getTransport: () => 'direct',
+        fetchImpl: mockFetch({ 'GET /sdapi/v1/sd-models': jsonResponse([{ title: 'A', model_name: 'a' }]) }, log),
+    });
+    const models = await client.models();
+    assert.equal(models[0].title, 'A');
+    assert.equal(log[0].url, 'https://sd.example.com/sdapi/v1/sd-models');
+    assert.equal(log[0].headers['Authorization'], buildBasicAuthHeader('dummy-secret'));
 });

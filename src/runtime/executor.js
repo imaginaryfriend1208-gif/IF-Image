@@ -88,7 +88,7 @@ export function createExecutor({ nai, comfy, a1111, getSettings }) {
             const model = settings.backends.comfy.proxyModel;
             if (!model) {
                 throw Object.assign(
-                    new Error('No proxy model selected. Open Backends, click Refresh Models, and select a checkpoint under the Comfy Cloud Proxy section.'),
+                    new Error('No proxy model selected. Open Settings, click Refresh Models, and select a checkpoint under the Comfy Cloud Proxy section.'),
                     { code: 'COMFY_CONFIG' },
                 );
             }
@@ -117,8 +117,8 @@ export function createExecutor({ nai, comfy, a1111, getSettings }) {
             const checkpoint = resolveCheckpoint(models, requested);
             if (!checkpoint) {
                 const message = requested
-                    ? `Checkpoint "${requested}" is no longer offered by the server. Open Backends → Test connection and pick another.`
-                    : 'No checkpoint selected for AUTOMATIC1111. Open Backends, click Refresh Models, and select a checkpoint.';
+                    ? `Checkpoint "${requested}" is no longer offered by the server. Open Settings → Test connection and pick another.`
+                    : 'No checkpoint selected for AUTOMATIC1111. Open Settings, click Refresh Models, and select a checkpoint.';
                 throw Object.assign(new Error(message), { code: 'EXECUTOR_CONFIG' });
             }
             const body = {
