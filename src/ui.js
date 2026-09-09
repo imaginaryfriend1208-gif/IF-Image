@@ -1408,8 +1408,11 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     // draft for the selected checkpoint ("Save profile" creates a new row).
     let cpEditingId = settings.backends.a1111.activeProfileId || null;
     // The editor is rarely used, so it stays collapsed until the user asks
-    // for it (toggle button or a list row's Edit). Not persisted.
+    // for it (toggle button). Not persisted.
     let cpEditorOpen = false;
+    // D14: which saved row shows the INLINE editor (small fields right under
+    // the row in the list). null = none. Not persisted.
+    let cpInlineEditId = null;
 
     /** Re-render editor + saved-profile list. The editor shows the row being
      *  edited (cpEditingId) or a fresh suggestion for the selected checkpoint,
@@ -1448,7 +1451,31 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         renderCheckpointProfileList();
     }
 
-    /** List of every saved profile with Use (activate) / Edit / Delete. */
+    /** Small inline editor rendered under a saved row: numeric fields plus
+     *  sampler/scheduler, saved in place (same id, name/checkpoint kept). */
+    function cpInlineEditorHtml(e) {
+        const disc = settings.backends.a1111.discovery ?? {};
+        const numField = (key, label, value, min, max, step) =>
+            `<label class="if-image-cp-inline-field">${label}
+                <input data-cpi="${key}" type="number" min="${min}" max="${max}" step="${step}" value="${value ?? ''}">
+            </label>`;
+        const selField = (key, label, values, selected) =>
+            `<label class="if-image-cp-inline-field">${label}
+                <select data-cpi="${key}">${cpOptionList(values, selected ?? '')}</select>
+            </label>`;
+        return `<div class="if-image-cp-inline" data-cp-inline>
+            ${numField('width', 'W', e.width, 256, 2048, 64)}
+            ${numField('height', 'H', e.height, 256, 2048, 64)}
+            ${numField('steps', 'Steps', e.steps, 1, 150, 1)}
+            ${numField('cfg', 'CFG', e.cfg, 0, 30, 0.5)}
+            ${selField('sampler', 'Sampler', disc.samplers, e.sampler)}
+            ${selField('scheduler', 'Sched', disc.schedulers, e.scheduler)}
+            <button data-cp-inline-save class="menu_button">Save</button>
+        </div>`;
+    }
+
+    /** List of every saved profile with Use (activate) / Edit / Delete.
+     *  Edit opens a compact inline editor right under the row. */
     function renderCheckpointProfileList() {
         if (!cpList) return;
         const rows = cpRows();
@@ -1456,6 +1483,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             cpList.innerHTML = '';
             return;
         }
+        if (cpInlineEditId && !rows.some(([id]) => id === cpInlineEditId)) cpInlineEditId = null;
         const discovered = new Set((settings.backends.a1111.discovery?.models ?? []).map(m => m?.title).filter(Boolean));
         const activeId = settings.backends.a1111.activeProfileId || '';
         cpList.innerHTML = '<h3>Saved checkpoint profiles</h3>' + rows.map(([id, e]) => {
@@ -1468,28 +1496,54 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             if (e.scheduler) bits.push(e.scheduler);
             const stale = discovered.size > 0 && !discovered.has(e.checkpoint);
             const active = id === activeId;
-            return `<div class="if-image-cp-item${active ? ' active' : ''}" data-cp-item="${escapeHtml(id)}">
-                <div class="if-image-cp-item-main">
-                    <div class="if-image-cp-item-title">${escapeHtml(cpRowLabel(id, e))}${stale ? ' <span class="if-image-cp-badge">not on server</span>' : ''}</div>
-                    <div class="if-image-cp-item-sub">${escapeHtml(bits.join(' · '))}</div>
+            const editing = id === cpInlineEditId;
+            return `<div class="if-image-cp-item${active ? ' active' : ''}${editing ? ' editing' : ''}" data-cp-item="${escapeHtml(id)}">
+                <div class="if-image-cp-item-row">
+                    <div class="if-image-cp-item-main">
+                        <div class="if-image-cp-item-title">${escapeHtml(cpRowLabel(id, e))}${stale ? ' <span class="if-image-cp-badge">not on server</span>' : ''}</div>
+                        <div class="if-image-cp-item-sub">${escapeHtml(bits.join(' · '))}</div>
+                    </div>
+                    <div class="if-image-cp-item-actions">
+                        ${stale ? '' : '<button data-cp-use class="menu_button" title="Make this the active profile">Use</button>'}
+                        <button data-cp-edit class="menu_button" title="Edit this profile's params right here">${editing ? 'Close' : 'Edit'}</button>
+                        <button data-cp-del class="menu_button if-image-btn-danger" title="Delete this profile">Delete</button>
+                    </div>
                 </div>
-                <div class="if-image-cp-item-actions">
-                    ${stale ? '' : '<button data-cp-use class="menu_button" title="Make this the active profile">Use</button>'}
-                    <button data-cp-edit class="menu_button" title="Load this profile into the editor">Edit</button>
-                    <button data-cp-del class="menu_button if-image-btn-danger" title="Delete this profile">Delete</button>
-                </div>
+                ${editing ? cpInlineEditorHtml(e) : ''}
             </div>`;
         }).join('');
         cpList.querySelectorAll('[data-cp-item]').forEach(item => {
             const id = item.dataset.cpItem;
             item.querySelector('[data-cp-use]')?.addEventListener('click', () => setActiveProfile(id));
             item.querySelector('[data-cp-edit]')?.addEventListener('click', () => {
-                cpEditingId = id;
-                cpEditorOpen = true; // Edit from the list always expands the editor
-                syncCheckpointProfileEditor();
-                cpEditor?.scrollIntoView({ block: 'nearest' });
+                cpInlineEditId = cpInlineEditId === id ? null : id; // toggle
+                renderCheckpointProfileList();
             });
             item.querySelector('[data-cp-del]')?.addEventListener('click', () => deleteCheckpointProfile(id));
+            item.querySelector('[data-cp-inline-save]')?.addEventListener('click', () => {
+                const e = settings.backends.a1111.checkpointProfiles?.[id];
+                if (!e || typeof e !== 'object') return;
+                const get = (key) => item.querySelector(`[data-cpi="${key}"]`)?.value ?? '';
+                const row = normalizeCheckpointProfile({
+                    profile: e.profile,
+                    checkpoint: e.checkpoint,
+                    name: e.name ?? '',
+                    width: get('width'),
+                    height: get('height'),
+                    steps: get('steps'),
+                    cfg: get('cfg'),
+                    sampler: get('sampler'),
+                    scheduler: get('scheduler'),
+                });
+                if (!row) return;
+                settings.backends.a1111.checkpointProfiles[id] = row;
+                cpInlineEditId = null;
+                save();
+                syncActiveProfileSelect();
+                syncCheckpointProfileEditor();
+                syncTestGenVisibility();
+                showResult(a1111Result, `Profile "${row.name}" updated.`, false);
+            });
         });
     }
 

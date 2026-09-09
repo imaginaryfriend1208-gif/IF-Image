@@ -144,17 +144,68 @@
 }
 
 .if-image-cp-item {
-    display: flex;
-    align-items: center;
-    gap: 8px;
     padding: 4px 8px;
     border: 1px solid var(--ifi-border);
     border-radius: 6px;
     font-size: 0.85em;
 }
 
+/* Row layout moved to an inner wrapper so the inline editor can sit
+   full-width UNDER the name/actions line. */
+.if-image-cp-item-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
 .if-image-cp-item.active {
     outline: 1px solid var(--ifi-accent);
+}
+
+/* D14: compact in-row editor (small numeric fields + sampler/scheduler)
+   shown under a saved profile when its Edit button is toggled on. */
+.if-image-cp-inline {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 6px;
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px dashed var(--ifi-border);
+}
+
+.if-image-cp-inline-field {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 0.85em;
+    color: var(--ifi-dim);
+}
+
+.if-image-cp-inline-field input {
+    width: 64px;
+    min-height: 24px;
+    padding: 1px 4px;
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--ifi-bg) 85%, #000);
+    border: 1px solid var(--ifi-border);
+    color: var(--ifi-text);
+}
+
+.if-image-cp-inline-field select {
+    max-width: 130px;
+    min-height: 24px;
+    padding: 1px 4px;
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--ifi-bg) 85%, #000);
+    border: 1px solid var(--ifi-border);
+    color: var(--ifi-text);
+}
+
+.if-image-settings .if-image-cp-inline .menu_button {
+    min-width: 52px;
+    min-height: 24px;
+    padding: 2px 8px;
 }
 
 .if-image-cp-item-main {
