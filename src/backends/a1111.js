@@ -490,7 +490,7 @@ export class A1111Client {
                 const reason = reachable === true
                     ? 'The connection and key work (a model-list probe succeeded), so the backend refused this generation job. On a ComfyUI-backed proxy this usually means the workflow behind the selected checkpoint references a checkpoint or LoRA file that is missing on the server — only the server owner can fix that; try another checkpoint meanwhile.'
                     : reachable === false
-                        ? 'A model-list probe over the same relay also failed — check the API base URL and the key (Backends → Test Connection).'
+                        ? 'A model-list probe over the same relay also failed — check the API base URL and the key (Settings → Test Connection).'
                         : 'The backend answer is logged in the SillyTavern server console.';
                 throw new A1111Error('A1111_HTTP', `The SillyTavern relay returned HTTP ${response.status} for ${path}. ${reason}${hint}`);
             }

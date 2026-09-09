@@ -122,7 +122,7 @@ export class NaiClient {
 
     authHeaders() {
         const key = this.getApiKey();
-        if (!key) throw new Error('NovelAI API token is not set. Add it in the Backends tab.');
+        if (!key) throw new Error('NovelAI API token is not set. Add it in the Settings tab (NovelAI).');
         return { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' };
     }
 

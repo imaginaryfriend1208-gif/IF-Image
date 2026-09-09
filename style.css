@@ -32,10 +32,44 @@
     font-size: 0.85em;
 }
 
+/* Tab bar: a grid of equal-sized buttons (ST's .menu_button defaults to
+   width:min-content, which made every tab a different size). */
 .if-image-tabs {
-    display: flex;
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
     gap: 4px;
+}
+
+.if-image-tabs .if-image-tab {
+    width: auto;
+    margin: 0;
+    padding: 4px 6px;
+    font-size: 0.85em;
+    justify-content: center;
+    text-align: center;
+    white-space: nowrap;
+}
+
+/* Settings sub-tabs: one connection per sub-tab (SD | NovelAI). */
+.if-image-subtabs {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px;
+    margin-bottom: 4px;
+}
+
+.if-image-subtabs .if-image-subtab {
+    width: auto;
+    margin: 0;
+    padding: 4px 6px;
+    font-size: 0.85em;
+    justify-content: center;
+    text-align: center;
+}
+
+.if-image-subtab.active {
+    background: var(--ifi-accent);
+    color: #000;
 }
 
 /* D9: per-checkpoint profile editor + saved-profile list (Backends tab,

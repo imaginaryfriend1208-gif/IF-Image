@@ -1,10 +1,12 @@
-// IF Image - Drawer UI with 6 Tabs: Main, Backends, Test Generate, Characters, Persona & Styles, Test Render.
+// IF Image - Drawer UI with 7 tabs: Settings (connections + checkpoint
+// profiles + Test Generate), Generation, Characters, Persona & Style, LLM,
+// Gallery, Advanced (Log + Replace Rules + 3-Dialect Preview).
 // Template literals mounted into #extensions_settings2 by index.js.
 
 import { NAI_MODELS } from './backends/nai.js';
 import { resolveCheckpoint } from './backends/a1111.js';
 import { resolveCheckpointProfile, mergeParams, suggestCheckpointProfile, normalizeCheckpointProfile, SIZE_PRESETS, matchSizePreset } from './backends/checkpoint-profiles.js';
-import { PROFILES, PROFILE_KEYS, applyProfile } from './profiles.js';
+import { PROFILES, PROFILE_KEYS } from './profiles.js';
 import { getAllCharacters, saveCharacter, removeCharacter, createDefaultCharacter, emptyBooruDetail, applyCharMigrations } from './storage/chars.js';
 import { getAllPersonas, savePersona, removePersona, getAllStyles, saveStyle, removeStyle, createDefaultPersona, createDefaultStyle, getReplaceRules, saveReplaceRules } from './storage/presets.js';
 import { getOutfitsForCharacter, getAllOutfits, saveOutfit, removeOutfit, createDefaultOutfit } from './storage/outfits.js';
@@ -45,20 +47,17 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         </div>
 
         <div class="if-image-tabs">
-            <button class="if-image-tab menu_button active" data-if-tab="main">Main</button>
-            <button class="if-image-tab menu_button" data-if-tab="llm">LLM</button>
-            <button class="if-image-tab menu_button" data-if-tab="backends">Backends</button>
-            <button class="if-image-tab menu_button" data-if-tab="test">Test Gen</button>
-            <button class="if-image-tab menu_button" data-if-tab="log">Log</button>
+            <button class="if-image-tab menu_button active" data-if-tab="settings">Settings</button>
+            <button class="if-image-tab menu_button" data-if-tab="main">Generation</button>
             <button class="if-image-tab menu_button" data-if-tab="chars">Characters</button>
             <button class="if-image-tab menu_button" data-if-tab="presets">Persona & Style</button>
-            <button class="if-image-tab menu_button" data-if-tab="replace">Replace</button>
+            <button class="if-image-tab menu_button" data-if-tab="llm">LLM</button>
             <button class="if-image-tab menu_button" data-if-tab="gallery">Gallery</button>
-            <button class="if-image-tab menu_button" data-if-tab="render">3-Dialect Preview</button>
+            <button class="if-image-tab menu_button" data-if-tab="advanced">Advanced</button>
         </div>
 
-        <!-- ============ MAIN TAB ============ -->
-        <div class="if-image-panel" data-if-panel="main">
+        <!-- ============ GENERATION TAB (formerly Main) ============ -->
+        <div class="if-image-panel" data-if-panel="main" style="display:none;">
             <h3>Generation</h3>
             <div class="if-image-row">
                 <label class="if-image-check">
@@ -87,18 +86,12 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 </select>
             </div>
             <div class="if-image-row">
-                <label for="if_main_profile">Default profile</label>
+                <label for="if_main_profile">Fallback prompt style</label>
                 <select id="if_main_profile" class="text_pole">
                     ${PROFILE_KEYS.map(k => `<option value="${k}">${PROFILES[k].label}</option>`).join('')}
                 </select>
             </div>
-            <div class="if-image-row">
-                <label for="if_main_checkpoint">Checkpoint (A1111-compatible SD)</label>
-                <select id="if_main_checkpoint" class="text_pole">
-                    <option value="">-- none selected --</option>
-                </select>
-            </div>
-            <div class="if-image-note">Options come from the last Backends → Test connection / Refresh Models discovery. The checkpoint is re-validated against fresh discovery at generation time.</div>
+            <div class="if-image-note">Used when the active checkpoint has no saved profile. The checkpoint itself is selected in Settings → Stable Diffusion.</div>
             <div class="if-image-row">
                 <label for="if_main_mode">Mode</label>
                 <select id="if_main_mode" class="text_pole">
@@ -247,8 +240,8 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             <div class="if-image-note">Context profiles control the scene window and roster injection. More request types arrive in Phase C.</div>
         </div>
 
-        <!-- ============ LOG TAB ============ -->
-        <div class="if-image-panel" data-if-panel="log" style="display:none;">
+        <!-- ============ ADVANCED TAB: log section ============ -->
+        <div class="if-image-panel" data-if-panel="advanced" style="display:none;">
             <h3>Generation Log</h3>
             <div class="if-image-row">
                 <label for="if_log_limit">Log limit</label>
@@ -269,8 +262,14 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             <div id="if_log_tasks" class="if-image-log"></div>
         </div>
 
-        <!-- ============ BACKENDS TAB ============ -->
-        <div class="if-image-panel" data-if-panel="backends" style="display:none;">
+        <!-- ============ SETTINGS TAB (connections + profiles + test) ============ -->
+        <div class="if-image-panel" data-if-panel="settings">
+            <div class="if-image-subtabs">
+                <button class="if-image-subtab menu_button active" data-if-subtab="sd">Stable Diffusion</button>
+                <button class="if-image-subtab menu_button" data-if-subtab="nai">NovelAI</button>
+            </div>
+
+            <div data-if-settings="nai" style="display:none;">
             <h3>NovelAI</h3>
             <div class="if-image-row">
                 <label for="if_nai_key">API token (pst-...)</label>
@@ -292,10 +291,17 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 <button id="if_nai_test" class="menu_button">Test connection</button>
             </div>
             <div class="if-image-result" id="if_nai_result"></div>
+            </div>
 
-            <hr class="if-image-sep"/>
-
+            <div data-if-settings="sd">
             <h3>Stable Diffusion backend</h3>
+            <div class="if-image-row">
+                <label for="if_active_profile">Checkpoint profile (active — used for all generation)</label>
+                <select id="if_active_profile" class="text_pole">
+                    <option value="">-- no saved profiles yet --</option>
+                </select>
+            </div>
+            <div class="if-image-note">Save a profile below to add entries here. The selected profile's checkpoint, prompt style, and params drive chat markers, /ifimg, and Test Generate.</div>
             <div class="if-image-row">
                 <label for="if_sd_connection">Connection type</label>
                 <select id="if_sd_connection" class="text_pole">
@@ -378,6 +384,10 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                     <h3>Checkpoint profile</h3>
                     <div class="if-image-note" id="if_cp_status"></div>
                     <div class="if-image-row">
+                        <label for="if_cp_name">Profile name</label>
+                        <input id="if_cp_name" type="text" class="text_pole" placeholder="defaults to the checkpoint title">
+                    </div>
+                    <div class="if-image-row">
                         <label for="if_cp_profile">Prompt style</label>
                         <select id="if_cp_profile" class="text_pole">
                             ${PROFILE_KEYS.map(k => `<option value="${k}">${PROFILES[k].label}</option>`).join('')}
@@ -426,73 +436,26 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 </div>
                 <div id="if_a1111_cp_list" class="if-image-cp-list"></div>
             </div>
-        </div>
-
-        <!-- ============ TEST GEN TAB ============ -->
-        <div class="if-image-panel" data-if-panel="test" style="display:none;">
-            <div class="if-image-row">
-                <label>Backend</label>
-                <div class="if-image-radios">
-                    <label><input type="radio" name="if_test_backend" value="comfy"> SD (A1111-compatible / Comfy proxy)</label>
-                    <label><input type="radio" name="if_test_backend" value="nai"> NovelAI</label>
-                </div>
             </div>
 
-            <div class="if-image-row" data-if-comfy-only>
-                <label for="if_test_profile">Profile</label>
-                <select id="if_test_profile" class="text_pole">
-                    ${PROFILE_KEYS.map(k => `<option value="${k}">${PROFILES[k].label}</option>`).join('')}
-                </select>
-            </div>
-
-            <div class="if-image-row" data-if-sd-checkpoint style="display:none;">
-                <label for="if_test_checkpoint">Checkpoint (from the backend's Refresh Models)</label>
-                <select id="if_test_checkpoint" class="text_pole">
-                    <option value="">-- none discovered --</option>
-                </select>
-            </div>
-
+            <hr class="if-image-sep"/>
+            <h3>Test Generate</h3>
+            <div class="if-image-note" id="if_test_using">Uses the active profile above (or the fallback prompt style when none is saved).</div>
             <div class="if-image-row">
                 <label for="if_test_prompt">Prompt</label>
                 <textarea id="if_test_prompt" class="text_pole textarea_compact" rows="3"></textarea>
             </div>
-            <div class="if-image-row" data-if-nai-only style="display:none;">
-                <label for="if_test_negative">Negative</label>
-                <textarea id="if_test_negative" class="text_pole textarea_compact" rows="2"></textarea>
+            <div class="if-image-row">
+                <label for="if_test_seed">Seed (-1 random)</label>
+                <input id="if_test_seed" type="number" min="-1" class="text_pole" style="max-width:160px;">
             </div>
-
-            <div class="if-image-grid">
-                <div class="if-image-row">
-                    <label for="if_test_width">Width</label>
-                    <input id="if_test_width" type="number" min="64" max="4096" step="64" class="text_pole">
-                </div>
-                <div class="if-image-row">
-                    <label for="if_test_height">Height</label>
-                    <input id="if_test_height" type="number" min="64" max="4096" step="64" class="text_pole">
-                </div>
-                <div class="if-image-row">
-                    <label for="if_test_steps">Steps</label>
-                    <input id="if_test_steps" type="number" min="1" max="200" class="text_pole">
-                </div>
-                <div class="if-image-row">
-                    <label for="if_test_cfg">CFG</label>
-                    <input id="if_test_cfg" type="number" min="0" max="30" step="0.5" class="text_pole">
-                </div>
-                <div class="if-image-row">
-                    <label for="if_test_seed">Seed (-1 random)</label>
-                    <input id="if_test_seed" type="number" min="-1" class="text_pole">
-                </div>
-            </div>
-
             <div class="if-image-row">
                 <div style="display:flex; gap:6px;">
                     <button id="if_test_generate" class="menu_button">Generate</button>
                     <button id="if_test_cancel" class="menu_button" style="display:none;">Cancel</button>
                 </div>
             </div>
-
             <div class="if-image-result" id="if_test_error" style="display:none;"></div>
-
             <div class="if-image-output" id="if_test_output" style="display:none;">
                 <img id="if_test_image" alt="Generated image"/>
                 <div class="if-image-caption" id="if_test_caption"></div>
@@ -716,8 +679,8 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             <div id="if_presets_status" class="if-image-result"></div>
         </div>
 
-        <!-- ============ REPLACE TAB ============ -->
-        <div class="if-image-panel" data-if-panel="replace" style="display:none;">
+        <!-- ============ ADVANCED TAB: replace-rules section ============ -->
+        <div class="if-image-panel" data-if-panel="advanced" style="display:none;">
             <h3>Replace Rules</h3>
             <div class="if-image-note">Trigger on a tag, then prefix/suffix/replace/delete it. Multi-trigger: "a|b". Condition: "@if dialect==illus", "@if nsfw", "@if !nsfw" (safe evaluator — no code execution). Pipeline order: compile &rarr; non-final rules &rarr; cleanup &rarr; final rules.</div>
             <div id="if_replace_list" class="if-image-log"></div>
@@ -760,7 +723,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
 
             <hr class="if-image-sep"/>
             <h3>Dry-run Preview</h3>
-            <div class="if-image-note">Runs the current Test Gen prompt (Test Gen tab) through compile() including these rules.</div>
+            <div class="if-image-note">Runs the current Test Generate prompt (Settings tab) through compile() including these rules.</div>
             <div class="if-image-row">
                 <button id="if_replace_preview" class="menu_button">Preview against Test Gen prompt</button>
             </div>
@@ -820,8 +783,8 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             </div>
         </div>
 
-        <!-- ============ 3-DIALECT PREVIEW TAB ============ -->
-        <div class="if-image-panel" data-if-panel="render" style="display:none;">
+        <!-- ============ ADVANCED TAB: 3-dialect preview section ============ -->
+        <div class="if-image-panel" data-if-panel="advanced" style="display:none;">
             <h3>Test-Render (Offline Compiler)</h3>
 
             <h4>Character Picker (C9)</h4>
@@ -881,8 +844,21 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         btn.addEventListener('click', () => {
             el.querySelectorAll('.if-image-tab').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
+            // Several sections share data-if-panel="advanced"; all of them
+            // toggle together, so the Advanced tab shows every section.
             el.querySelectorAll('.if-image-panel').forEach(p => {
                 p.style.display = p.dataset.ifPanel === btn.dataset.ifTab ? '' : 'none';
+            });
+        });
+    });
+
+    // Settings sub-tabs: one connection per sub-tab (SD | NovelAI).
+    el.querySelectorAll('.if-image-subtab').forEach(btn => {
+        btn.addEventListener('click', () => {
+            el.querySelectorAll('.if-image-subtab').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            el.querySelectorAll('[data-if-settings]').forEach(p => {
+                p.style.display = p.dataset.ifSettings === btn.dataset.ifSubtab ? '' : 'none';
             });
         });
     });
@@ -894,7 +870,6 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     const mainEnd = $('if_main_end');
     const mainBackend = $('if_main_backend');
     const mainProfile = $('if_main_profile');
-    const mainCheckpoint = $('if_main_checkpoint');
     const mainMode = $('if_main_mode');
 
     mainEnabled.checked = settings.enabled !== false;
@@ -931,13 +906,8 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         settings.generation.endTag = value;
         save();
     });
-    mainBackend.addEventListener('change', () => { settings.generation.backend = mainBackend.value; save(); });
-    mainProfile.addEventListener('change', () => { settings.generation.profile = mainProfile.value; save(); });
-    // R4/D11: default checkpoint for marker generation. The selection is
-    // SHARED with the Backends tab select — setA1111Checkpoint writes both
-    // persisted keys and re-syncs every dependent control. Options are
-    // (re)built by syncMainCheckpoint() from persisted discovery.
-    mainCheckpoint.addEventListener('change', () => setA1111Checkpoint(mainCheckpoint.value));
+    mainBackend.addEventListener('change', () => { settings.generation.backend = mainBackend.value; save(); syncTestGenVisibility(); });
+    mainProfile.addEventListener('change', () => { settings.generation.profile = mainProfile.value; save(); syncTestGenVisibility(); });
     mainMode.addEventListener('change', () => { settings.generation.mode = mainMode.value; save(); });
 
     // ================= Backends Tab Wiring =================
@@ -1124,7 +1094,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         if (clearPersisted) {
             a1111Models = [];
             settings.backends.a1111.discovery = { at: 0, models: [], samplers: [], schedulers: [] };
-            syncMainCheckpoint();
+            syncActiveProfileSelect();
             fillCheckpointSelect(a1111Checkpoint, [], '', '-- Refresh Models to load --');
             syncCheckpointProfileEditor();
         } else {
@@ -1262,7 +1232,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             a1111Checkpoint.value = '';
         }
         save();
-        syncMainCheckpoint();
+        syncActiveProfileSelect();
         syncCheckpointProfileEditor();
         syncTestGenVisibility();
     }
@@ -1327,20 +1297,34 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
 
     a1111Checkpoint.addEventListener('change', () => setA1111Checkpoint(a1111Checkpoint.value));
 
-    // ---- R4: Main-tab checkpoint select (generation.checkpoint) -----------
-    // Options come from the PERSISTED discovery so they survive reloads. A
-    // stored title missing from the list stays selectable but is labeled
-    // "(not discovered)" — the executor re-validates at generation time.
-    function syncMainCheckpoint() {
-        const models = settings.backends.a1111.discovery?.models ?? [];
-        const stored = settings.generation.checkpoint || '';
-        const missing = stored && !models.some(m => m.title === stored);
-        mainCheckpoint.innerHTML = '<option value="">-- none selected --</option>'
-            + models.map(m => `<option value="${escapeHtml(m.title)}">${escapeHtml(m.title)}</option>`).join('')
-            + (missing ? `<option value="${escapeHtml(stored)}">${escapeHtml(stored)} (not discovered)</option>` : '');
-        mainCheckpoint.value = stored;
+    // ---- Active checkpoint profile select ----------------------------------
+    // One entry per SAVED checkpoint profile (checkpointProfiles rows). The
+    // selected entry is the profile driving all generation: choosing one
+    // selects its checkpoint through the same D11 single writer. The current
+    // checkpoint may have no saved row yet — then the select shows a
+    // "(no saved profile)" entry for it so the state stays visible.
+    const activeProfileSelect = $('if_active_profile');
+    function syncActiveProfileSelect() {
+        if (!activeProfileSelect) return;
+        const profiles = settings.backends.a1111.checkpointProfiles ?? {};
+        const titles = Object.keys(profiles).filter(t => profiles[t] && typeof profiles[t] === 'object');
+        const stored = settings.backends.a1111.checkpoint || '';
+        const options = titles.map(t => {
+            const label = profiles[t].name ? `${profiles[t].name} — ${t}` : t;
+            return `<option value="${escapeHtml(t)}">${escapeHtml(label)}</option>`;
+        });
+        if (stored && !titles.includes(stored)) {
+            options.push(`<option value="${escapeHtml(stored)}">${escapeHtml(stored)} (no saved profile)</option>`);
+        }
+        activeProfileSelect.innerHTML = options.length
+            ? '<option value="">-- none active --</option>' + options.join('')
+            : '<option value="">-- no saved profiles yet --</option>';
+        activeProfileSelect.value = stored;
     }
-    syncMainCheckpoint();
+    if (activeProfileSelect) {
+        activeProfileSelect.addEventListener('change', () => setA1111Checkpoint(activeProfileSelect.value));
+    }
+    syncActiveProfileSelect();
     // Seed the Backends checkpoint select from the persisted discovery too.
     if (a1111Models.length) {
         fillCheckpointSelect(a1111Checkpoint, a1111Models, settings.backends.a1111.checkpoint, '-- select a checkpoint --');
@@ -1357,7 +1341,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         settings.backends.a1111.checkpoint = title;
         settings.generation.checkpoint = title;
         save();
-        syncMainCheckpoint();
+        syncActiveProfileSelect();
         fillCheckpointSelect(a1111Checkpoint, a1111Models, title,
             a1111Models.length ? '-- select a checkpoint --' : '-- Refresh Models to load --');
         syncCheckpointProfileEditor();
@@ -1373,6 +1357,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     // compile()/mergeParams exactly as before.
     const cpEditor = $('if_a1111_cp_editor');
     const cpStatus = $('if_cp_status');
+    const cpName = $('if_cp_name');
     const cpProfile = $('if_cp_profile');
     const cpSize = $('if_cp_size');
     const cpWidth = $('if_cp_width');
@@ -1396,6 +1381,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     /** Fill the editor form from a row-shaped object. */
     function cpFillForm(values) {
         if (!cpEditor) return;
+        if (cpName) cpName.value = typeof values.name === 'string' ? values.name : '';
         cpProfile.value = PROFILES[values.profile] ? values.profile : PROFILE_KEYS[0];
         cpWidth.value = values.width ?? '';
         cpHeight.value = values.height ?? '';
@@ -1463,9 +1449,10 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             if (e.scheduler) bits.push(e.scheduler);
             const stale = discovered.size > 0 && !discovered.has(title);
             const active = title === settings.backends.a1111.checkpoint;
+            const heading = e.name ? `${e.name} — ${title}` : title;
             return `<div class="if-image-cp-item${active ? ' active' : ''}" data-cp-item="${i}">
                 <div class="if-image-cp-item-main">
-                    <div class="if-image-cp-item-title">${escapeHtml(title)}${stale ? ' <span class="if-image-cp-badge">not on server</span>' : ''}</div>
+                    <div class="if-image-cp-item-title">${escapeHtml(heading)}${stale ? ' <span class="if-image-cp-badge">not on server</span>' : ''}</div>
                     <div class="if-image-cp-item-sub">${escapeHtml(bits.join(' · '))}</div>
                 </div>
                 <div class="if-image-cp-item-actions">
@@ -1484,7 +1471,9 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     function deleteCheckpointProfile(title) {
         delete settings.backends.a1111.checkpointProfiles[title];
         save();
+        syncActiveProfileSelect();
         syncCheckpointProfileEditor();
+        syncTestGenVisibility();
     }
 
     if (cpEditor) {
@@ -1512,12 +1501,18 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 showResult(a1111Result, 'Pick a prompt style before saving the profile.', true);
                 return;
             }
+            // Display name is UI metadata, added after normalization so the
+            // pure model stays unchanged; blank = fall back to the title.
+            const displayName = cpName?.value?.trim();
+            if (displayName) row.name = displayName;
             if (!settings.backends.a1111.checkpointProfiles || typeof settings.backends.a1111.checkpointProfiles !== 'object') {
                 settings.backends.a1111.checkpointProfiles = {};
             }
             settings.backends.a1111.checkpointProfiles[title] = row;
             save();
+            syncActiveProfileSelect();
             syncCheckpointProfileEditor();
+            syncTestGenVisibility();
             showResult(a1111Result, `Profile saved for "${title}".`, false);
         });
         cpDelete.addEventListener('click', () => {
@@ -1527,19 +1522,14 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     }
     syncCheckpointProfileEditor();
 
-    // ================= Test Gen Tab Wiring =================
-    const testProfileRow = el.querySelector('[data-if-comfy-only]');
-    const testNegativeRow = el.querySelector('[data-if-nai-only]');
-    const testCheckpointRow = el.querySelector('[data-if-sd-checkpoint]');
-    const testProfile = $('if_test_profile');
-    const testCheckpoint = $('if_test_checkpoint');
+    // ================= Test Generate Wiring (Settings tab) =================
+    // The old Test Gen tab's own backend/profile/checkpoint/size controls are
+    // gone: a test generation uses exactly what marker generation would use —
+    // the default backend, the active checkpoint (profile) and mergeParams.
+    // Only the prompt and the seed are test-specific.
     const testPrompt = $('if_test_prompt');
-    const testNegative = $('if_test_negative');
-    const testWidth = $('if_test_width');
-    const testHeight = $('if_test_height');
-    const testSteps = $('if_test_steps');
-    const testCfg = $('if_test_cfg');
     const testSeed = $('if_test_seed');
+    const testUsing = $('if_test_using');
     const generateBtn = $('if_test_generate');
     const cancelBtn = $('if_test_cancel');
     const errorBox = $('if_test_error');
@@ -1549,13 +1539,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     const downloadEl = $('if_test_download');
     const elapsedEl = $('if_test_elapsed');
 
-    testProfile.value = settings.test.profile || settings.backends.comfy.profile;
     testPrompt.value = settings.test.prompt;
-    testNegative.value = settings.test.negative;
-    testWidth.value = settings.test.width;
-    testHeight.value = settings.test.height;
-    testSteps.value = settings.test.steps;
-    testCfg.value = settings.test.cfg;
     testSeed.value = settings.test.seed;
 
     function currentSdConnection() {
@@ -1569,100 +1553,63 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             : { models: comfyModels, stored: settings.backends.comfy.proxyModel ?? '' };
     }
 
-    // Pure refresh of the Test-tab checkpoint selector from the active
-    // source's discovered list + stored value. Stale selections from the
-    // other source are never shown.
-    function syncTestCheckpoint() {
-        const { models, stored } = activeCheckpointOptions();
-        const resolved = resolveCheckpoint(models, stored);
-        testCheckpoint.innerHTML = models.length
-            ? models.map(m => `<option value="${escapeHtml(m.title)}">${escapeHtml(m.title)}</option>`).join('')
-            : '<option value="">-- none discovered (Backends → Refresh Models) --</option>';
-        testCheckpoint.value = resolved ?? '';
-    }
-
-    function syncBackendRadio() {
-        el.querySelectorAll('input[name="if_test_backend"]').forEach(r => {
-            r.checked = r.value === settings.test.backend;
-        });
-        const isComfy = settings.test.backend === 'comfy';
-        testProfileRow.style.display = isComfy ? '' : 'none';
-        const profile = PROFILES[settings.test.profile ?? settings.backends.comfy.profile];
-        testNegativeRow.style.display = (isComfy && profile?.negativeDisabled) ? 'none' : '';
-        testCheckpointRow.style.display = isComfy ? '' : 'none';
-        syncTestCheckpoint();
-    }
-
-    function syncTestGenVisibility() {
-        syncTestCheckpoint();
-    }
-    syncBackendRadio();
-
-    el.querySelectorAll('input[name="if_test_backend"]').forEach(radio => {
-        radio.addEventListener('change', () => {
-            settings.test.backend = radio.value;
-            save();
-            syncBackendRadio();
-        });
-    });
-
-    testProfile.addEventListener('change', () => {
-        settings.test.profile = testProfile.value;
-        applyProfile(settings.test, testProfile.value, true);
-        testPrompt.value = settings.test.prompt;
-        testNegative.value = settings.test.negative;
-        testWidth.value = settings.test.width;
-        testHeight.value = settings.test.height;
-        testSteps.value = settings.test.steps;
-        testCfg.value = settings.test.cfg;
-        testSeed.value = settings.test.seed;
-        syncBackendRadio();
-        save();
-    });
-
-    testCheckpoint.addEventListener('change', () => {
-        if (currentSdConnection() === 'a1111') {
-            // D11: same single writer as Main/Backends, so a checkpoint
-            // picked for a test generation also drives marker generation.
-            setA1111Checkpoint(testCheckpoint.value);
-            testCheckpoint.value = settings.backends.a1111.checkpoint;
-            // R2: prefill W/H/steps/cfg from the checkpoint's effective
-            // params (PROFILES < settings params < checkpoint profile).
-            // The user can still edit any field before Generate.
-            const title = testCheckpoint.value;
-            const cp = title ? resolveCheckpointProfile(settings, title) : null;
-            if (cp) {
-                const merged = mergeParams({ profileKey: cp.profileKey, checkpointTitle: title, settings });
-                settings.test.width = merged.width;
-                settings.test.height = merged.height;
-                settings.test.steps = merged.steps;
-                settings.test.cfg = merged.cfg;
-                settings.test.profile = cp.profileKey;
-                testWidth.value = merged.width;
-                testHeight.value = merged.height;
-                testSteps.value = merged.steps;
-                testCfg.value = merged.cfg;
-                testProfile.value = cp.profileKey;
-                // The profile changed under the Test tab: re-sync dependent
-                // rows (Negative is hidden for negativeDisabled profiles).
-                syncBackendRadio();
-            }
-        } else {
-            settings.backends.comfy.proxyModel = testCheckpoint.value;
+    /**
+     * What a generation would use RIGHT NOW: backend kind, prompt profile
+     * (active checkpoint profile beats the fallback style) and merged params.
+     * Mirrors compile() in index.js minus marker/LLM overrides.
+     */
+    function effectiveTestSetup() {
+        if (settings.generation.backend === 'nai') {
+            const profileKey = settings.generation.profile || 'anima';
+            return { backend: 'nai', profileKey, params: mergeParams({ profileKey, settings }) };
         }
+        const conn = currentSdConnection();
+        if (conn === 'a1111') {
+            const title = settings.backends.a1111.checkpoint || '';
+            const cp = title ? resolveCheckpointProfile(settings, title) : null;
+            const profileKey = cp?.profileKey || settings.generation.profile || 'anima';
+            return {
+                backend: 'comfy', conn, profileKey, checkpointTitle: title,
+                params: mergeParams({ profileKey, checkpointTitle: title || undefined, settings }),
+            };
+        }
+        const profileKey = settings.generation.profile || settings.backends.comfy.profile || 'anima';
+        return { backend: 'comfy', conn, profileKey, params: mergeParams({ profileKey, settings }) };
+    }
+
+    // The "uses X" note under the Test Generate heading; re-rendered whenever
+    // the connection, checkpoint, or a saved profile changes.
+    function syncTestGenVisibility() {
+        if (!testUsing) return;
+        const setup = effectiveTestSetup();
+        const style = PROFILES[setup.profileKey]?.label ?? setup.profileKey;
+        const p = setup.params;
+        if (setup.backend === 'nai') {
+            testUsing.textContent = `Uses NovelAI · ${style} · ${p.width}×${p.height} · ${p.steps} steps · cfg ${p.cfg}.`;
+            return;
+        }
+        if (setup.conn === 'a1111') {
+            const row = setup.checkpointTitle
+                ? settings.backends.a1111.checkpointProfiles?.[setup.checkpointTitle]
+                : null;
+            const label = row?.name || setup.checkpointTitle;
+            testUsing.textContent = setup.checkpointTitle
+                ? `Uses ${label}${row ? '' : ' (no saved profile — fallback style)'} · ${style} · ${p.width}×${p.height} · ${p.steps} steps · cfg ${p.cfg}.`
+                : 'No checkpoint selected — pick or save a checkpoint profile above first.';
+            return;
+        }
+        const model = settings.backends.comfy.proxyModel || '';
+        testUsing.textContent = model
+            ? `Uses Comfy proxy · ${model} · ${style} · ${p.width}×${p.height} · ${p.steps} steps · cfg ${p.cfg}.`
+            : 'No proxy model selected — click Refresh Models and pick one above first.';
+    }
+    syncTestGenVisibility();
+
+    testPrompt.addEventListener('input', () => { settings.test.prompt = testPrompt.value; save(); });
+    testSeed.addEventListener('input', () => {
+        settings.test.seed = Number.isFinite(Number(testSeed.value)) ? Number(testSeed.value) : -1;
         save();
     });
-
-    const bindInput = (input, apply) => {
-        input.addEventListener('input', () => { apply(input.value); save(); });
-    };
-    bindInput(testPrompt, v => settings.test.prompt = v);
-    bindInput(testNegative, v => settings.test.negative = v);
-    bindInput(testWidth, v => settings.test.width = Number(v) || 832);
-    bindInput(testHeight, v => settings.test.height = Number(v) || 1216);
-    bindInput(testSteps, v => settings.test.steps = Number(v) || 16);
-    bindInput(testCfg, v => settings.test.cfg = Number(v) || 4);
-    bindInput(testSeed, v => settings.test.seed = Number.isFinite(Number(v)) ? Number(v) : -1);
 
     // Object URL hygiene: revoke the previous URL before showing a new one.
     let currentObjectUrl = null;
@@ -1702,55 +1649,62 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         generateController = new AbortController();
         const startedAt = performance.now();
         try {
-            if (settings.test.backend === 'nai') {
+            const setup = effectiveTestSetup();
+            const profile = PROFILES[setup.profileKey] ?? PROFILES.anima;
+            const negative = profile.negativeDisabled ? '' : profile.negative;
+            const p = setup.params;
+            const seed = settings.test.seed;
+            if (setup.backend === 'nai') {
                 const blob = await nai.generate({
                     model: settings.backends.nai.model,
                     prompt: settings.test.prompt,
-                    negative: settings.test.negative,
-                    width: settings.test.width,
-                    height: settings.test.height,
-                    steps: settings.test.steps,
-                    scale: settings.test.cfg,
-                    seed: settings.test.seed,
+                    negative,
+                    width: p.width,
+                    height: p.height,
+                    steps: p.steps,
+                    scale: p.cfg,
+                    seed,
                     signal: generateController.signal,
                 });
                 showImage(URL.createObjectURL(blob));
-                captionEl.textContent = `NovelAI · ${settings.test.width}x${settings.test.height} · steps ${settings.test.steps}`;
+                captionEl.textContent = `NovelAI · ${p.width}x${p.height} · steps ${p.steps}`;
             } else {
-                const conn = currentSdConnection();
                 const { models, stored } = activeCheckpointOptions();
                 // The checkpoint must be a discovered model from the ACTIVE
                 // source; dialect/profile names are never sent as a model.
                 const checkpoint = resolveCheckpoint(models, stored);
                 if (!checkpoint) {
-                    throw new Error(`No valid checkpoint for the "${conn === 'a1111' ? 'AUTOMATIC1111-compatible API' : 'Comfy Cloud Proxy (Legacy)'}" connection. Open Backends, click Refresh Models, and select a checkpoint (profile ≠ model: family names like anima/krea2/illustrious are not checkpoints).`);
+                    throw new Error(`No valid checkpoint for the "${setup.conn === 'a1111' ? 'AUTOMATIC1111-compatible API' : 'Comfy Cloud Proxy (Legacy)'}" connection. Click Refresh Models above and select a checkpoint (profile ≠ model: family names like anima/krea2/illustrious are not checkpoints).`);
                 }
-                if (conn === 'a1111') {
-                    const result = await a1111.txt2img({
+                if (setup.conn === 'a1111') {
+                    const body = {
                         prompt: settings.test.prompt,
-                        negative_prompt: settings.test.negative,
+                        negative_prompt: negative,
                         checkpoint,
-                        seed: settings.test.seed,
-                        width: settings.test.width,
-                        height: settings.test.height,
-                        steps: settings.test.steps,
-                        cfg_scale: settings.test.cfg,
-                    }, { signal: generateController.signal });
+                        seed,
+                        width: p.width,
+                        height: p.height,
+                        steps: p.steps,
+                        cfg_scale: p.cfg,
+                    };
+                    if (typeof p.sampler === 'string' && p.sampler) body.sampler_name = p.sampler;
+                    if (typeof p.scheduler === 'string' && p.scheduler) body.scheduler = p.scheduler;
+                    const result = await a1111.txt2img(body, { signal: generateController.signal });
                     showImage(result.dataUrl);
-                    captionEl.textContent = `A1111 · ${checkpoint} · ${settings.test.width}x${settings.test.height}`;
+                    captionEl.textContent = `A1111 · ${checkpoint} · ${p.width}x${p.height}`;
                 } else {
                     const result = await comfy.txt2img({
                         prompt: settings.test.prompt,
-                        negative_prompt: settings.test.negative,
+                        negative_prompt: negative,
                         model: checkpoint,
-                        seed: settings.test.seed,
-                        width: settings.test.width,
-                        height: settings.test.height,
-                        steps: settings.test.steps,
-                        cfg_scale: settings.test.cfg,
+                        seed,
+                        width: p.width,
+                        height: p.height,
+                        steps: p.steps,
+                        cfg_scale: p.cfg,
                     }, { signal: generateController.signal });
                     showImage(result.dataUrl);
-                    captionEl.textContent = `Comfy proxy · ${checkpoint} · ${settings.test.width}x${settings.test.height}`;
+                    captionEl.textContent = `Comfy proxy · ${checkpoint} · ${p.width}x${p.height}`;
                 }
             }
             elapsedEl.textContent = `${((performance.now() - startedAt) / 1000).toFixed(1)}s`;
@@ -2332,8 +2286,9 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     replacePreviewBtn.addEventListener('click', () => {
         try {
             const text = testPrompt.value.trim();
-            if (!text) { replacePreviewOut.textContent = 'Test Gen prompt is empty.'; return; }
-            const profileKey = testProfile.value || settings.generation.profile || 'anima';
+            if (!text) { replacePreviewOut.textContent = 'The Test Generate prompt (Settings tab) is empty.'; return; }
+            // Same prompt style the Test Generate section would use.
+            const profileKey = effectiveTestSetup().profileKey;
             const profile = PROFILES[profileKey] ?? PROFILES.anima;
             const parsed = parseTriggers(text, {});
             const assembled = assemblePrompt(parsed, profile.dialect, profile);
