@@ -7,8 +7,8 @@ import { NAI_MODELS } from './backends/nai.js';
 import { resolveCheckpoint } from './backends/a1111.js';
 import { getActiveProfile, mergeParams, suggestCheckpointProfile, normalizeCheckpointProfile, SIZE_PRESETS, matchSizePreset } from './backends/checkpoint-profiles.js';
 import { PROFILES, PROFILE_KEYS } from './profiles.js';
-import { getAllCharacters, saveCharacter, removeCharacter, createDefaultCharacter, emptyBooruDetail, applyCharMigrations } from './storage/chars.js';
-import { getAllPersonas, savePersona, removePersona, getAllStyles, saveStyle, removeStyle, createDefaultPersona, createDefaultStyle, getReplaceRules, saveReplaceRules } from './storage/presets.js';
+import { getAllCharacters, saveCharacter, removeCharacter, createDefaultCharacter, createCharacterFromStCard, findCharacterByCardId, getStCharacters, emptyBooruDetail, applyCharMigrations } from './storage/chars.js';
+import { getAllPersonas, savePersona, removePersona, getAllStyles, saveStyle, removeStyle, createDefaultPersona, createDefaultStyle, applyPersonaSync, getReplaceRules, saveReplaceRules } from './storage/presets.js';
 import { getOutfitsForCharacter, getAllOutfits, saveOutfit, removeOutfit, createDefaultOutfit } from './storage/outfits.js';
 import { buildExport, validateImport, planMerge } from './storage/transfer.js';
 import { listImages, countImages, deleteImageRecord, getStorageStats, pruneImages } from './storage/images.js';
@@ -42,8 +42,15 @@ export const EXTENSION_VERSION = '0.3.0';
  *   and save the result as a new record.
  * @param {() => string} [args.getCurrentChatId] - C10: current chat id, for
  *   the Gallery tab's "current chat" filter.
+ * @param {(opts?: { signal?: AbortSignal }) => Promise<{ persona: object }>}
+ *   [args.syncPersonaFromSt] - ask the LLM engine to build a persona payload
+ *   from the active SillyTavern Persona (name + description).
+ * @param {() => (void|Promise<void>)} [args.refreshRoster] - refresh the
+ *   runtime roster after the UI has persisted an imported/synced record.
+ * @param {Promise<boolean>} [args.initialPersonaSync] - resolves true when
+ *   the silent first-load sync created a Persona and the selector must reload.
  */
-export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQueue, regenerateImage, getCurrentChatId, planChatImages, applyPlacements, getChatContext, eventSource, event_types }) {
+export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQueue, regenerateImage, getCurrentChatId, planChatImages, applyPlacements, getChatContext, eventSource, event_types, syncPersonaFromSt, refreshRoster, initialPersonaSync }) {
     const html = `
     <div class="if-image-settings">
         <div class="if-image-title">
@@ -561,6 +568,8 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                         <option value="">-- New Character --</option>
                     </select>
                     <button id="if_char_new" class="menu_button">+ New</button>
+                    <button id="if_char_import_active" class="menu_button">Import from active character</button>
+                    <button id="if_char_import_all" class="menu_button">Import all ST characters</button>
                 </div>
             </div>
             <div class="if-image-row">
@@ -661,6 +670,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                         <option value="">-- New Persona --</option>
                     </select>
                     <button id="if_per_new" class="menu_button">+ New</button>
+                    <button id="if_per_sync" class="menu_button">Sync from SillyTavern</button>
                     <button id="if_per_del" class="menu_button if-image-btn-danger">Delete</button>
                 </div>
             </div>
@@ -1074,6 +1084,15 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     }
     if (planRun) {
         planRun.addEventListener('click', async () => {
+            const hasProfile = (settings.llm?.apiProfiles?.length > 0)
+                || Boolean(settings.llm?.defaultApiProfileId);
+            let hostContext = null;
+            try { hostContext = getChatContext?.() ?? null; } catch { /* host context unavailable */ }
+            const hasGenerateRaw = typeof hostContext?.generateRaw === 'function';
+            if (!hasProfile && !hasGenerateRaw) {
+                planResult.textContent = 'LLM not configured. Go to LLM tab and create an API profile (method: ST generateRaw / Connection Manager / Direct fetch), or ensure SillyTavern main API is connected.';
+                return;
+            }
             if (typeof planChatImages !== 'function') {
                 planResult.textContent = 'Plan function not available.';
                 return;
@@ -2132,6 +2151,8 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     // ================= Characters Tab Wiring =================
     const charSelect = $('if_char_select');
     const charNewBtn = $('if_char_new');
+    const charImportActiveBtn = $('if_char_import_active');
+    const charImportAllBtn = $('if_char_import_all');
     const charName = $('if_char_name');
     const charAliases = $('if_char_aliases');
     const charCount = $('if_char_count');
@@ -2390,6 +2411,106 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         populateCharForm(null);
     });
 
+    async function readHostContext() {
+        try { return getChatContext?.() ?? null; } catch { return null; }
+    }
+
+    if (charImportActiveBtn) charImportActiveBtn.addEventListener('click', async () => {
+        const originalText = charImportActiveBtn.textContent;
+        charImportActiveBtn.disabled = true;
+        charImportActiveBtn.textContent = 'Importing...';
+        try {
+            const ctx = await readHostContext();
+            const stChar = ctx?.characters?.[ctx.characterId];
+            if (!stChar) {
+                showResult(charStatus, 'No character selected in SillyTavern', true);
+                if (typeof toastr !== 'undefined') toastr.warning('No character selected in SillyTavern', 'IF Image');
+                return;
+            }
+
+            const existing = await getAllCharacters();
+            const duplicate = findCharacterByCardId(existing, stChar.avatar);
+            if (duplicate) {
+                currentChars = existing;
+                activeCharId = duplicate.id;
+                await loadCharactersList();
+                charSelect.value = duplicate.id;
+                populateCharForm(duplicate);
+                showResult(charStatus, 'Already imported', false);
+                if (typeof toastr !== 'undefined') toastr.info('Already imported', 'IF Image');
+                return;
+            }
+
+            const imported = createCharacterFromStCard(stChar);
+            await saveCharacter(imported);
+            activeCharId = imported.id;
+            await loadCharactersList();
+            charSelect.value = imported.id;
+            populateCharForm(imported);
+            await refreshRoster?.();
+            const message = `Imported character: ${imported.name}`;
+            showResult(charStatus, message, false);
+            if (typeof toastr !== 'undefined') toastr.success(message, 'IF Image');
+        } catch (err) {
+            const message = err?.message ?? String(err);
+            showResult(charStatus, message, true);
+            if (typeof toastr !== 'undefined') toastr.error(message, 'IF Image');
+        } finally {
+            charImportActiveBtn.disabled = false;
+            charImportActiveBtn.textContent = originalText;
+        }
+    });
+
+    if (charImportAllBtn) charImportAllBtn.addEventListener('click', async () => {
+        const originalText = charImportAllBtn.textContent;
+        charImportAllBtn.disabled = true;
+        charImportAllBtn.textContent = 'Importing...';
+        try {
+            const ctx = await readHostContext();
+            const stCharacters = getStCharacters(ctx);
+            if (!stCharacters.length) {
+                showResult(charStatus, 'No SillyTavern characters found', true);
+                if (typeof toastr !== 'undefined') toastr.warning('No SillyTavern characters found', 'IF Image');
+                return;
+            }
+
+            const existing = await getAllCharacters();
+            const knownCardIds = new Set(existing.map(character => character?.binding?.cardId).filter(Boolean));
+            const imported = [];
+            let skipped = 0;
+            for (const stChar of stCharacters) {
+                const cardId = typeof stChar.avatar === 'string' && stChar.avatar ? stChar.avatar : null;
+                if (cardId && knownCardIds.has(cardId)) {
+                    skipped += 1;
+                    continue;
+                }
+                const character = createCharacterFromStCard(stChar);
+                await saveCharacter(character);
+                imported.push(character);
+                if (cardId) knownCardIds.add(cardId);
+            }
+
+            const lastImported = imported.at(-1) ?? null;
+            if (lastImported) activeCharId = lastImported.id;
+            await loadCharactersList();
+            if (lastImported) {
+                charSelect.value = lastImported.id;
+                populateCharForm(lastImported);
+            }
+            if (imported.length) await refreshRoster?.();
+            const message = `Imported ${imported.length} character${imported.length === 1 ? '' : 's'}; skipped ${skipped} already imported.`;
+            showResult(charStatus, message, false);
+            if (typeof toastr !== 'undefined') toastr.success(message, 'IF Image');
+        } catch (err) {
+            const message = err?.message ?? String(err);
+            showResult(charStatus, message, true);
+            if (typeof toastr !== 'undefined') toastr.error(message, 'IF Image');
+        } finally {
+            charImportAllBtn.disabled = false;
+            charImportAllBtn.textContent = originalText;
+        }
+    });
+
     charSaveBtn.addEventListener('click', async () => {
         const name = charName.value.trim();
         if (!name) {
@@ -2450,6 +2571,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     // ================= Persona & Style Wiring =================
     const perSelect = $('if_per_select');
     const perNewBtn = $('if_per_new');
+    const perSyncBtn = $('if_per_sync');
     const perDelBtn = $('if_per_del');
     const perName = $('if_per_name');
     const perAliases = $('if_per_aliases');
@@ -2559,7 +2681,52 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             console.warn('[IF Image] Presets load error:', e);
         }
     }
-    loadPresets();
+    const initialPresetLoad = loadPresets();
+    if (initialPersonaSync && typeof initialPersonaSync.then === 'function') {
+        void initialPersonaSync.then(async created => {
+            await initialPresetLoad;
+            if (created) await loadPresets();
+        }).catch(() => { /* startup sync is intentionally silent */ });
+    }
+
+    // Explicit sync is forced: the click is the user's instruction to replace
+    // stale generated fields even when the record was manually edited.
+    if (perSyncBtn) perSyncBtn.addEventListener('click', async () => {
+        if (typeof syncPersonaFromSt !== 'function') {
+            showResult(presetsStatus, 'Persona sync is not available.', true);
+            return;
+        }
+        const originalText = perSyncBtn.textContent;
+        perSyncBtn.disabled = true;
+        perSyncBtn.textContent = 'Syncing...';
+        const controller = new AbortController();
+        try {
+            const result = await syncPersonaFromSt({ signal: controller.signal });
+            if (!result?.persona || typeof result.persona !== 'object') {
+                throw new Error('SillyTavern persona sync returned no persona data.');
+            }
+            const target = currentPersonas.find(persona => persona.id === activePersonaId)
+                ?? currentPersonas.find(persona => persona.isDefault)
+                ?? currentPersonas[0]
+                ?? createDefaultPersona(result.persona.name || 'Default User');
+            applyPersonaSync(target, result.persona, true);
+            await savePersona(target);
+            activePersonaId = target.id;
+            await loadPresets();
+            await refreshRoster?.();
+            perSelect.value = target.id;
+            const message = `Synced persona: ${target.name}`;
+            showResult(presetsStatus, message, false);
+            if (typeof toastr !== 'undefined') toastr.success(message, 'IF Image');
+        } catch (err) {
+            const message = err?.message ?? String(err);
+            showResult(presetsStatus, message, true);
+            if (typeof toastr !== 'undefined') toastr.error(message, 'IF Image');
+        } finally {
+            perSyncBtn.disabled = false;
+            perSyncBtn.textContent = originalText;
+        }
+    });
 
     perSelect.addEventListener('change', () => {
         populatePersonaForm(currentPersonas.find(p => p.id === perSelect.value) ?? null);

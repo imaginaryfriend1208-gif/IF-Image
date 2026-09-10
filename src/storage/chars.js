@@ -68,6 +68,52 @@ export function createDefaultCharacter(name = 'New Character') {
 }
 
 /**
+ * Convert one SillyTavern character-card entry into a complete IF-Image
+ * character record. Unknown optional card fields are ignored and every
+ * non-card field comes from createDefaultCharacter().
+ * @param {object} stChar
+ * @returns {object}
+ */
+export function createCharacterFromStCard(stChar) {
+    if (!stChar || typeof stChar !== 'object') {
+        throw new TypeError('A SillyTavern character card is required.');
+    }
+    const cardName = typeof stChar.name === 'string' && stChar.name.trim()
+        ? stChar.name.trim()
+        : 'New Character';
+    const character = createDefaultCharacter(cardName);
+    const nickname = typeof stChar.nickname === 'string' ? stChar.nickname.trim() : '';
+    character.aliases = nickname ? [nickname] : [];
+    character.countTag = '1girl';
+    character.booru = Array.isArray(stChar.tags)
+        ? stChar.tags.filter(tag => typeof tag === 'string').map(tag => tag.trim()).filter(Boolean).join(', ')
+        : '';
+    character.natural = '';
+    character.facts = typeof stChar.description === 'string' ? stChar.description : '';
+    character.binding = {
+        cardId: typeof stChar.avatar === 'string' && stChar.avatar ? stChar.avatar : null,
+        chatIds: [],
+    };
+    return character;
+}
+
+/** Find an imported record by a stable, non-empty ST avatar/card id. */
+export function findCharacterByCardId(characters, cardId) {
+    if (!Array.isArray(characters) || cardId === null || cardId === undefined || cardId === '') return null;
+    return characters.find(character => character?.binding?.cardId === cardId) ?? null;
+}
+
+/** Return valid character objects from either ST's array or object-shaped roster. */
+export function getStCharacters(ctx) {
+    const characters = ctx?.characters;
+    if (Array.isArray(characters)) return characters.filter(character => character && typeof character === 'object');
+    if (characters && typeof characters === 'object') {
+        return Object.values(characters).filter(character => character && typeof character === 'object');
+    }
+    return [];
+}
+
+/**
  * Sequential in-place record migrators, index 0 = version 0 -> 1, etc.
  * Absent/undefined presetVersion is treated as 0. Non-destructive: existing
  * values are never overwritten, only missing fields are filled.

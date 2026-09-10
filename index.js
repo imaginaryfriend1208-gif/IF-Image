@@ -14,7 +14,7 @@ import { createMarkerPipeline } from './src/runtime/marker-pipeline.js';
 import { replaceMarkers, createSlotElement, renderSlotState, renderImageFrame, renderRegenerateChip, renderIdleChip, openLightbox, contentHash } from './src/runtime/insert.js';
 import { saveImageRecord, getImagesForMessage, getImageRecord, deleteImageRecord, getStorageStats, pruneImages, toJpegBlob } from './src/storage/images.js';
 import { getAllCharacters } from './src/storage/chars.js';
-import { getAllStyles, getAllPersonas, getReplaceRules } from './src/storage/presets.js';
+import { getAllStyles, getAllPersonas, savePersona, createDefaultPersona, applyPersonaSync, getReplaceRules } from './src/storage/presets.js';
 import { getAllOutfits } from './src/storage/outfits.js';
 import { resolveActiveCharacters } from './src/prompt/binding.js';
 import { parseTriggers } from './src/prompt/triggers.js';
@@ -90,7 +90,7 @@ jQuery(async () => {
     // change. Async loads are epoch-guarded so a stale load never overwrites
     // the cache after a newer refresh has started.
     // ------------------------------------------------------------------
-    let roster = { characters: [], styles: [], persona: null, outfits: [], replaceRules: [] };
+    let roster = { characters: [], styles: [], persona: null, personas: [], outfits: [], replaceRules: [] };
     let rosterEpoch = 0;
     async function refreshRoster() {
         rosterEpoch += 1;
@@ -107,7 +107,7 @@ jQuery(async () => {
             console.warn('[IF Image] Roster load failed:', err?.message ?? err);
         }
     }
-    refreshRoster();
+    const initialRosterLoad = refreshRoster();
 
     // ------------------------------------------------------------------
     // D6: image cache management.
@@ -327,6 +327,71 @@ jQuery(async () => {
         activeLlmAborts.clear();
     }
 
+    async function syncPersonaRequest({ signal } = {}) {
+        const controller = new AbortController();
+        const forwardAbort = () => controller.abort();
+        if (signal?.aborted) controller.abort();
+        else signal?.addEventListener('abort', forwardAbort, { once: true });
+        activeLlmAborts.add(controller);
+        try {
+            return await engine.syncPersonaFromSt({ signal: controller.signal });
+        } finally {
+            signal?.removeEventListener('abort', forwardAbort);
+            activeLlmAborts.delete(controller);
+        }
+    }
+
+    // Fill an empty persona roster once per page load. This is deliberately
+    // silent and only runs when the selected transport is actually usable.
+    let initialPersonaSyncAttempted = false;
+    async function autoSyncInitialPersona() {
+        if (initialPersonaSyncAttempted) return false;
+        initialPersonaSyncAttempted = true;
+        await initialRosterLoad;
+        if ((roster.personas?.length ?? 0) > 0) return false;
+
+        let ctx;
+        try { ctx = getContext(); } catch { return false; }
+        const llm = settings.llm ?? {};
+        const profiles = Array.isArray(llm.apiProfiles) ? llm.apiProfiles : [];
+        const mappedId = llm.requestMapping?.persona_gen?.apiProfileId ?? '';
+        const profile = profiles.find(item => item.id === mappedId)
+            ?? profiles.find(item => item.id === llm.defaultApiProfileId)
+            ?? null;
+        const method = profile?.method ?? llm.defaultMethod ?? 'generateRaw';
+        const rawMethod = ['direct', 'st_generate_raw', 'generateRaw'].includes(method);
+        const cmMethod = ['st_connection_manager', 'connection_manager'].includes(method);
+        const canUseRaw = typeof ctx?.generateRaw === 'function';
+        const canUseCm = cmMethod && Boolean(profile?.stProfileId)
+            && (typeof ctx?.ConnectionManagerRequestService?.sendRequest === 'function' || canUseRaw);
+        const canUseDirectFetch = method === 'direct_fetch' && Boolean(profile?.baseUrl && profile?.model);
+        if (!(rawMethod && canUseRaw) && !canUseCm && !canUseDirectFetch) return false;
+
+        try {
+            const result = await syncPersonaRequest();
+            if (!result?.persona || typeof result.persona !== 'object') return false;
+            // A user may have created/synced a persona while the LLM request
+            // was running. Re-check storage to avoid creating a duplicate.
+            if ((await getAllPersonas()).length > 0) {
+                await refreshRoster();
+                return false;
+            }
+            const persona = createDefaultPersona(result.persona.name || 'Default User');
+            applyPersonaSync(persona, result.persona, true);
+            await savePersona(persona);
+            await refreshRoster();
+            console.info('[IF Image] Initial SillyTavern persona sync completed.');
+            return true;
+        } catch (err) {
+            if (err?.code !== 'ABORTED' && err?.name !== 'AbortError') {
+                // Log only the error category; backend detail may contain secrets.
+                console.warn('[IF Image] Initial persona sync skipped:', err?.code ?? err?.name ?? 'ERROR');
+            }
+            return false;
+        }
+    }
+    const initialPersonaSync = autoSyncInitialPersona();
+
     // D4: edit-before-generate dialog. ui.js owns the DOM/popup; the LLM
     // assist goes through exactly one callback (engine.modifyTags) so ui.js
     // never imports the engine.
@@ -522,6 +587,11 @@ jQuery(async () => {
         getChatContext: () => getContext(),
         eventSource,
         event_types,
+        // UI persistence happens before this refresh, so later LLM calls see
+        // the newly imported/synced roster immediately.
+        refreshRoster,
+        initialPersonaSync,
+        syncPersonaFromSt: ({ signal } = {}) => syncPersonaRequest({ signal }),
         planChatImages: async (count, { signal } = {}) => {
             const controller = new AbortController();
             activeLlmAborts.add(controller);

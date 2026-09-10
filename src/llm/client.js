@@ -32,8 +32,9 @@ function safeDetail(err, maxLen = 200) {
     let raw = '';
     if (err instanceof Error) raw = String(err.message ?? err);
     else if (typeof err === 'string') raw = err;
-    else if (err && typeof err === 'object') raw = JSON.stringify(err);
-    else raw = String(err);
+    else if (err && typeof err === 'object') {
+        try { raw = JSON.stringify(err); } catch { raw = String(err); }
+    } else raw = String(err);
     // Strip potential credential substrings
     raw = raw.replace(/Bearer\s+\S+/gi, 'Bearer [redacted]')
         .replace(/Basic\s+\S+/gi, 'Basic [redacted]')
@@ -94,6 +95,7 @@ export function createLlmClient({ getSettings, getContext, fetchImpl = fetch } =
                 if (err?.name === 'AbortError' || signal?.aborted) {
                     throw new LlmError('ABORTED', 'LLM request was aborted.');
                 }
+                if (err instanceof LlmError) throw err;
                 throw new LlmError('NETWORK', `generateRaw failed: ${safeDetail(err)}`);
             }
         }
@@ -132,6 +134,7 @@ export function createLlmClient({ getSettings, getContext, fetchImpl = fetch } =
                 if (err?.name === 'AbortError' || signal?.aborted) {
                     throw new LlmError('ABORTED', 'LLM request was aborted.');
                 }
+                if (err instanceof LlmError) throw err;
                 throw new LlmError('NETWORK', `ConnectionManager request failed: ${safeDetail(err)}`);
             }
         }
@@ -222,15 +225,18 @@ export function createLlmClient({ getSettings, getContext, fetchImpl = fetch } =
  * Call ST's generateRaw with abort chaining.
  */
 async function callGenerateRaw(ctx, { prompt, systemPrompt, signal }) {
-    // generateRaw does not take an AbortSignal directly — it creates its own
-    // AbortController. We chain the caller's abort to ST's by listening for
-    // the GENERATION_STOPPED event, or simply timeout after 600s.
+    console.log('[IF Image] callGenerateRaw:', {
+        hasGenerateRaw: typeof ctx?.generateRaw === 'function',
+        mainApi: ctx?.main_api,
+        promptLen: prompt?.length,
+        systemPromptLen: systemPrompt?.length,
+    });
+
     const generateRaw = ctx?.generateRaw;
     if (typeof generateRaw !== 'function') {
-        throw new Error('ctx.generateRaw is not available.');
+        throw new LlmError('CONFIG', 'SillyTavern generateRaw is not available. Create an API profile in IF-Image LLM tab (method: direct_fetch or connection_manager), or check ST main API connection.');
     }
-    // If the caller has an abort signal that fires, we can try to call
-    // stopGeneration if available.
+
     let stopListener = null;
     if (signal) {
         if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
@@ -239,17 +245,23 @@ async function callGenerateRaw(ctx, { prompt, systemPrompt, signal }) {
         };
         signal.addEventListener('abort', stopListener, { once: true });
     }
+
+    let result;
     try {
-        const result = await generateRaw({
-            prompt,
-            systemPrompt,
-            responseLength: 4096,
-        });
-        if (typeof result !== 'string') {
-            throw new LlmError('MALFORMED', 'generateRaw returned non-string result.');
-        }
-        return result;
+        result = await generateRaw({ prompt, systemPrompt, responseLength: 4096 });
+        console.log('[IF Image] generateRaw success, result type:', typeof result, 'len:', result?.length);
+    } catch (err) {
+        if (err?.name === 'AbortError' || signal?.aborted) throw err;
+        const detail = safeDetail(err);
+        // Never expose the raw error object: provider errors may embed headers.
+        console.error('[IF Image] generateRaw threw:', detail);
+        throw new LlmError('NETWORK', `generateRaw failed: ${detail}`);
     } finally {
         if (stopListener && signal) signal.removeEventListener('abort', stopListener);
     }
+
+    if (typeof result !== 'string') {
+        throw new LlmError('MALFORMED', 'generateRaw returned non-string result.');
+    }
+    return result;
 }

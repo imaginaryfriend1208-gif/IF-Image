@@ -175,3 +175,59 @@ test('direct_fetch: a profile without baseUrl/model is a CONFIG error', async ()
         (e) => e.code === 'CONFIG' && /baseUrl and model/.test(e.message),
     );
 });
+
+
+test('generateRaw: unavailable host API is an actionable CONFIG error', async () => {
+    const { client } = makeClient({ ctx: { generateRaw: undefined } });
+    await assert.rejects(
+        () => client.request(REQ),
+        (err) => err instanceof LlmError && err.code === 'CONFIG'
+            && /direct_fetch or connection_manager/.test(err.message),
+    );
+});
+
+test('generateRaw: thrown errors are NETWORK errors with sanitized detail', async () => {
+    const logged = [];
+    const originalError = console.error;
+    console.error = (...args) => logged.push(args);
+    try {
+        const { client } = makeClient({
+            ctx: { generateRaw: async () => { throw new Error('upstream Bearer super-secret-token'); } },
+        });
+        await assert.rejects(
+            () => client.request(REQ),
+            (err) => err.code === 'NETWORK' && /generateRaw failed/.test(err.message)
+                && !err.message.includes('super-secret-token'),
+        );
+    } finally {
+        console.error = originalError;
+    }
+    assert.equal(JSON.stringify(logged).includes('super-secret-token'), false);
+    assert.equal(JSON.stringify(logged).includes('[redacted]'), true);
+});
+
+test('generateRaw: non-string replies remain MALFORMED rather than NETWORK', async () => {
+    const { client } = makeClient({ ctx: { generateRaw: async () => ({ content: 'wrong shape' }) } });
+    await assert.rejects(() => client.request(REQ), (err) => err.code === 'MALFORMED');
+});
+
+test('generateRaw: diagnostics contain lengths but not prompt contents', async () => {
+    const logged = [];
+    const originalLog = console.log;
+    console.log = (...args) => logged.push(args);
+    try {
+        const { client } = makeClient({ ctx: { main_api: 'openai' } });
+        await client.request({ type: 'image_gen', systemPrompt: 'secret-system', userPrompt: 'secret-user' });
+    } finally {
+        console.log = originalLog;
+    }
+    const metadata = logged.find(args => args[0] === '[IF Image] callGenerateRaw:')?.[1];
+    assert.deepEqual(metadata, {
+        hasGenerateRaw: true,
+        mainApi: 'openai',
+        promptLen: 'secret-user'.length,
+        systemPromptLen: 'secret-system'.length,
+    });
+    assert.equal(JSON.stringify(logged).includes('secret-user'), false);
+    assert.equal(JSON.stringify(logged).includes('secret-system'), false);
+});
