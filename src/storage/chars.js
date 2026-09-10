@@ -39,6 +39,9 @@ export function createDefaultCharacter(name = 'New Character') {
         booruDetail: emptyBooruDetail(),
         nsfwExtra: '',
         negative: '',
+        // A1111 LoRA token, e.g. "<lora:WinxclubKrea2pack:1>". Hoisted to the
+        // front of the final prompt by src/prompt/ordering.js.
+        lora: '',
         outfits: [], // outfit record ids (src/storage/outfits.js)
         binding: {
             cardId: null,

@@ -2,7 +2,7 @@
 // IF Image - outfit trigger + character binding tests (Phase C3/C4).
 // Run: node scripts/test-outfits-binding.mjs
 import assert from 'node:assert/strict';
-import { parseTriggers, matchOutfit } from '../src/prompt/triggers.js';
+import { parseTriggers, matchOutfit, charSlotToken } from '../src/prompt/triggers.js';
 import { renderCharacterForDialect, assemblePrompt } from '../src/prompt/render.js';
 import { PROFILES } from '../src/profiles.js';
 import { resolveActiveCharacters } from '../src/prompt/binding.js';
@@ -79,7 +79,7 @@ test('outfit token with Vietnamese diacritics matches ($Lyna:đồngủ)', () =>
     const vnOutfits = [...outfits, { id: 'o5', name: 'đồngủ', charId: 'c1', tags: 'pajamas' }];
     const parsed = parseTriggers('$Lyna:đồngủ sleeping', { roster, outfits: vnOutfits });
     assert.equal(parsed.characters[0].outfitTags, 'pajamas');
-    assert.equal(parsed.residualPrompt, 'sleeping');
+    assert.equal(parsed.residualPrompt, `${charSlotToken(0)} sleeping`);
 });
 
 test('common outfit with charId undefined (legacy record) still resolves via store filter parity', () => {

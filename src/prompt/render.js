@@ -2,6 +2,7 @@
 // Implements PROMPT-SPEC §7 & §8.
 
 import { normalizeBooruTags, deduplicateTags } from './dialects.js';
+import { CHAR_SLOT_PATTERN } from './triggers.js';
 
 // ------------------------------------------------------------------
 // Phase C0: generation param overrides (settings + marker JSON). These
@@ -346,6 +347,53 @@ function groupCharacterParts(charParts, dialect) {
 }
 
 /**
+ * Replace each character placeholder in the scene text with that character's
+ * rendered tags, so the surrounding sentence survives intact.
+ *
+ * Trigger tokens used to be deleted and their tags hoisted to the front of
+ * the prompt, which wrecked any sentence built around a character:
+ *
+ *   "a cat walking in front of $Carter while he is eating an ice cream"
+ *
+ * Scene wording is the LLM's to decide, so the token — and only the token —
+ * becomes tags, where it stood.
+ *
+ * @param {string} text - residualPrompt, holding placeholders
+ * @param {string[]} rendered - per-character strings, indexed by slot
+ * @param {string} dialect
+ * @returns {{ text: string, usedIndices: Set<number>, usedAll: boolean }}
+ */
+function substituteCharSlots(text, rendered, dialect) {
+    const usedIndices = new Set();
+    if (typeof text !== 'string' || !text) {
+        return { text: text || '', usedIndices, usedAll: false };
+    }
+    // A fresh regex per call: CHAR_SLOT_PATTERN is global and carries
+    // lastIndex between uses.
+    const pattern = new RegExp(CHAR_SLOT_PATTERN.source, 'gi');
+    const out = text.replace(pattern, (match, digits) => {
+        const index = Number(digits);
+        const part = rendered[index];
+        if (part === undefined) return '';
+        usedIndices.add(index);
+        // krea is prose; a bare tag list would read as a fragment, but the
+        // per-character renderer already emits prose for that dialect.
+        return part;
+    });
+    const usedAll = usedIndices.size === rendered.filter(Boolean).length;
+    return { text: tidyScene(out), usedIndices, usedAll };
+}
+
+/** Collapse the gaps left when an unresolved placeholder is dropped. */
+function tidyScene(text) {
+    return String(text)
+        .replace(/\s+/g, ' ')
+        .replace(/\s*,(?:\s*,)+/g, ',')
+        .replace(/^[\s,]+|[\s,]+$/g, '')
+        .trim();
+}
+
+/**
  * Assembles the full prompt, negative prompt, and parameters for the selected dialect.
  * @param {object} parsedTriggers - output from parseTriggers
  * @param {string} dialectKey - 'krea' | 'anima' | 'illus'
@@ -354,8 +402,16 @@ function groupCharacterParts(charParts, dialect) {
  */
 export function assemblePrompt(parsedTriggers, dialectKey, baseProfile = {}) {
     const dialect = dialectKey || 'illus';
-    const charParts = parsedTriggers.characters.map(c => renderCharacterForDialect(c, dialect)).filter(Boolean);
-    const scenePrompt = parsedTriggers.residualPrompt || '';
+    const rendered = parsedTriggers.characters.map(c => renderCharacterForDialect(c, dialect));
+    const charParts = rendered.filter(Boolean);
+    // Characters that stood somewhere in the sentence are substituted back at
+    // that spot; only the ones with no position (alias auto-detection) fall
+    // through to `leftoverParts` for the dialect blocks below to place.
+    const placed = substituteCharSlots(parsedTriggers.residualPrompt || '', rendered, dialect);
+    const scenePrompt = placed.text;
+    const leftoverParts = placed.usedAll
+        ? []
+        : charParts.filter((_, i) => !placed.usedIndices.has(i));
 
     let positiveParts = [];
     let negativeParts = [];
@@ -363,7 +419,7 @@ export function assemblePrompt(parsedTriggers, dialectKey, baseProfile = {}) {
     if (dialect === 'krea') {
         // Krea 2: Prose only, no negative prompt at CFG 1
         if (scenePrompt) positiveParts.push(scenePrompt);
-        if (charParts.length) positiveParts.push(groupCharacterParts(charParts, 'krea'));
+        if (leftoverParts.length) positiveParts.push(groupCharacterParts(leftoverParts, 'krea'));
 
         for (const style of parsedTriggers.styles || []) {
             const h = style.dialectHints?.krea;
@@ -387,9 +443,10 @@ export function assemblePrompt(parsedTriggers, dialectKey, baseProfile = {}) {
     }
 
     if (dialect === 'anima') {
-        // Anima: Prefix -> Chars -> Scene -> Styles
+        // Anima: Prefix -> unplaced chars -> Scene (with chars substituted
+        // in place) -> Styles
         if (baseProfile.prefix) positiveParts.push(baseProfile.prefix);
-        if (charParts.length) positiveParts.push(groupCharacterParts(charParts, 'anima'));
+        if (leftoverParts.length) positiveParts.push(groupCharacterParts(leftoverParts, 'anima'));
         if (scenePrompt) positiveParts.push(scenePrompt);
 
         for (const style of parsedTriggers.styles || []) {
@@ -415,7 +472,7 @@ export function assemblePrompt(parsedTriggers, dialectKey, baseProfile = {}) {
 
     // Default: 'illus' (Illustrious/NoobAI)
     if (baseProfile.prefix) positiveParts.push(baseProfile.prefix);
-    if (charParts.length) positiveParts.push(groupCharacterParts(charParts, 'illus'));
+    if (leftoverParts.length) positiveParts.push(groupCharacterParts(leftoverParts, 'illus'));
     if (scenePrompt) positiveParts.push(normalizeBooruTags(scenePrompt));
 
     for (const style of parsedTriggers.styles || []) {

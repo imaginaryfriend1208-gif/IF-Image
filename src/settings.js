@@ -58,6 +58,10 @@ export const defaultSettings = {
         defaultMethod: 'direct',
         defaultApiProfileId: '',
         injectionStyle: 'compact',
+        // User-tunable image_gen system prompt. Empty = use the built-in
+        // default (renderDefaultSystemPrompt in src/llm/prompts.js), so an
+        // update ships an improved default to anyone who never edited it.
+        systemPromptOverride: '',
         // Phase CP: chat image placement (LLM plans N images across the chat).
         chatPlace: {
             count: 3,
@@ -96,6 +100,15 @@ export const defaultSettings = {
         // Phase D3: LLM <size> hint policy — 'auto' | 'ignore' | 'force'
         // ('auto' currently equals 'force'; see migrator v7 note).
         llmSize: 'auto',
+        // Final-stage output ordering: LoRA -> Style -> core prompt. The
+        // core prompt's own order is never touched (scene wording and
+        // character placement belong to the LLM).
+        promptOrder: {
+            enabled: true,
+            // true = leave inline LoRAs wherever they were written, for
+            // prompts whose structure depends on LoRA position.
+            keepLoraPosition: false,
+        },
     },
     // Phase D6: image-store housekeeping (0 = off per knob).
     cache: {

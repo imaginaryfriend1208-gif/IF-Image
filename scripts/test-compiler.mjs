@@ -3,7 +3,7 @@
 // Run: node scripts/test-compiler.mjs
 
 import assert from 'node:assert/strict';
-import { parseTriggers, matchCharacter, normalizeName } from '../src/prompt/triggers.js';
+import { parseTriggers, matchCharacter, normalizeName, charSlotToken } from '../src/prompt/triggers.js';
 import { renderCharacterForDialect, assemblePrompt, resolveProfileKey } from '../src/prompt/render.js';
 import { normalizeBooruTags, deduplicateTags } from '../src/prompt/dialects.js';
 import { PROFILES } from '../src/profiles.js';
@@ -107,7 +107,9 @@ test('parseTriggers extracts characters, modifiers, styles, and residual prompt'
     assert.deepEqual(parsed.characters[0].modifiers, ['back', 'nsfw']);
     assert.equal(parsed.styles.length, 1);
     assert.equal(parsed.styles[0].name, 'Cyberpunk');
-    assert.equal(parsed.residualPrompt, 'sitting at a bar, neon lights');
+    // The trigger leaves a slot marker where it stood; render.js substitutes
+    // the character's tags there so the sentence around it survives.
+    assert.equal(parsed.residualPrompt, `${charSlotToken(0)} sitting at a bar, neon lights`);
 });
 
 // 6. 3-Dialect Assembly Test
@@ -219,7 +221,7 @@ test('JSON trigger ${char: Lyna, view: back, nsfw: true} renders back/nsfw varia
     assert.equal(parsed.characters.length, 1);
     assert.deepEqual(parsed.characters[0].modifiers, ['back', 'nsfw']);
     assert.equal(parsed.characters[0].outfit, 'casual');
-    assert.equal(parsed.residualPrompt, 'at a bar');
+    assert.equal(parsed.residualPrompt, `${charSlotToken(0)} at a bar`);
     const viaColon = parseTriggers('$Lyna:back|nsfw at a bar', { roster, styles });
     assert.deepEqual(viaColon.characters[0].modifiers, parsed.characters[0].modifiers);
     const illus = assemblePrompt(parsed, 'illus', PROFILES.illustrious);
@@ -233,7 +235,7 @@ test('JSON trigger ${char: Lyna, view: back, nsfw: true} renders back/nsfw varia
 test('dialectOverride maps krea/anima/illus to profile keys; unknown falls back', () => {
     const parsed = parseTriggers('{{dialect: illus}} $Lyna city', { roster, styles });
     assert.equal(parsed.dialectOverride, 'illus');
-    assert.equal(parsed.residualPrompt, 'city');
+    assert.equal(parsed.residualPrompt, `${charSlotToken(0)} city`);
     assert.deepEqual(resolveProfileKey('illus', 'anima'), { profileKey: 'illustrious', usedOverride: true });
     assert.deepEqual(resolveProfileKey('krea', 'anima'), { profileKey: 'krea2', usedOverride: true });
     assert.deepEqual(resolveProfileKey('anima', 'krea2'), { profileKey: 'anima', usedOverride: true });

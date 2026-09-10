@@ -45,6 +45,41 @@ export const HARD_RULES = `HARD RULES (violations are rejected):
 8. Never leak negative-prompt content into <prompt>.`;
 
 /**
+ * The built-in image_gen system prompt, shown in the LLM tab's editor and
+ * used whenever settings.llm.systemPromptOverride is empty.
+ *
+ * The trigger-syntax rules matter to the compiler, not just to prose quality:
+ * `$Name` is substituted with that character's tags exactly where it stands,
+ * so the model must write it inside the sentence rather than as a leading tag
+ * block. LoRA and style fragments are appended by the extension, so a model
+ * that emits them would only create duplicates.
+ *
+ * @returns {string}
+ */
+export function renderDefaultSystemPrompt() {
+    return `You are the image-prompt engine for the IF Image extension. Your job is to convert a scene description into a high-quality image-generation prompt.
+
+${HARD_RULES}
+
+CHARACTER SYNTAX (the extension expands these — do not expand them yourself):
+- Refer to a known character with a dollar-sign token: $Carter
+- Add modifiers after a colon, separated by pipes: $Carter:back|full|nsfw
+  Available modifiers: back, front, full, side, nsfw, and any outfit name.
+- Write the token INSIDE the sentence, where the character belongs:
+  GOOD: "a cat walking in front of $Carter while he is eating an ice cream"
+  BAD:  "$Carter, a cat walking in front of him while he is eating an ice cream"
+  The extension replaces the token with that character's appearance tags in
+  place, so moving it to the front breaks the sentence.
+- Do NOT write a character's appearance yourself when a token exists for them.
+- The user's persona is a character like any other: use $TheirName the same way.
+
+DO NOT EMIT:
+- LoRA tags such as <lora:name:1> — the extension adds these.
+- Style, artist, or quality-prefix tags — the extension adds these too.
+Write only the scene: subjects, actions, setting, composition, lighting, mood.`;
+}
+
+/**
  * Render the master system prompt for a request type.
  * @param {string} type - 'image_gen' (only Phase B type)
  * @param {{
@@ -59,9 +94,14 @@ export const HARD_RULES = `HARD RULES (violations are rejected):
  * @returns {string}
  */
 export function renderSystemPrompt(type, slots = {}, style = 'compact') {
-    const base = `You are the image-prompt engine for the IF Image extension. Your job is to convert a scene description into a high-quality image-generation prompt.
+    // A user override replaces the instruction header only; the dialect
+    // rules, character cards, and scene window below are assembled from live
+    // state and are not the user's to hand-write.
+    const header = typeof slots.systemPromptOverride === 'string' && slots.systemPromptOverride.trim()
+        ? slots.systemPromptOverride.trim()
+        : renderDefaultSystemPrompt();
 
-${HARD_RULES}
+    const base = `${header}
 
 ${slots.dialect_rules || DIALECT_RULES.anima}
 

@@ -14,6 +14,8 @@ import { buildExport, validateImport, planMerge } from './storage/transfer.js';
 import { listImages, countImages, deleteImageRecord, getStorageStats, pruneImages } from './storage/images.js';
 import { parseTriggers } from './prompt/triggers.js';
 import { undoPlacements } from './llm/inject.js';
+import { isValidLora } from './prompt/ordering.js';
+import { renderDefaultSystemPrompt } from './llm/prompts.js';
 import { assemblePrompt, resolveProfileKey } from './prompt/render.js';
 import { cleanupEnvelope } from './prompt/cleanup.js';
 import { applyReplaceRules, parseCompactRule } from './prompt/replace.js';
@@ -108,6 +110,17 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 </label>
             </div>
             <div class="if-image-row">
+                <label class="if-image-check">
+                    <input type="checkbox" id="if_main_order"> Enforce prompt order (LoRA &rarr; style &rarr; prompt)
+                </label>
+            </div>
+            <div class="if-image-row">
+                <label class="if-image-check">
+                    <input type="checkbox" id="if_main_keeplora"> Keep LoRA where written (don't move to the front)
+                </label>
+            </div>
+            <div class="if-image-note">LoRAs lead the final prompt, then style fragments, then the scene. The scene's own wording and character placement are never reordered.</div>
+            <div class="if-image-row">
                 <label for="if_main_llmsize">LLM size hint</label>
                 <select id="if_main_llmsize" class="text_pole">
                     <option value="auto">Auto (LLM &lt;size&gt; wins)</option>
@@ -164,6 +177,15 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                     <option value="">-- none --</option>
                 </select>
             </div>
+            <div class="if-image-row">
+                <label for="if_llm_system_prompt">Image prompt instructions (system prompt)</label>
+                <textarea id="if_llm_system_prompt" class="text_pole textarea_compact" rows="10" spellcheck="false"></textarea>
+            </div>
+            <div class="if-image-note">Sent ahead of the dialect rules, character cards, and scene window, which are always built from live state. Leave empty to use the built-in text. Reset refills the box with the current built-in version.</div>
+            <div class="if-image-row">
+                <button id="if_llm_system_reset" class="menu_button">Reset to default</button>
+            </div>
+
             <div class="if-image-row">
                 <label for="if_llm_injection">Character injection style</label>
                 <select id="if_llm_injection" class="text_pole">
@@ -554,6 +576,10 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 <textarea id="if_char_negative" class="text_pole textarea_compact" rows="2" placeholder="tags to always exclude for this character"></textarea>
             </div>
             <div class="if-image-row">
+                <label for="if_char_lora">LoRA (A1111 format, optional)</label>
+                <input id="if_char_lora" type="text" class="text_pole" placeholder="&lt;lora:WinxclubKrea2pack:1&gt;">
+            </div>
+            <div class="if-image-row">
                 <label class="if-image-check">
                     <input type="checkbox" id="if_char_lock_seed"> Lock seed
                 </label>
@@ -653,6 +679,10 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 <label for="if_per_avoid">Avoid Tags (comma separated, stripped by cleanup)</label>
                 <input id="if_per_avoid" type="text" class="text_pole" placeholder="e.g. beard, glasses">
             </div>
+            <div class="if-image-row">
+                <label for="if_per_lora">LoRA (A1111 format, optional)</label>
+                <input id="if_per_lora" type="text" class="text_pole" placeholder="&lt;lora:MyPersonaLora:1&gt;">
+            </div>
 
             <hr class="if-image-sep"/>
             <h4>Persona Dialect Hints (per-dialect style overrides)</h4>
@@ -711,6 +741,11 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 <label for="if_style_name">Style Name ({{style: Name}})</label>
                 <input id="if_style_name" type="text" class="text_pole" placeholder="e.g. Cyberpunk">
             </div>
+            <div class="if-image-row">
+                <label for="if_style_lora">LoRA (A1111 format, optional)</label>
+                <input id="if_style_lora" type="text" class="text_pole" placeholder="&lt;lora:WinxclubKrea2pack:1&gt;">
+            </div>
+            <div class="if-image-note">Style LoRAs lead the final prompt, ahead of character LoRAs.</div>
             <div class="if-image-row">
                 <label for="if_style_krea">Krea: Style Phrase</label>
                 <input id="if_style_krea" type="text" class="text_pole" placeholder="cyberpunk aesthetic, neon lighting, 35mm film">
@@ -2082,6 +2117,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     const charViewsBack = $('if_char_views_back');
     const charNsfwExtra = $('if_char_nsfw_extra');
     const charNegative = $('if_char_negative');
+    const charLora = $('if_char_lora');
     const charLockSeed = $('if_char_lock_seed');
     const charLockSeedValue = $('if_char_lock_seed_value');
     const charMatrix = $('if_char_matrix');
@@ -2296,6 +2332,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             charViewsBack.value = '';
             charNsfwExtra.value = '';
             charNegative.value = '';
+            if (charLora) charLora.value = '';
             charLockSeed.checked = false;
             charLockSeedValue.value = '-1';
             populateMatrix(null);
@@ -2312,6 +2349,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         charViewsBack.value = char.views?.back || '';
         charNsfwExtra.value = char.nsfwExtra || '';
         charNegative.value = char.negative || '';
+        if (charLora) charLora.value = char.lora || '';
         charLockSeed.checked = Number.isInteger(char.lock?.seed) && char.lock.seed >= 0;
         charLockSeedValue.value = String(char.lock?.seed ?? -1);
         populateMatrix(char.booruDetail);
@@ -2347,6 +2385,16 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         target.views = { ...(target.views || {}), back: charViewsBack.value.trim() };
         target.nsfwExtra = charNsfwExtra.value.trim();
         target.negative = charNegative.value.trim();
+        if (charLora) {
+            const loraValue = charLora.value.trim();
+            // A malformed LoRA would be dropped silently at compile time, so
+            // refuse the save instead of storing something that never loads.
+            if (loraValue && !isValidLora(loraValue)) {
+                showResult(charStatus, 'LoRA must be a single A1111 token, e.g. <lora:MyLora:1>', true);
+                return;
+            }
+            target.lora = loraValue;
+        }
         const seedValue = Number(charLockSeedValue.value);
         target.lock = { seed: charLockSeed.checked && Number.isFinite(seedValue) ? seedValue : -1, params: target.lock?.params ?? null };
         target.booruDetail = readMatrix();
@@ -2387,6 +2435,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     const perNatural = $('if_per_natural');
     const perFacts = $('if_per_facts');
     const perAvoid = $('if_per_avoid');
+    const perLora = $('if_per_lora');
     const perKreaStyle = $('if_per_krea_style');
     const perKreaLight = $('if_per_krea_light');
     const perKreaCam = $('if_per_krea_cam');
@@ -2401,6 +2450,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     const styleNewBtn = $('if_style_new');
     const styleDelBtn = $('if_style_del');
     const styleName = $('if_style_name');
+    const styleLora = $('if_style_lora');
     const styleKrea = $('if_style_krea');
     const styleKreaLight = $('if_style_krea_light');
     const styleKreaCam = $('if_style_krea_cam');
@@ -2427,6 +2477,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         perNatural.value = p?.natural ?? '';
         perFacts.value = p?.facts ?? '';
         perAvoid.value = (p?.avoidTags || []).join(', ');
+        if (perLora) perLora.value = p?.lora ?? '';
         const h = p?.dialectHints;
         perKreaStyle.value = h?.krea?.stylePhrase ?? '';
         perKreaLight.value = h?.krea?.lighting ?? '';
@@ -2441,6 +2492,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     function populateStyleForm(s) {
         activeStyleId = s?.id ?? null;
         styleName.value = s?.name ?? '';
+        if (styleLora) styleLora.value = s?.lora ?? '';
         styleKrea.value = s?.dialectHints?.krea?.stylePhrase ?? '';
         styleKreaLight.value = s?.dialectHints?.krea?.lighting ?? '';
         styleKreaCam.value = s?.dialectHints?.krea?.camera ?? '';
@@ -2515,6 +2567,14 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             p.natural = perNatural.value.trim();
             p.facts = perFacts.value.trim();
             p.avoidTags = perAvoid.value.split(',').map(s => s.trim()).filter(Boolean);
+            if (perLora) {
+                const loraValue = perLora.value.trim();
+                if (loraValue && !isValidLora(loraValue)) {
+                    showResult(presetsStatus, 'LoRA must be a single A1111 token, e.g. <lora:MyLora:1>', true);
+                    return;
+                }
+                p.lora = loraValue;
+            }
             p.isDefault = perDefault.checked;
             p.dialectHints = p.dialectHints || {};
             p.dialectHints.krea = p.dialectHints.krea || {};
@@ -2575,6 +2635,14 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             const existing = currentStyles.find(s => s.id === activeStyleId);
             const s = existing || createDefaultStyle(name);
             s.name = name;
+            if (styleLora) {
+                const loraValue = styleLora.value.trim();
+                if (loraValue && !isValidLora(loraValue)) {
+                    showResult(presetsStatus, 'LoRA must be a single A1111 token, e.g. <lora:MyLora:1>', true);
+                    return;
+                }
+                s.lora = loraValue;
+            }
             s.dialectHints.krea.stylePhrase = styleKrea.value.trim();
             s.dialectHints.krea.lighting = styleKreaLight.value.trim();
             s.dialectHints.krea.camera = styleKreaCam.value.trim();
@@ -3089,6 +3157,33 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         dryRunEl.addEventListener('change', () => { settings.generation.dryRun = dryRunEl.checked; save(); });
     }
 
+    // ============ Main Tab: final prompt ordering (LoRA -> style) ============
+    const orderEl = $('if_main_order');
+    const keepLoraEl = $('if_main_keeplora');
+    function syncKeepLoraEnabled() {
+        // Keeping LoRA in place is meaningless when ordering is off — the
+        // whole prompt is already left as written.
+        if (keepLoraEl) keepLoraEl.disabled = orderEl ? !orderEl.checked : false;
+    }
+    if (orderEl) {
+        if (!settings.generation.promptOrder) settings.generation.promptOrder = {};
+        orderEl.checked = settings.generation.promptOrder.enabled !== false;
+        orderEl.addEventListener('change', () => {
+            settings.generation.promptOrder.enabled = orderEl.checked;
+            syncKeepLoraEnabled();
+            save();
+        });
+    }
+    if (keepLoraEl) {
+        if (!settings.generation.promptOrder) settings.generation.promptOrder = {};
+        keepLoraEl.checked = settings.generation.promptOrder.keepLoraPosition === true;
+        keepLoraEl.addEventListener('change', () => {
+            settings.generation.promptOrder.keepLoraPosition = keepLoraEl.checked;
+            save();
+        });
+    }
+    syncKeepLoraEnabled();
+
     // ================= Main Tab: D3 LLM size hint policy =================
     const llmSizeEl = $('if_main_llmsize');
     if (llmSizeEl) {
@@ -3237,6 +3332,32 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         });
         if (showCm) refreshStConnectionProfiles();
     }
+
+    // ---- Editable image_gen system prompt --------------------------------
+    // Empty stored value means "use the built-in", so an update ships an
+    // improved default to anyone who never edited it. Reset shows the
+    // built-in text rather than blanking the box, so it can be used as a
+    // starting point for edits.
+    const llmSystemPrompt = $('if_llm_system_prompt');
+    const llmSystemReset = $('if_llm_system_reset');
+    if (llmSystemPrompt) {
+        llmSystemPrompt.value = settings.llm?.systemPromptOverride ?? '';
+        llmSystemPrompt.placeholder = renderDefaultSystemPrompt();
+        llmSystemPrompt.addEventListener('input', () => {
+            if (!settings.llm) settings.llm = {};
+            settings.llm.systemPromptOverride = llmSystemPrompt.value;
+            save();
+        });
+    }
+    if (llmSystemReset) llmSystemReset.addEventListener('click', () => {
+        if (!llmSystemPrompt) return;
+        const builtIn = renderDefaultSystemPrompt();
+        llmSystemPrompt.value = builtIn;
+        if (!settings.llm) settings.llm = {};
+        settings.llm.systemPromptOverride = builtIn;
+        save();
+        showResult(llmResult, 'System prompt reset to the built-in default.', false);
+    });
 
     if (llmMethod) llmMethod.addEventListener('change', () => { settings.llm.defaultMethod = llmMethod.value; save(); });
     if (llmProfileSelect) llmProfileSelect.addEventListener('change', () => { settings.llm.defaultApiProfileId = llmProfileSelect.value; save(); });

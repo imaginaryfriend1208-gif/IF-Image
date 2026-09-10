@@ -89,6 +89,28 @@ export function matchOutfit(token, outfits = []) {
 const VIEW_MODIFIERS = new Set(['back', 'front', 'full', 'side']);
 
 /**
+ * Marks where a character trigger stood in the scene text so render.js can
+ * substitute its tags in place. Trigger tokens used to be deleted outright,
+ * which tore the character out of the sentence:
+ *
+ *   "a cat walking in front of $Carter while he eats"
+ *     -> "a cat walking in front of  while he eats"  + tags hoisted to front
+ *
+ * Scene wording belongs to the LLM, so only the token is replaced. The
+ * placeholder carries no underscores, commas, or parens so downstream tag
+ * helpers treat it as one opaque tag.
+ */
+const CHAR_SLOT_PREFIX = 'ifimagecharslot';
+
+/** Build the placeholder for the Nth resolved character. */
+export function charSlotToken(index) {
+    return `${CHAR_SLOT_PREFIX}${index}`;
+}
+
+/** Matches any character placeholder, capturing its index. */
+export const CHAR_SLOT_PATTERN = new RegExp(`${CHAR_SLOT_PREFIX}(\\d+)`, 'gi');
+
+/**
  * Extracts and resolves triggers from a raw prompt string.
  * @param {string} input
  * @param {object} context - { roster: [], styles: [], defaultPersona: null, outfits: [] }
@@ -103,6 +125,8 @@ export function parseTriggers(input, context = {}) {
     const roster = context.roster || [];
     const styles = context.styles || [];
     const outfits = context.outfits || [];
+    // Personas are addressable by name too ($Ann, not just $me).
+    const personaRoster = Array.isArray(context.personas) ? context.personas : [];
     const foundChars = [];
     const foundStyles = [];
     let dialectOverride = null;
@@ -158,6 +182,10 @@ export function parseTriggers(input, context = {}) {
             const normalized = jsonLike.replace(/(['"])?([a-zA-Z0-9_]+)(['"])?:/g, '"$2": ');
             const parsed = JSON.parse(`{${normalized}}`);
             let consumed = false;
+            // Set when this trigger resolved a character: the JSON form also
+            // carries param overrides, so the token may be consumed without
+            // one. An empty slot token keeps the old delete-the-token result.
+            let slotToken = '';
             if (parsed.char) {
                 const char = resolveChar(parsed.char);
                 if (char) {
@@ -179,7 +207,7 @@ export function parseTriggers(input, context = {}) {
                     if (modifiers.some(m => VIEW_MODIFIERS.has(m))) {
                         lastViewModsByChar.set(char.id, modifiers.filter(m => VIEW_MODIFIERS.has(m)));
                     }
-                    foundChars.push(item);
+                    slotToken = charSlotToken(foundChars.push(item) - 1);
                     consumed = true;
                 }
             }
@@ -217,7 +245,7 @@ export function parseTriggers(input, context = {}) {
                 if (Number.isInteger(n) && n >= -1) { paramOverrides.seed = n; consumed = true; }
                 else console.warn('[IF Image] Ignoring invalid "seed" trigger value (expected an integer >= -1).');
             }
-            if (consumed) return '';
+            if (consumed) return slotToken;
         } catch {
             // Ignore parse errors, keep literal
         }
@@ -227,35 +255,15 @@ export function parseTriggers(input, context = {}) {
     // 4. $me directive
     text = text.replace(/\$me(?::([a-zA-Z0-9_|]+))?\b/gi, (match, mods) => {
         if (context.defaultPersona) {
-            foundChars.push({
+            const index = foundChars.push({
                 isPersona: true,
                 persona: context.defaultPersona,
                 modifiers: mods ? mods.split('|') : [],
-            });
-            return '';
+            }) - 1;
+            return charSlotToken(index);
         }
         return match;
     });
-
-    // 5. Persona keyword detection — match any persona's aliases against the
-    // scene text (like character $Name matching). Skips the default persona
-    // (already matched by $me) and personas already in foundChars.
-    if (Array.isArray(context.personas)) {
-        const defaultId = context.defaultPersona?.id;
-        const alreadyMatchedIds = new Set(foundChars.filter(c => c.isPersona).map(c => c.persona?.id));
-        for (const p of context.personas) {
-            if (p.id === defaultId) continue; // $me handles default
-            if (alreadyMatchedIds.has(p.id)) continue;
-            const aliases = Array.isArray(p.aliases) ? p.aliases : [];
-            if (!aliases.length) continue;
-            // Build a temporary roster shape for matchCharacter
-            const probe = [{ name: p.name, aliases }];
-            const matched = matchCharacter(text, probe);
-            if (matched) {
-                foundChars.push({ isPersona: true, persona: p, modifiers: [] });
-            }
-        }
-    }
 
     // 5. $Name:mods directive — mods tokens are either recognized view
     // modifiers (back/front/full/side), 'nsfw', or an outfit name to
@@ -267,32 +275,62 @@ export function parseTriggers(input, context = {}) {
     // (e.g. `$Lyna:đồ ngủ` typed as `$Lyna:đồngủ`).
     text = text.replace(/\$([a-zA-Z0-9_À-ɏḀ-ỿ]+)(?::([a-zA-Z0-9_À-ɏḀ-ỿ|]+))?/g, (match, name, modsRaw) => {
         const char = resolveChar(name);
-        if (!char) return match;
+        // A persona is a character that happens to be the protagonist, so
+        // $PersonaName resolves exactly like $CharacterName. Characters win
+        // a name collision because they are the larger, chat-scoped set.
+        const persona = char ? null : matchCharacter(name, personaRoster);
+        if (!char && !persona) return match;
 
         const tokens = modsRaw ? modsRaw.split('|') : [];
         const viewMods = tokens.filter(t => VIEW_MODIFIERS.has(t));
         const otherMods = tokens.filter(t => t === 'nsfw');
         const outfitTokens = tokens.filter(t => !VIEW_MODIFIERS.has(t) && t !== 'nsfw');
 
+        const subject = char ?? persona;
         let outfitName = null;
         let outfitTags = '';
         for (const token of outfitTokens) {
-            const found = matchOutfit(token, outfitsForChar(char));
+            const found = matchOutfit(token, outfitsForChar(subject));
             if (found) { outfitName = found.name; outfitTags = found.tags; break; }
         }
 
         let effectiveViewMods = viewMods;
         if (viewMods.length) {
-            lastViewModsByChar.set(char.id, viewMods);
-        } else if (lastViewModsByChar.has(char.id)) {
-            effectiveViewMods = lastViewModsByChar.get(char.id);
+            lastViewModsByChar.set(subject.id, viewMods);
+        } else if (lastViewModsByChar.has(subject.id)) {
+            effectiveViewMods = lastViewModsByChar.get(subject.id);
         }
 
-        const item = { char, modifiers: [...effectiveViewMods, ...otherMods] };
+        const modifiers = [...effectiveViewMods, ...otherMods];
+        const item = char
+            ? { char, modifiers }
+            : { isPersona: true, persona, modifiers };
         if (outfitName) { item.outfit = outfitName; item.outfitTags = outfitTags; }
-        foundChars.push(item);
-        return '';
+        return charSlotToken(foundChars.push(item) - 1);
     });
+
+    // 6. Persona keyword detection — a persona whose alias appears in the
+    // scene text is pulled in even without an explicit trigger. Runs AFTER
+    // the $Name pass so a persona already named there is not added twice.
+    // These have no position in the text, so they carry no slot token and
+    // render.js appends them; an explicit trigger is what pins a position.
+    if (personaRoster.length) {
+        const defaultId = context.defaultPersona?.id;
+        const alreadyMatchedIds = new Set(foundChars.filter(c => c.isPersona).map(c => c.persona?.id));
+        for (const p of personaRoster) {
+            if (p.id === defaultId) continue; // $me handles default
+            if (alreadyMatchedIds.has(p.id)) continue;
+            const aliases = Array.isArray(p.aliases) ? p.aliases : [];
+            if (!aliases.length) continue;
+            // Build a temporary roster shape for matchCharacter
+            const probe = [{ name: p.name, aliases }];
+            const matched = matchCharacter(text, probe);
+            if (matched) {
+                foundChars.push({ isPersona: true, persona: p, modifiers: [] });
+                alreadyMatchedIds.add(p.id);
+            }
+        }
+    }
 
     // Clean up excessive whitespace/commas
     const residualPrompt = text

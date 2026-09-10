@@ -24,6 +24,9 @@ export function createDefaultPersona(name = 'Default User') {
         // auto-injected (like character aliases). $me always resolves to the
         // default persona regardless.
         aliases: [],
+        // A1111 LoRA token, same role as a character's — a persona IS a
+        // character, just flagged as the protagonist.
+        lora: '',
         // Per-dialect style hints (like Style presets). Used when persona is
         // rendered in 'full' mode — e.g. persona's own krea/anima/illus
         // dialect fragments get merged into the prompt.
@@ -76,6 +79,9 @@ export function createDefaultStyle(name = 'New Style') {
     return {
         id: crypto.randomUUID ? crypto.randomUUID() : 'style_' + Date.now(),
         name,
+        // A1111 LoRA token. Style LoRAs lead the final prompt, ahead of
+        // character LoRAs (src/prompt/ordering.js: collectLoras).
+        lora: '',
         dialectHints: {
             krea: {
                 stylePhrase: '',

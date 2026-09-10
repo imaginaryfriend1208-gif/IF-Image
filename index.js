@@ -22,6 +22,7 @@ import { assemblePrompt, resolveProfileKey, mergeProfileParams, applyMarkerParam
 import { getActiveProfile, mergeParams } from './src/backends/checkpoint-profiles.js';
 import { cleanupEnvelope } from './src/prompt/cleanup.js';
 import { applyReplaceRules } from './src/prompt/replace.js';
+import { maskLoras, unmaskLoras, reorderPrompt, collectLoras } from './src/prompt/ordering.js';
 import { PROFILES } from './src/profiles.js';
 import { createEngine } from './src/llm/engine.js';
 import { applyPlacements as injectPlacements } from './src/llm/inject.js';
@@ -184,8 +185,16 @@ jQuery(async () => {
         const effectiveProfile = mergeProfileParams(baseProfile, settings.generation?.params?.[profileKey]);
         const assembled = assemblePrompt(parsed, baseProfile.dialect, effectiveProfile);
 
+        // LoRA tokens must not reach the tag pipeline: normalizeBooruTags and
+        // the anima cleanup branch replace every underscore, turning
+        // <lora:my_cool_lora:1> into <lora:my cool lora:1>, and
+        // dropTailByBudget can cut a trailing one. Mask them to opaque
+        // placeholders here and re-emit the originals in the ordering stage.
+        const masked = maskLoras(assembled.prompt);
+        assembled.prompt = masked.text;
+
         // Pipeline order (C6/C7): compile -> non-final replace rules ->
-        // cleanup -> final replace rules -> marker JSON param overrides.
+        // cleanup -> final replace rules -> ordering -> marker JSON params.
         const isNsfw = parsed.characters.some(c => (c.modifiers || []).includes('nsfw'));
         const isBack = parsed.characters.some(c => (c.modifiers || []).includes('back'));
         const isFull = parsed.characters.some(c => (c.modifiers || []).includes('full'));
@@ -197,6 +206,24 @@ jQuery(async () => {
             rating: isNsfw ? 'nsfw' : 'sfw',
         });
         envelope = applyReplaceRules(envelope, rules, 'final', ruleCtx);
+
+        // Final stage, deliberately last: a prefix-head replace rule inserts
+        // at index 0 and would otherwise displace a leading LoRA.
+        const order = settings.generation?.promptOrder ?? {};
+        if (order.enabled !== false) {
+            envelope = {
+                ...envelope,
+                prompt: reorderPrompt(envelope.prompt, {
+                    loras: masked.loras,
+                    extraLoras: collectLoras(parsed),
+                    keepLoraPosition: order.keepLoraPosition === true,
+                }),
+            };
+        } else {
+            // Ordering off: still restore the masked LoRAs, or the prompt
+            // would ship placeholder text to the backend.
+            envelope = { ...envelope, prompt: unmaskLoras(envelope.prompt, masked.loras) };
+        }
 
         const params = { ...envelope.params, seed: -1 };
         // D3: resolve a portrait/landscape/square keyword into the numeric

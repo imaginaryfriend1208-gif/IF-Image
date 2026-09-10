@@ -82,6 +82,7 @@ export function createEngine({
             style_card: styleCard,
             persona_block: contextResult.personaBlock,
             scene_window: contextResult.sceneText,
+            systemPromptOverride: settings.llm?.systemPromptOverride,
         }, injectionStyle);
 
         const userPrompt = renderUserPrompt(markerText, { previousPrompt, variationHint });
