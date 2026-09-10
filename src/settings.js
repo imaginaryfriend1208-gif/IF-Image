@@ -100,6 +100,9 @@ export const defaultSettings = {
         // Phase D3: LLM <size> hint policy — 'auto' | 'ignore' | 'force'
         // ('auto' currently equals 'force'; see migrator v7 note).
         llmSize: 'auto',
+        // Style applied to chats that have not chosen one of their own. A
+        // per-chat choice lives in that chat's metadata, not here.
+        defaultStyleId: '',
         // Final-stage output ordering: LoRA -> Style -> core prompt. The
         // core prompt's own order is never touched (scene wording and
         // character placement belong to the LLM).

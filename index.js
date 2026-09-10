@@ -23,6 +23,7 @@ import { getActiveProfile, mergeParams } from './src/backends/checkpoint-profile
 import { cleanupEnvelope } from './src/prompt/cleanup.js';
 import { applyReplaceRules } from './src/prompt/replace.js';
 import { maskLoras, unmaskLoras, reorderPrompt, collectLoras } from './src/prompt/ordering.js';
+import { resolveActiveStyle, readChatStyleId, writeChatStyleId } from './src/prompt/active-style.js';
 import { PROFILES } from './src/profiles.js';
 import { createEngine } from './src/llm/engine.js';
 import { applyPlacements as injectPlacements } from './src/llm/inject.js';
@@ -167,6 +168,24 @@ jQuery(async () => {
             outfits: roster.outfits,
             onFallback: (tier, token) => notify('warning', `Character trigger "$${token}" resolved via ${tier} fallback (not active for this chat/card).`),
         });
+
+        // A style only ever applied when the marker text literally said
+        // {{style: Name}}, which the LLM is instructed never to emit — so in
+        // the chat-placement flow no style (and no style LoRA) was reaching
+        // the prompt at all. Fall back to the style attached to this chat,
+        // then to the configured default. Injecting into parsed.styles here
+        // means the hints and the LoRA both travel their existing paths.
+        const activeStyle = resolveActiveStyle({
+            explicitStyles: parsed.styles,
+            chatStyleId: readChatStyleId(getContext()),
+            defaultStyleId: settings.generation?.defaultStyleId,
+            styles: roster.styles,
+        });
+        if (activeStyle.style && activeStyle.source !== 'marker') {
+            parsed.styles = [...parsed.styles, activeStyle.style];
+        } else if (activeStyle.missingId) {
+            notify('warning', 'The style chosen for this chat no longer exists — no style was applied. Pick another in the Generation tab.');
+        }
         // R2/D14: with the A1111-compatible SD connection, the ACTIVE saved
         // profile (Settings tab) supplies both the checkpoint title and the
         // prompt style (still beaten by a marker {{dialect}} override). With

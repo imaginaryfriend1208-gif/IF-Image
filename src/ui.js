@@ -13,8 +13,10 @@ import { getOutfitsForCharacter, getAllOutfits, saveOutfit, removeOutfit, create
 import { buildExport, validateImport, planMerge } from './storage/transfer.js';
 import { listImages, countImages, deleteImageRecord, getStorageStats, pruneImages } from './storage/images.js';
 import { parseTriggers } from './prompt/triggers.js';
+import { resolveActiveStyle, readChatStyleId, writeChatStyleId } from './prompt/active-style.js';
+import { resolveActiveCharacters } from './prompt/binding.js';
 import { undoPlacements } from './llm/inject.js';
-import { isValidLora } from './prompt/ordering.js';
+import { isValidLora, collectLoras } from './prompt/ordering.js';
 import { renderDefaultSystemPrompt } from './llm/prompts.js';
 import { assemblePrompt, resolveProfileKey } from './prompt/render.js';
 import { cleanupEnvelope } from './prompt/cleanup.js';
@@ -134,6 +136,26 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             <h3>Active Profile</h3>
             <div class="if-image-note">Generation uses the checkpoint profile marked active in Settings → Stable Diffusion — one set of params for everything. Marker JSON triggers and LLM hints still override individual values per image.</div>
             <div id="if_main_active_profile" class="if-image-active-summary">No active profile.</div>
+
+            <hr class="if-image-sep"/>
+            <h3>Style</h3>
+            <div class="if-image-note">The style supplies prompt hints and its LoRA. A <code>{{style: Name}}</code> written into a marker still wins over the choice here.</div>
+            <div class="if-image-row">
+                <label for="if_main_style">Style for this chat</label>
+                <select id="if_main_style" class="text_pole">
+                    <option value="">-- none --</option>
+                </select>
+            </div>
+            <div class="if-image-row">
+                <label for="if_main_style_default">Default for new chats</label>
+                <select id="if_main_style_default" class="text_pole">
+                    <option value="">-- none --</option>
+                </select>
+            </div>
+            <div class="if-image-row">
+                <button id="if_main_style_setdefault" class="menu_button" type="button">Use this chat's style as the default</button>
+            </div>
+            <div id="if_main_style_status" class="if-image-active-summary">No style active.</div>
 
             <hr class="if-image-sep"/>
             <h3>Chat Image Placement (LLM)</h3>
@@ -2531,6 +2553,8 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             refreshPersonaSelect();
             const activeStyle = currentStyles.find(s => s.id === activeStyleId) ?? null;
             populateStyleForm(activeStyle);
+            // Refresh the Generation tab style UI whenever the roster changes.
+            if (typeof refreshMainStyle === 'function') refreshMainStyle();
         } catch (e) {
             console.warn('[IF Image] Presets load error:', e);
         }
@@ -3224,6 +3248,132 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         }
     }
     syncMainActiveProfile();
+
+    // ============ Generation Tab: active style for this chat ============
+    // A style used to apply only when a marker literally contained
+    // {{style: Name}} — which the default LLM instructions forbid emitting,
+    // so nothing ever applied a style. Here the user attaches one to the
+    // chat; index.js compile() resolves it with the same precedence.
+    const mainStyleSelect = $('if_main_style');
+    const mainStyleDefault = $('if_main_style_default');
+    const mainStyleSetDefault = $('if_main_style_setdefault');
+    const mainStyleStatus = $('if_main_style_status');
+
+    /** The chat metadata object, freshly obtained (never cached across chat changes). */
+    function freshChatCtx() {
+        return getChatContext?.() ?? null;
+    }
+
+    function refreshMainStyleSelects() {
+        const options = currentStyles
+            .map(s => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.name)}</option>`)
+            .join('');
+        const none = '<option value="">-- none --</option>';
+        if (mainStyleSelect) {
+            mainStyleSelect.innerHTML = none + options;
+            mainStyleSelect.value = readChatStyleId(freshChatCtx());
+        }
+        if (mainStyleDefault) {
+            mainStyleDefault.innerHTML = none + options;
+            mainStyleDefault.value = settings.generation?.defaultStyleId ?? '';
+        }
+    }
+
+    /**
+     * Read-only mirror of what the next image in THIS chat will actually use.
+     * Async because the roster lives in IndexedDB; a stale call is harmless
+     * since it only writes text.
+     */
+    async function syncMainStyleStatus() {
+        if (!mainStyleStatus) return;
+        const chatStyleId = readChatStyleId(freshChatCtx());
+        const active = resolveActiveStyle({
+            chatStyleId,
+            defaultStyleId: settings.generation?.defaultStyleId,
+            styles: currentStyles,
+        });
+
+        if (active.missingId) {
+            mainStyleStatus.textContent = 'The style saved for this chat no longer exists. Pick another one above.';
+            return;
+        }
+        if (!active.style) {
+            mainStyleStatus.textContent = 'No style active for this chat — generations use no style hints or style LoRA.';
+            return;
+        }
+
+        const origin = active.source === 'chat' ? 'this chat' : 'the default for new chats';
+        const lines = [`Style: ${active.style.name} (from ${origin})`];
+
+        if (active.style.lora) lines.push(`LoRA: ${active.style.lora}`);
+
+        try {
+            const [characters, personas, outfits] = await Promise.all([
+                getAllCharacters(), getAllPersonas(), getAllOutfits(),
+            ]);
+            const ctx = freshChatCtx();
+            const cardId = ctx?.characters?.[ctx?.characterId]?.avatar ?? null;
+            const chatId = ctx?.getCurrentChatId?.() ?? getCurrentChatId?.() ?? null;
+            const activeChars = resolveActiveCharacters(characters, cardId, chatId);
+            const bound = characters.length - activeChars.length;
+            lines.push(`Characters available here: ${activeChars.length}${bound > 0 ? ` (${bound} bound elsewhere)` : ''}`);
+            const persona = personas.find(p => p.isDefault) ?? personas[0] ?? null;
+            if (persona) lines.push(`Persona: ${persona.name}`);
+            if (outfits.length) lines.push(`Outfits: ${outfits.length}`);
+        } catch (err) {
+            lines.push('Roster unavailable — open the Characters tab to reload it.');
+        }
+
+        // The LoRAs that will lead the final prompt, in order.
+        const loras = collectLoras({ styles: [active.style] });
+        lines.push(loras.length
+            ? `Leading the prompt: ${loras.join(', ')}`
+            : 'No LoRA from this style.');
+
+        mainStyleStatus.textContent = lines.join('\n');
+    }
+
+    function refreshMainStyle() {
+        refreshMainStyleSelects();
+        syncMainStyleStatus();
+    }
+
+    if (mainStyleSelect) {
+        mainStyleSelect.addEventListener('change', () => {
+            const ok = writeChatStyleId(freshChatCtx(), mainStyleSelect.value);
+            if (!ok) {
+                toastr?.warning?.('No chat open — the style was not saved.');
+            }
+            syncMainStyleStatus();
+        });
+    }
+    if (mainStyleDefault) {
+        mainStyleDefault.addEventListener('change', () => {
+            settings.generation.defaultStyleId = mainStyleDefault.value;
+            save();
+            syncMainStyleStatus();
+        });
+    }
+    if (mainStyleSetDefault) {
+        mainStyleSetDefault.addEventListener('click', () => {
+            const chatStyleId = mainStyleSelect?.value ?? '';
+            if (!chatStyleId) {
+                toastr?.warning?.('Pick a style for this chat first.');
+                return;
+            }
+            settings.generation.defaultStyleId = chatStyleId;
+            save();
+            if (mainStyleDefault) mainStyleDefault.value = chatStyleId;
+            syncMainStyleStatus();
+        });
+    }
+    refreshMainStyle();
+
+    // CHAT_CHANGED fires AFTER chat_metadata has been reassigned, so this is
+    // the moment the new chat's style becomes readable.
+    if (eventSource && event_types?.CHAT_CHANGED) {
+        eventSource.on(event_types.CHAT_CHANGED, () => refreshMainStyle());
+    }
 
     // ================= LLM Tab Wiring =================
     const llmMethod = $('if_llm_default_method');
