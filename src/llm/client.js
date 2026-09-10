@@ -44,6 +44,22 @@ function safeDetail(err, maxLen = 200) {
     return raw;
 }
 
+/** Convert an LLM error into sanitized, actionable UI text. */
+export function formatLlmError(err, action = 'LLM request') {
+    const code = typeof err?.code === 'string' ? err.code : 'NETWORK';
+    if (code === 'ABORTED' || err?.name === 'AbortError') return `${action} was cancelled.`;
+    const guidance = {
+        CONFIG: 'LLM is not configured correctly. Open the LLM tab and check the selected profile.',
+        NETWORK: "LLM connection failed. Check the selected API profile or SillyTavern's main API connection.",
+        TIMEOUT: 'LLM request timed out. Check the endpoint and try again.',
+        HTTP: 'LLM endpoint rejected the request. Check the profile URL, model, and credentials.',
+        MALFORMED: 'LLM returned an unexpected response. Check the selected model and try again.',
+        METHOD_UNAVAILABLE: 'The selected LLM method is unavailable. Choose another method in the LLM tab.',
+    }[code] ?? 'LLM request failed. Check the selected profile and try again.';
+    const detail = safeDetail(err?.message ?? err);
+    return detail && !guidance.includes(detail) ? `${guidance} Details: ${detail}` : guidance;
+}
+
 /**
  * @param {{
  *   getSettings: () => object,

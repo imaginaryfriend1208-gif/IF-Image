@@ -16,6 +16,8 @@ import { parseTriggers } from './prompt/triggers.js';
 import { resolveActiveStyle, readChatStyleId, writeChatStyleId } from './prompt/active-style.js';
 import { resolveActiveCharacters } from './prompt/binding.js';
 import { undoPlacements } from './llm/inject.js';
+import { buildApiProfileExport, importApiProfiles } from './llm/profiles.js';
+import { formatLlmError } from './llm/client.js';
 import { isValidLora, collectLoras } from './prompt/ordering.js';
 import { renderDefaultSystemPrompt } from './llm/prompts.js';
 import { assemblePrompt, resolveProfileKey } from './prompt/render.js';
@@ -229,6 +231,17 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             <hr class="if-image-sep"/>
 
             <h3>API Profile Editor</h3>
+            <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:8px;">
+                <button id="if_llm_profiles_export" class="menu_button">Export profiles</button>
+                <button id="if_llm_profiles_import" class="menu_button">Import profiles</button>
+                <select id="if_llm_profiles_conflict" class="text_pole" title="How to handle an imported profile whose id already exists">
+                    <option value="copy" selected>Conflicts: import as copy</option>
+                    <option value="replace">Conflicts: replace local</option>
+                    <option value="skip">Conflicts: skip</option>
+                </select>
+                <input id="if_llm_profiles_file" type="file" accept=".json,application/json" style="display:none;">
+            </div>
+            <div class="if-image-note">Portable profile files never contain API keys. Imported Direct fetch profiles require you to enter their key locally.</div>
             <div class="if-image-row">
                 <label for="if_llm_profile_select">Profile</label>
                 <div style="display:flex; gap:6px;">
@@ -1132,7 +1145,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 planResult.textContent = msg;
             } catch (err) {
                 if (err?.code === 'ABORTED' || err?.name === 'AbortError') return;
-                planResult.textContent = `Error: ${err?.message ?? String(err)}`;
+                planResult.textContent = formatLlmError(err, 'Plan & Place');
             } finally {
                 planRun.disabled = false;
                 planRun.textContent = 'Plan & place images';
@@ -2719,7 +2732,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             showResult(presetsStatus, message, false);
             if (typeof toastr !== 'undefined') toastr.success(message, 'IF Image');
         } catch (err) {
-            const message = err?.message ?? String(err);
+            const message = formatLlmError(err, 'Persona sync');
             showResult(presetsStatus, message, true);
             if (typeof toastr !== 'undefined') toastr.error(message, 'IF Image');
         } finally {
@@ -3549,6 +3562,10 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     const llmProfSel = $('if_llm_profile_select');
     const llmProfNew = $('if_llm_profile_new');
     const llmProfDel = $('if_llm_profile_del');
+    const llmProfilesExport = $('if_llm_profiles_export');
+    const llmProfilesImport = $('if_llm_profiles_import');
+    const llmProfilesFile = $('if_llm_profiles_file');
+    const llmProfilesConflict = $('if_llm_profiles_conflict');
     const llmProfName = $('if_llm_profile_name');
     const llmProfMethod = $('if_llm_profile_method');
     const llmProfUrl = $('if_llm_profile_baseurl');
@@ -3753,6 +3770,46 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         syncLlmFetchRows();
     }
 
+    if (llmProfilesExport) llmProfilesExport.addEventListener('click', () => {
+        try {
+            const count = settings.llm?.apiProfiles?.length ?? 0;
+            if (!count) { showResult(llmResult, 'No LLM profiles to export.', true); return; }
+            const portableDocument = buildApiProfileExport(settings);
+            const blob = new Blob([JSON.stringify(portableDocument, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `if-image-llm-profiles-${new Date().toISOString().slice(0, 10)}.json`;
+            link.click();
+            setTimeout(() => URL.revokeObjectURL(url), 0);
+            showResult(llmResult, `Exported ${count} profile${count === 1 ? '' : 's'} without API keys.`, false);
+        } catch (err) {
+            showResult(llmResult, `Profile export failed: ${err?.message ?? String(err)}`, true);
+        }
+    });
+    if (llmProfilesImport) llmProfilesImport.addEventListener('click', () => llmProfilesFile?.click());
+    if (llmProfilesFile) llmProfilesFile.addEventListener('change', async () => {
+        const file = llmProfilesFile.files?.[0];
+        if (!file) return;
+        try {
+            const portableDocument = JSON.parse(await file.text());
+            const result = importApiProfiles(settings, portableDocument, { conflict: llmProfilesConflict?.value ?? 'copy' });
+            save();
+            refreshLlmProfileSelects();
+            const selected = result.profiles.at(-1) ?? null;
+            if (selected) {
+                activeLlmProfileId = selected.id;
+                llmProfSel.value = selected.id;
+                populateLlmProfileForm(selected);
+            }
+            showResult(llmResult, `Import complete: ${result.added} added, ${result.replaced} replaced, ${result.skipped} skipped. API keys were not imported.`, false);
+        } catch (err) {
+            showResult(llmResult, `Profile import failed: ${err?.message ?? String(err)}`, true);
+        } finally {
+            llmProfilesFile.value = '';
+        }
+    });
+
     if (llmProfSel) llmProfSel.addEventListener('change', () => {
         const profiles = settings.llm?.apiProfiles ?? [];
         const found = profiles.find(p => p.id === llmProfSel.value);
@@ -3813,26 +3870,30 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         showResult(llmResult, `Profile "${name}" saved!`, false);
     });
 
-    // LLM test call
+    // Test the selected saved profile (or the default/current ST connection).
     if (llmTestBtn) llmTestBtn.addEventListener('click', async () => {
+        const profileId = activeLlmProfileId || llmProfSel?.value || settings.llm?.defaultApiProfileId || '';
+        const profile = settings.llm?.apiProfiles?.find(item => item.id === profileId) ?? null;
+        const target = profile ? `"${profile.name}" (${profile.method})` : 'SillyTavern current connection';
         llmTestBtn.disabled = true;
-        showResult(llmResult, 'Testing...', false);
+        showResult(llmResult, `Testing ${target} with a fixed, credential-free prompt…`, false);
         try {
-            // Lazy import: the module is always available since Phase B
             const { createLlmClient } = await import('./llm/client.js');
             const client = createLlmClient({
                 getSettings: () => settings,
-                getContext: () => (typeof SillyTavern !== 'undefined' && SillyTavern.getContext?.()) || {},
+                getContext: () => getChatContext?.() ?? {},
             });
             const result = await client.request({
                 type: 'image_gen',
+                profileId: profileId || undefined,
                 systemPrompt: 'Reply with exactly one line: OK.',
                 userPrompt: 'Reply with: OK',
                 signal: AbortSignal.timeout(30000),
             });
-            showResult(llmResult, `Test OK (${result.elapsedMs.toFixed(0)}ms): ${result.text.slice(0, 200)}`, false);
+            const response = result.text.replace(/\s+/g, ' ').trim().slice(0, 200);
+            showResult(llmResult, `Test OK — target: ${target}; method: ${result.method}; elapsed: ${result.elapsedMs.toFixed(0)}ms; response: ${response}`, false);
         } catch (err) {
-            showResult(llmResult, `Test failed: ${err?.message ?? err}`, true);
+            showResult(llmResult, formatLlmError(err, 'Profile test'), true);
         } finally {
             llmTestBtn.disabled = false;
         }
