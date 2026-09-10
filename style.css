@@ -371,6 +371,23 @@
     color: var(--ifi-dim);
 }
 
+/* System-prompt state line. An empty textarea shows the built-in text as a
+   placeholder, so it looks full — this line is what tells the user whether
+   the built-in or their own text is in force, and must not read as ordinary
+   dim helper text. */
+#if_llm_system_state {
+    padding: 5px 8px;
+    margin-bottom: 4px;
+    border-left: 3px solid var(--ifi-border);
+    border-radius: 3px;
+    background: rgba(0, 0, 0, 0.2);
+    color: var(--ifi-text);
+}
+
+#if_llm_system_state.if-image-state-custom {
+    border-left-color: #7aa2f7;
+}
+
 /* D14: read-only "what generation uses right now" box on the Generation tab. */
 .if-image-active-summary {
     padding: 6px 8px;

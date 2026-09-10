@@ -179,12 +179,14 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             </div>
             <div class="if-image-row">
                 <label for="if_llm_system_prompt">Image prompt instructions (system prompt)</label>
+                <div class="if-image-note" id="if_llm_system_state"></div>
                 <textarea id="if_llm_system_prompt" class="text_pole textarea_compact" rows="10" spellcheck="false"></textarea>
             </div>
-            <div class="if-image-note">Sent ahead of the dialect rules, character cards, and scene window, which are always built from live state. Leave empty to use the built-in text. Reset refills the box with the current built-in version.</div>
             <div class="if-image-row">
-                <button id="if_llm_system_reset" class="menu_button">Reset to default</button>
+                <button id="if_llm_system_load" class="menu_button">Load built-in for editing</button>
+                <button id="if_llm_system_reset" class="menu_button">Back to built-in</button>
             </div>
+            <div class="if-image-note">Sent ahead of the dialect rules, character cards, and scene window, which are always built from live state and are never part of this box. If you write your own, keep the $Name character rules — the compiler relies on them.</div>
 
             <div class="if-image-row">
                 <label for="if_llm_injection">Character injection style</label>
@@ -3340,23 +3342,63 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     // starting point for edits.
     const llmSystemPrompt = $('if_llm_system_prompt');
     const llmSystemReset = $('if_llm_system_reset');
+    const llmSystemLoad = $('if_llm_system_load');
+    const llmSystemState = $('if_llm_system_state');
+
+    // An empty box shows the built-in text as a placeholder, which reads as
+    // if the box were full. Without this line the user cannot tell whether
+    // typing ADDS to those instructions or REPLACES them — it replaces them
+    // wholesale, and losing the character-token rules silently breaks the
+    // compiler contract.
+    function syncSystemPromptState() {
+        if (!llmSystemState) return;
+        const custom = (settings.llm?.systemPromptOverride ?? '').trim();
+        if (custom) {
+            llmSystemState.textContent = 'Using YOUR text below. It replaces the built-in instructions entirely — the built-in rules are not added on top. Clear the box to go back to the built-in version.';
+            llmSystemState.classList.add('if-image-state-custom');
+        } else {
+            llmSystemState.textContent = 'Using the BUILT-IN instructions (shown greyed out below). Anything you type replaces them completely, so click "Load built-in for editing" first if you only want to adjust a few lines.';
+            llmSystemState.classList.remove('if-image-state-custom');
+        }
+    }
+
     if (llmSystemPrompt) {
         llmSystemPrompt.value = settings.llm?.systemPromptOverride ?? '';
         llmSystemPrompt.placeholder = renderDefaultSystemPrompt();
         llmSystemPrompt.addEventListener('input', () => {
             if (!settings.llm) settings.llm = {};
             settings.llm.systemPromptOverride = llmSystemPrompt.value;
+            syncSystemPromptState();
             save();
         });
     }
-    if (llmSystemReset) llmSystemReset.addEventListener('click', () => {
+    syncSystemPromptState();
+
+    // Copies the built-in text into the box so it can be edited a line at a
+    // time instead of rewritten from nothing.
+    if (llmSystemLoad) llmSystemLoad.addEventListener('click', () => {
         if (!llmSystemPrompt) return;
         const builtIn = renderDefaultSystemPrompt();
         llmSystemPrompt.value = builtIn;
         if (!settings.llm) settings.llm = {};
         settings.llm.systemPromptOverride = builtIn;
+        syncSystemPromptState();
         save();
-        showResult(llmResult, 'System prompt reset to the built-in default.', false);
+        showResult(llmResult, 'Built-in instructions loaded into the box — edit freely. Note that they no longer track updates until you clear the box.', false);
+    });
+
+    // Clears the override. Confirmed first: the edited text is not recoverable
+    // afterwards, and the button sits next to one that fills the same box.
+    if (llmSystemReset) llmSystemReset.addEventListener('click', () => {
+        if (!llmSystemPrompt) return;
+        const hadCustom = (settings.llm?.systemPromptOverride ?? '').trim().length > 0;
+        if (hadCustom && !confirm('Discard your custom instructions and go back to the built-in version?')) return;
+        llmSystemPrompt.value = '';
+        if (!settings.llm) settings.llm = {};
+        settings.llm.systemPromptOverride = '';
+        syncSystemPromptState();
+        save();
+        showResult(llmResult, 'Back to the built-in instructions.', false);
     });
 
     if (llmMethod) llmMethod.addEventListener('change', () => { settings.llm.defaultMethod = llmMethod.value; save(); });
