@@ -504,7 +504,13 @@ export function createMarkerPipeline(deps) {
         try {
             compiled = compile(marker.content);
         } catch (err) {
-            console.error('[IF Image] compile failed:', err?.message ?? err);
+            // Silent failure here stranded Plan & Place: the banner claimed
+            // the marker was placed, but a compile error (commonly an unknown
+            // $Subject token introduced by the rewrite pass) dropped it with
+            // only a console line. Surface it — users do not watch the console.
+            const detail = err?.message ?? String(err);
+            console.error('[IF Image] compile failed:', detail);
+            notify('error', `Marker compile failed: ${detail}`);
             return;
         }
         compiled = { ...compiled, envelope: applyOverrides(compiled.envelope, marker.overrides) };
@@ -628,8 +634,12 @@ export function createMarkerPipeline(deps) {
             try {
                 compiled = compile(entryInfo.content);
             } catch (err) {
-                console.error('[IF Image] compile failed:', err?.message ?? err);
-                notify('error', 'Prompt compile failed; see console.');
+                // Same reasoning as onMarker: name the cause. "see console"
+                // hides the one detail that identifies the fault, which is
+                // usually an unknown $Subject token from the rewrite pass.
+                const detail = err?.message ?? String(err);
+                console.error('[IF Image] compile failed:', detail);
+                notify('error', `Prompt compile failed: ${detail}`);
                 return null;
             }
             compiled = { ...compiled, envelope: applyOverrides(compiled.envelope, entryInfo.overrides) };

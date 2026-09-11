@@ -113,6 +113,25 @@ export const defaultSettings = {
             keepLoraPosition: false,
         },
     },
+    // Per-user roster sync through SillyTavern's own file storage
+    // (/api/files/*, <dataRoot>/<handle>/user/files). IndexedDB is per
+    // browser, so a device change or a cleared site-data loses every
+    // character/outfit/style/persona. This is the opt-in remedy.
+    //
+    // Disabled by default: syncing is a data-moving operation and the user
+    // has to choose it. `path` is filled in by the first successful upload;
+    // `migratedAt` makes the one-time IndexedDB -> server migration
+    // idempotent, and `lastSyncedAt` is shown in the UI status line.
+    rosterSync: {
+        enabled: false,
+        path: '',
+        migratedAt: null,
+        lastSyncedAt: null,
+        // Embed prompt/seed/params into generated PNGs as a tEXt chunk, so a
+        // downloaded image can still explain itself on another machine.
+        // Independent of roster sync; costs nothing when no PNG is produced.
+        embedPngMetadata: true,
+    },
     // Phase D6: image-store housekeeping (0 = off per knob).
     cache: {
         ttlDays: 0,

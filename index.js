@@ -13,9 +13,13 @@ import { createExecutor } from './src/runtime/executor.js';
 import { createMarkerPipeline } from './src/runtime/marker-pipeline.js';
 import { replaceMarkers, createSlotElement, renderSlotState, renderImageFrame, renderRegenerateChip, renderIdleChip, openLightbox, contentHash } from './src/runtime/insert.js';
 import { saveImageRecord, getImagesForMessage, getImageRecord, deleteImageRecord, getStorageStats, pruneImages, toJpegBlob } from './src/storage/images.js';
-import { getAllCharacters } from './src/storage/chars.js';
-import { getAllStyles, getAllPersonas, savePersona, createDefaultPersona, applyPersonaSync, getReplaceRules } from './src/storage/presets.js';
-import { getAllOutfits } from './src/storage/outfits.js';
+import { getAllCharacters, saveCharacter } from './src/storage/chars.js';
+import { getAllStyles, getAllPersonas, savePersona, saveStyle, createDefaultPersona, applyPersonaSync, getReplaceRules, saveReplaceRules } from './src/storage/presets.js';
+import { getAllOutfits, saveOutfit } from './src/storage/outfits.js';
+import { uploadRoster, downloadRoster, ROSTER_FILENAME } from './src/storage/server-sync.js';
+import { decideSync, canPush, canPull, pickCollections, describe as describeRoster, shouldMigrate } from './src/storage/roster-sync.js';
+import { writeMetadata, isPng } from './src/storage/png-metadata.js';
+import { planMerge } from './src/storage/transfer.js';
 import { resolveActiveCharacters } from './src/prompt/binding.js';
 import { parseTriggers } from './src/prompt/triggers.js';
 import { assemblePrompt, mergeProfileParams, applyMarkerParamOverrides, resolveLockedSeed, resolveSizeKeyword } from './src/prompt/render.js';
@@ -110,18 +114,209 @@ jQuery(async () => {
     const initialRosterLoad = refreshRoster();
 
     // ------------------------------------------------------------------
+    // Per-user roster sync. IndexedDB stays the read path (fast, offline);
+    // the server file is the portable copy that survives a device change.
+    //
+    // Nothing here runs unless settings.rosterSync.enabled is true, and no
+    // write is ever made without the roster-sync policy allowing it.
+    // ------------------------------------------------------------------
+    const syncDeps = {
+        fetch: (url, init) => fetch(url, init),
+        getRequestHeaders: () => getContext().getRequestHeaders(),
+    };
+
+    /** Persist one collection list back into IndexedDB. */
+    async function persistCollection(name, records) {
+        if (!Array.isArray(records) || !records.length) return 0;
+        if (name === 'replaceRules') {
+            await saveReplaceRules(records);
+            return records.length;
+        }
+        const savers = {
+            characters: saveCharacter,
+            outfits: saveOutfit,
+            styles: saveStyle,
+            personas: savePersona,
+        };
+        const save = savers[name];
+        if (!save) return 0;
+        let written = 0;
+        for (const record of records) {
+            try {
+                await save(record);
+                written += 1;
+            } catch (err) {
+                console.warn(`[IF Image] Could not store ${name} record:`, err?.message ?? err);
+            }
+        }
+        return written;
+    }
+
+    /** Current IndexedDB roster in the shape the sync policy expects. */
+    async function readLocalCollections() {
+        const [characters, outfits, styles, personas, replaceRules] = await Promise.all([
+            getAllCharacters(), getAllOutfits(), getAllStyles(), getAllPersonas(), getReplaceRules(),
+        ]);
+        return pickCollections({ characters, outfits, styles, personas, replaceRules });
+    }
+
+    /**
+     * Run one sync cycle.
+     *
+     * `mode` mirrors the preset importer: 'keep-mine' never overwrites an
+     * existing local record, 'overwrite' lets the server copy win. Conflicts
+     * are resolved by the SAME planMerge() the import path uses, so there is
+     * one merge semantic in the extension, not two.
+     *
+     * @returns {Promise<{action: string, message: string, ok: boolean}>}
+     */
+    async function syncRoster({ force = false, mode = 'keep-mine', direction = 'auto' } = {}) {
+        const sync = settings.rosterSync ?? {};
+        const local = await readLocalCollections();
+        const path = sync.path || '';
+
+        let remote = null;
+        if (path) {
+            try {
+                remote = await downloadRoster(path, syncDeps);
+            } catch (err) {
+                // A corrupt/unreachable server file must not be treated as
+                // "empty" -- that would let a push wipe it.
+                return { ok: false, action: 'error', message: `Could not read the server roster: ${err?.message ?? err}` };
+            }
+        }
+
+        const decision = direction === 'auto'
+            ? decideSync(local, remote)
+            : { action: direction, reason: 'requested explicitly' };
+
+        if (decision.action === 'noop') {
+            return { ok: true, action: 'noop', message: `Nothing to sync (${decision.reason}).` };
+        }
+
+        if (decision.action === 'push' || decision.action === 'merge') {
+            // A merge still ends in an upload, so the same guard applies.
+            const gate = canPush(local, remote, { force });
+            if (!gate.allowed) {
+                return { ok: false, action: 'refused', message: gate.reason };
+            }
+            let payload = local;
+            if (decision.action === 'merge' && remote) {
+                // Local wins by default; the server copy only contributes
+                // records this device has never seen.
+                const plan = planMerge(local, remote, mode);
+                const merged = pickCollections(local);
+                for (const name of Object.keys(merged)) {
+                    const entry = plan[name];
+                    if (!entry) continue;
+                    const additions = [...entry.add, ...entry.overwrite];
+                    if (additions.length) {
+                        await persistCollection(name, additions);
+                    }
+                }
+                payload = await readLocalCollections();
+            }
+            const result = await uploadRoster(payload, { ...syncDeps, filename: ROSTER_FILENAME });
+            settings.rosterSync.path = result.path;
+            settings.rosterSync.lastSyncedAt = result.savedAt;
+            saveSettings();
+            await refreshRoster();
+            return {
+                ok: true,
+                action: decision.action,
+                message: `Synced ${describeRoster(payload)} to the server (${(result.bytes / 1024).toFixed(1)} KB).`,
+            };
+        }
+
+        if (decision.action === 'pull') {
+            const gate = canPull(local, remote, { force });
+            if (!gate.allowed) {
+                return { ok: false, action: 'refused', message: gate.reason };
+            }
+            const plan = planMerge(local, remote ?? {}, mode);
+            let written = 0;
+            for (const name of Object.keys(pickCollections({}))) {
+                const entry = plan[name];
+                if (!entry) continue;
+                written += await persistCollection(name, [...entry.add, ...entry.overwrite]);
+            }
+            settings.rosterSync.lastSyncedAt = new Date().toISOString();
+            saveSettings();
+            await refreshRoster();
+            return { ok: true, action: 'pull', message: `Restored ${written} record(s) from the server.` };
+        }
+
+        return { ok: false, action: decision.action, message: decision.reason };
+    }
+
+    /**
+     * One-time migration: an existing IndexedDB roster has never been synced
+     * and the server has no file yet. Deliberately silent on failure -- this
+     * runs at startup and must not interrupt anything.
+     */
+    async function migrateRosterOnce() {
+        const sync = settings.rosterSync ?? {};
+        if (!sync.enabled) return false;
+        await initialRosterLoad;
+        const local = await readLocalCollections();
+        let remote = null;
+        if (sync.path) {
+            try { remote = await downloadRoster(sync.path, syncDeps); } catch { return false; }
+        }
+        const decision = shouldMigrate(local, remote, { migratedAt: sync.migratedAt });
+        if (!decision.should) return false;
+        try {
+            const result = await uploadRoster(local, syncDeps);
+            settings.rosterSync.path = result.path;
+            settings.rosterSync.migratedAt = result.savedAt;
+            settings.rosterSync.lastSyncedAt = result.savedAt;
+            saveSettings();
+            console.info(`[IF Image] Roster migrated to the server: ${describeRoster(local)}.`);
+            return true;
+        } catch (err) {
+            console.warn('[IF Image] Roster migration skipped:', err?.code ?? err?.name ?? 'ERROR');
+            return false;
+        }
+    }
+    const initialRosterMigration = migrateRosterOnce();
+
+    // ------------------------------------------------------------------
     // D6: image cache management.
     // - Save wrapper: fresh blobs are JPEG-converted when
     //   settings.cache.jpegQuality > 0 (never converts existing records;
     //   failure records have no blob and pass through untouched).
     // - Startup prune: fire-and-forget by ttlDays/maxMB when either > 0.
     // ------------------------------------------------------------------
+    /**
+     * Embed prompt/seed/params into a PNG as a tEXt chunk.
+     *
+     * Runs BEFORE the JPEG step on purpose: JPEG has no PNG chunks, so a
+     * converted image can carry nothing. When both are enabled the user has
+     * chosen size over portability, and the conversion silently wins.
+     *
+     * Every failure returns the original blob. A metadata problem must never
+     * cost the user the image itself.
+     */
+    async function embedPngMetadata(blob, record) {
+        if (!blob || settings.rosterSync?.embedPngMetadata === false) return blob;
+        if (typeof blob.arrayBuffer !== 'function') return blob;
+        try {
+            const bytes = new Uint8Array(await blob.arrayBuffer());
+            if (!isPng(bytes)) return blob; // JPEG/WebP: nothing to embed into
+            const out = writeMetadata(bytes, record);
+            return new Blob([out], { type: 'image/png' });
+        } catch (err) {
+            console.warn('[IF Image] PNG metadata embed failed; saving the original:', err?.message ?? err);
+            return blob;
+        }
+    }
+
     async function saveImageRecordWithCache(record) {
         const quality = Number(settings.cache?.jpegQuality ?? 0);
-        if (record?.blob && quality > 0) {
-            return saveImageRecord({ ...record, blob: await toJpegBlob(record.blob, quality) });
-        }
-        return saveImageRecord(record);
+        let blob = record?.blob ?? null;
+        if (blob) blob = await embedPngMetadata(blob, record);
+        if (blob && quality > 0) blob = await toJpegBlob(blob, quality);
+        return blob === record?.blob ? saveImageRecord(record) : saveImageRecord({ ...record, blob });
     }
     {
         const ttlDays = Number(settings.cache?.ttlDays ?? 0);
@@ -616,6 +811,8 @@ jQuery(async () => {
         refreshRoster,
         initialPersonaSync,
         syncPersonaFromSt: ({ signal } = {}) => syncPersonaRequest({ signal }),
+        syncRoster,
+        initialRosterMigration,
         planChatImages: async (count, { signal } = {}) => {
             const controller = new AbortController();
             activeLlmAborts.add(controller);
@@ -632,7 +829,7 @@ jQuery(async () => {
         applyPlacements: (placements) => {
             const ctx = getContext();
             const tags = settings.generation ?? {};
-            const { touched } = injectPlacements(placements, {
+            const result = injectPlacements(placements, {
                 chat: ctx.chat ?? [],
                 // The planner already returned validated scenes. Standard
                 // markers let the one existing runtime/pipeline pick them up.
@@ -649,7 +846,22 @@ jQuery(async () => {
                     height: placement.height,
                 }),
             });
-            return touched.length;
+            // Forward the WHOLE outcome. `touched` = messages whose .mes
+            // gained a marker; `rendered` = messages the host actually redrew.
+            // The marker runtime walks the message DOM and never reads
+            // chat[i].mes, so touched > rendered means those markers exist in
+            // memory but are invisible to detection until the chat is
+            // reloaded. Collapsing this to touched.length is what let
+            // "Placed 1 image" report success for a marker that never
+            // generated anything.
+            return {
+                placed: result.touched.length,
+                rendered: result.rendered,
+                touchedIds: result.touched,
+                saved: result.saved,
+                skippedEmpty: result.skippedEmpty,
+                shadowed: result.shadowed,
+            };
         },
     });
     $('#extensions_settings2').append(drawer);

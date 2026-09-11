@@ -52,7 +52,7 @@ export const EXTENSION_VERSION = '0.3.0';
  * @param {Promise<boolean>} [args.initialPersonaSync] - resolves true when
  *   the silent first-load sync created a Persona and the selector must reload.
  */
-export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQueue, regenerateImage, getCurrentChatId, planChatImages, applyPlacements, getChatContext, eventSource, event_types, syncPersonaFromSt, refreshRoster, initialPersonaSync }) {
+export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQueue, regenerateImage, getCurrentChatId, planChatImages, applyPlacements, getChatContext, eventSource, event_types, syncPersonaFromSt, refreshRoster, initialPersonaSync, syncRoster }) {
     const html = `
     <div class="if-image-settings">
         <div class="if-image-title">
@@ -574,6 +574,20 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 <input id="if_preset_import_file" type="file" accept=".json,application/json" style="display:none;">
             </div>
             <div id="if_preset_status" class="if-image-result"></div>
+            <div class="if-image-row">
+                <label class="if-image-check">
+                    <input type="checkbox" id="if_roster_sync_enabled"> Sync presets to this SillyTavern account
+                </label>
+            </div>
+            <div class="if-image-note">Characters, outfits, styles, personas and replace rules normally live in this browser only, so a new device or a cleared cache loses them. With this on they are also stored in your account's server files and follow you between devices. Images stay local.</div>
+            <div class="if-image-row">
+                <button id="if_roster_sync_now" class="menu_button">Sync now</button>
+                <select id="if_roster_sync_mode" class="text_pole" title="How to resolve a record that exists on both sides">
+                    <option value="keep-mine" selected>Conflicts: keep mine</option>
+                    <option value="overwrite">Conflicts: server wins</option>
+                </select>
+            </div>
+            <div id="if_roster_sync_status" class="if-image-result"></div>
             <div class="if-image-row">
                 <label for="if_char_select">Select Character</label>
                 <div style="display:flex; gap:6px;">
@@ -1131,9 +1145,46 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 lastPlacementSnapshots = placements
                     .filter(p => chat[p.messageId])
                     .map(p => ({ messageId: p.messageId, prevMes: chat[p.messageId].mes }));
-                const touched = typeof applyPlacements === 'function' ? applyPlacements(placements) : 0;
-                const skipped = placements.length - touched;
-                let msg = `Placed ${touched} image${touched !== 1 ? 's' : ''} (${method}, ${(elapsedMs / 1000).toFixed(1)}s)`;
+                // applyPlacements now returns { placed, rendered }; older
+                // builds returned a bare count, so accept both shapes.
+                const applied = typeof applyPlacements === 'function' ? applyPlacements(placements) : 0;
+                const legacyShape = typeof applied === 'number';
+                const touched = legacyShape ? applied : (applied?.placed ?? 0);
+                const rendered = legacyShape ? null : (applied?.rendered ?? null);
+                // Real ids, not the requested ones: a placement can be dropped
+                // for a missing message, a duplicate position, or an empty
+                // prompt, and pointing the user at a message that never got a
+                // marker is its own kind of lie.
+                const touchedIds = Array.isArray(applied?.touchedIds) ? [...applied.touchedIds] : [];
+                const savedOk = legacyShape ? null : (applied?.saved ?? null);
+                const emptyCount = Array.isArray(applied?.skippedEmpty) ? applied.skippedEmpty.length : 0;
+                const shadowedCount = Array.isArray(applied?.shadowed) ? applied.shadowed.length : 0;
+                const skipped = placements.length - touched - emptyCount;
+                // "Injected", not "Placed": this counts markers written into
+                // the chat, NOT images produced. Generation happens after this
+                // and reports itself through the per-marker chip in the message.
+                // Dry-run never reaches a backend, so promising generation
+                // would be the same false success this banner exists to avoid.
+                const dryRun = settings.generation?.dryRun === true;
+                const outcome = touched === 0
+                    ? 'nothing to generate'
+                    : (dryRun ? 'dry-run is ON, so no image will be generated' : 'generating…');
+                let msg = `Injected ${touched} marker${touched !== 1 ? 's' : ''} (${method}, ${(elapsedMs / 1000).toFixed(1)}s) — ${outcome}`;
+                // Say WHERE. The planner picks moments anywhere in its chat
+                // window, so the marker is often far above the latest message
+                // and the user sees only this banner.
+                const where = touchedIds.slice().sort((a, b) => a - b);
+                if (where.length) msg += ` — at message${where.length !== 1 ? 's' : ''} #${where.join(', #')}`;
+                if (rendered !== null && touched > rendered) {
+                    const lost = touched - rendered;
+                    msg += ` — WARNING: ${lost} message${lost !== 1 ? 's' : ''} could not be re-rendered, so ${lost !== 1 ? 'those markers are' : 'that marker is'} invisible to detection. Reload the chat.`;
+                }
+                // A failed save means the markers disappear on the next load.
+                if (savedOk === false) msg += ' — WARNING: the chat could not be saved, so these markers will be lost on reload.';
+                if (shadowedCount > 0) {
+                    msg += ` — WARNING: ${shadowedCount} message${shadowedCount !== 1 ? 's have' : ' has'} translated/display text, so the marker is not drawn and will never be detected.`;
+                }
+                if (emptyCount > 0) msg += ` — ${emptyCount} skipped (the LLM returned an empty prompt)`;
                 if (skipped > 0) msg += ` — ${skipped} skipped (duplicate position)`;
                 // Report the rewrite pass honestly: silence would read as
                 // success even when the second call failed.
@@ -1160,7 +1211,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             }
             const ctx = getChatContext?.() ?? null;
             const msgUpdated = event_types?.MESSAGE_UPDATED;
-            const { restored } = undoPlacements(lastPlacementSnapshots, {
+            const { restored, rendered: undoRendered, saved: undoSaved } = undoPlacements(lastPlacementSnapshots, {
                 chat: ctx?.chat ?? [],
                 saveChat: () => ctx?.saveChat?.(),
                 updateMessageBlock: ctx?.updateMessageBlock
@@ -1169,7 +1220,15 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 emit: msgUpdated ? (id) => eventSource?.emit?.(msgUpdated, id) : undefined,
             });
             const count = restored.length;
-            planResult.textContent = `Undone ${count} placement${count !== 1 ? 's' : ''}.`;
+            let undoMsg = `Undone ${count} placement${count !== 1 ? 's' : ''}.`;
+            // Worse than a failed placement: .mes no longer has the marker but
+            // the stale text is still on screen, so the undo looks complete.
+            if (count > undoRendered) {
+                const stale = count - undoRendered;
+                undoMsg += ` WARNING: ${stale} message${stale !== 1 ? 's' : ''} could not be re-rendered — the marker text may still be visible. Reload the chat.`;
+            }
+            if (undoSaved === false) undoMsg += ' WARNING: the chat could not be saved, so the undo may not survive a reload.';
+            planResult.textContent = undoMsg;
             lastPlacementSnapshots = [];
         });
     }
@@ -2204,6 +2263,65 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         }
     }
     loadCharactersList();
+
+    // ---- Roster sync (per-user server storage) -----------------------------
+    const rosterSyncEnabled = $('if_roster_sync_enabled');
+    const rosterSyncNow = $('if_roster_sync_now');
+    const rosterSyncMode = $('if_roster_sync_mode');
+    const rosterSyncStatus = $('if_roster_sync_status');
+
+    function renderRosterSyncState() {
+        if (!rosterSyncStatus) return;
+        const sync = settings.rosterSync ?? {};
+        if (!sync.enabled) {
+            rosterSyncStatus.textContent = 'Sync is off — presets live in this browser only.';
+            return;
+        }
+        rosterSyncStatus.textContent = sync.lastSyncedAt
+            ? `Last synced ${new Date(sync.lastSyncedAt).toLocaleString()}.`
+            : 'Enabled — not synced yet.';
+    }
+
+    if (rosterSyncEnabled) {
+        rosterSyncEnabled.checked = settings.rosterSync?.enabled === true;
+        rosterSyncEnabled.addEventListener('change', () => {
+            if (!settings.rosterSync) settings.rosterSync = {};
+            settings.rosterSync.enabled = rosterSyncEnabled.checked;
+            save();
+            renderRosterSyncState();
+        });
+    }
+    if (rosterSyncNow) {
+        rosterSyncNow.addEventListener('click', async () => {
+            if (typeof syncRoster !== 'function') {
+                showResult(rosterSyncStatus, 'Sync is unavailable in this context.', true);
+                return;
+            }
+            if (!settings.rosterSync?.enabled) {
+                showResult(rosterSyncStatus, 'Turn sync on first.', true);
+                return;
+            }
+            const original = rosterSyncNow.textContent;
+            rosterSyncNow.disabled = true;
+            rosterSyncNow.textContent = 'Syncing…';
+            try {
+                const result = await syncRoster({ mode: rosterSyncMode?.value ?? 'keep-mine' });
+                // A refusal is not an exception: the policy deliberately
+                // blocks destructive syncs, and the user needs the reason.
+                showResult(rosterSyncStatus, result.message, !result.ok);
+                if (result.ok) {
+                    await loadCharactersList();
+                    renderRosterSyncState();
+                }
+            } catch (err) {
+                showResult(rosterSyncStatus, err?.message ?? String(err), true);
+            } finally {
+                rosterSyncNow.disabled = false;
+                rosterSyncNow.textContent = original;
+            }
+        });
+    }
+    renderRosterSyncState();
 
     // ---- D7: preset export/import -----------------------------------------
     const presetExportBtn = $('if_preset_export');
