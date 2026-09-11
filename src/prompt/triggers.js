@@ -9,6 +9,7 @@
 // - {{dialect: krea|anima|illus}}
 
 import { resolveCharacterTrigger } from './binding.js';
+import { matchAutomaticOutfit } from './outfit-keywords.js';
 
 /**
  * Normalize strings for fuzzy/diacritic matching (NFKD, handles Vietnamese đ/Đ).
@@ -89,6 +90,76 @@ export function matchOutfit(token, outfits = []) {
 const VIEW_MODIFIERS = new Set(['back', 'front', 'full', 'side']);
 
 /**
+ * Strip character slot placeholders so keyword matching only ever inspects
+ * the author's own scene prose, never a compiler-substituted tag block.
+ */
+function sceneTextForKeywords(text) {
+    return String(text ?? '').replace(CHAR_SLOT_PATTERN, ' ');
+}
+
+/**
+ * Assign lorebook-style automatic outfits to already-resolved subjects.
+ *
+ * Rules (see CLAUDE.md / outfit lorebook decisions):
+ * - An explicit `$Name:outfit` trigger always wins and is never overwritten.
+ * - An explicit outfit token that failed to match still blocks auto-match:
+ *   the user asked for a specific outfit, so silently substituting another
+ *   one would be wrong.
+ * - Owned outfits (charId === subject.id) beat shared ones (charId falsy).
+ * - A shared outfit only auto-applies when exactly ONE subject is in frame;
+ *   with two or more, "who is wearing it" is ambiguous, so nothing applies.
+ * - Personas can wear shared outfits but own none, so they only participate
+ *   in the unambiguous-single-subject case.
+ * - No keyword evidence means no outfit. Nothing is ever guessed.
+ *
+ * @param {string} text - residual scene text (slot placeholders included)
+ * @param {Array<object>} items - resolved character/persona entries, mutated in place
+ * @param {Array<object>} outfits - full outfit roster
+ */
+function resolveAutomaticOutfits(text, items, outfits, attachOutfit, subjectOf, subjectKey) {
+    if (!Array.isArray(items) || !items.length || !Array.isArray(outfits) || !outfits.length) return;
+
+    const scene = sceneTextForKeywords(text);
+    if (!scene.trim()) return;
+
+    // Deduplicate by subject: the same character may be triggered twice in
+    // one marker ("$Lyna:back ... $Lyna ..."), and both entries must end up
+    // with the same clothing rather than being resolved independently.
+    const bySubject = new Map();
+    for (const item of items) {
+        if (!subjectOf(item)) continue;
+        const key = subjectKey(item);
+        if (!key) continue;
+        if (!bySubject.has(key)) bySubject.set(key, []);
+        bySubject.get(key).push(item);
+    }
+    if (!bySubject.size) return;
+
+    const soleSubject = bySubject.size === 1;
+
+    for (const entries of bySubject.values()) {
+        // Explicit intent anywhere in the group locks the whole subject.
+        if (entries.some(item => item.outfitRequested || item.outfitSource === 'explicit')) continue;
+
+        const subject = subjectOf(entries[0]);
+        const isPersona = Boolean(entries[0].isPersona);
+        const subjectId = subject?.id;
+
+        const owned = !isPersona && subjectId
+            ? outfits.filter(o => o.charId === subjectId)
+            : [];
+        // Shared outfits are only unambiguous with a single subject in frame.
+        const shared = soleSubject ? outfits.filter(o => !o.charId) : [];
+
+        const match = matchAutomaticOutfit(scene, owned)
+            ?? matchAutomaticOutfit(scene, shared);
+        if (!match) continue;
+
+        for (const item of entries) attachOutfit(item, match, 'auto_keyword');
+    }
+}
+
+/**
  * Marks where a character trigger stood in the scene text so render.js can
  * substitute its tags in place. Trigger tokens used to be deleted outright,
  * which tore the character out of the sentence:
@@ -139,6 +210,25 @@ export function parseTriggers(input, context = {}) {
     // within THIS marker, so a later outfit-only trigger for the same
     // character inherits them (e.g. "$Lyna:back ... $Lyna:casual ...").
     const lastViewModsByChar = new Map();
+
+    function attachOutfit(item, outfit, source, displayName = '') {
+        if (displayName) item.outfit = displayName;
+        if (!outfit) return;
+        item.outfit = displayName || outfit.name;
+        item.outfitTags = typeof outfit.tags === 'string' ? outfit.tags : '';
+        item.outfitRecord = outfit;
+        item.outfitSource = source;
+    }
+
+    function subjectOf(item) {
+        return item?.char ?? item?.persona ?? null;
+    }
+
+    function subjectKey(item) {
+        const subject = subjectOf(item);
+        if (!subject) return '';
+        return `${item.isPersona ? 'persona' : 'character'}:${subject.id ?? normalizeName(subject.name)}`;
+    }
 
     // Character resolution with the C4 fallback tiers (active -> bound ->
     // all). `roster` here is meant to be the ALREADY-ACTIVE subset (see
@@ -200,9 +290,9 @@ export function parseTriggers(input, context = {}) {
                     if (parsed.nsfw === true) modifiers.push('nsfw');
                     const item = { char, modifiers };
                     if (typeof parsed.outfit === 'string' && parsed.outfit) {
-                        item.outfit = parsed.outfit;
+                        item.outfitRequested = true;
                         const matched = matchOutfit(parsed.outfit, outfitsForChar(char));
-                        if (matched) item.outfitTags = matched.tags;
+                        attachOutfit(item, matched, 'explicit', parsed.outfit);
                     }
                     if (modifiers.some(m => VIEW_MODIFIERS.has(m))) {
                         lastViewModsByChar.set(char.id, modifiers.filter(m => VIEW_MODIFIERS.has(m)));
@@ -287,11 +377,10 @@ export function parseTriggers(input, context = {}) {
         const outfitTokens = tokens.filter(t => !VIEW_MODIFIERS.has(t) && t !== 'nsfw');
 
         const subject = char ?? persona;
-        let outfitName = null;
-        let outfitTags = '';
+        let matchedOutfit = null;
         for (const token of outfitTokens) {
             const found = matchOutfit(token, outfitsForChar(subject));
-            if (found) { outfitName = found.name; outfitTags = found.tags; break; }
+            if (found) { matchedOutfit = found; break; }
         }
 
         let effectiveViewMods = viewMods;
@@ -305,7 +394,8 @@ export function parseTriggers(input, context = {}) {
         const item = char
             ? { char, modifiers }
             : { isPersona: true, persona, modifiers };
-        if (outfitName) { item.outfit = outfitName; item.outfitTags = outfitTags; }
+        if (outfitTokens.length) item.outfitRequested = true;
+        if (matchedOutfit) attachOutfit(item, matchedOutfit, 'explicit');
         return charSlotToken(foundChars.push(item) - 1);
     });
 
@@ -331,6 +421,15 @@ export function parseTriggers(input, context = {}) {
             }
         }
     }
+
+    // 7. Lorebook-style automatic outfits. Runs LAST, on the scene prose only
+    // (trigger tokens are already slot placeholders), so keyword matching
+    // never sees compiler-expanded character tags. It only ASSIGNS clothing
+    // to subjects that were already resolved by an explicit trigger — it can
+    // never introduce a character from generic prose.
+    // Precedence: explicit `$Name:outfit` > owned auto outfit > shared auto
+    // outfit (only when exactly one subject is in frame, otherwise ambiguous).
+    resolveAutomaticOutfits(text, foundChars, outfits, attachOutfit, subjectOf, subjectKey);
 
     // Clean up excessive whitespace/commas
     const residualPrompt = text

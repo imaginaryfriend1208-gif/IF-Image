@@ -196,6 +196,24 @@ function collectMatrixTags(char, mods) {
 }
 
 /**
+ * Resolve the clothing text an outfit contributes for one dialect.
+ *
+ * `dialectHints[dialect]` is an optional per-dialect override authored on the
+ * outfit record: the same garment reads very differently as Krea prose
+ * ('a loose silk nightgown') and as booru tags ('nightgown, silk'). An empty
+ * or missing hint falls back to the shared `tags` field, so legacy outfits
+ * (which carry no hints at all) render byte-identically to before.
+ * @param {object} item - a parseTriggers character entry
+ * @param {string} dialect - 'krea' | 'anima' | 'illus'
+ * @returns {string} raw clothing text, NOT yet booru-normalized
+ */
+export function resolveOutfitText(item, dialect) {
+    const hint = item?.outfitRecord?.dialectHints?.[dialect];
+    if (typeof hint === 'string' && hint.trim()) return hint.trim();
+    return typeof item?.outfitTags === 'string' ? item.outfitTags : '';
+}
+
+/**
  * Render a character entity for a specific dialect.
  * @param {object} item - from parseTriggers ({ char, modifiers, isPersona, persona })
  * @param {string} dialect - 'krea' | 'anima' | 'illus'
@@ -203,7 +221,7 @@ function collectMatrixTags(char, mods) {
  */
 export function renderCharacterForDialect(item, dialect) {
     if (item.isPersona && item.persona) {
-        return renderPersonaForDialect(item.persona, dialect, item.modifiers);
+        return renderPersonaForDialect(item.persona, dialect, item.modifiers, item);
     }
     const char = item.char;
     if (!char) return '';
@@ -212,6 +230,7 @@ export function renderCharacterForDialect(item, dialect) {
     const isBack = mods.includes('back');
     const isNsfw = mods.includes('nsfw');
     const matrix = collectMatrixTags(char, mods);
+    const outfitText = resolveOutfitText(item, dialect);
 
     if (dialect === 'krea') {
         // Prose representation
@@ -225,7 +244,7 @@ export function renderCharacterForDialect(item, dialect) {
             if (matrix.nsfwTags.length) text += `, ${matrix.nsfwTags.join(', ')}`;
             else if (char.nsfwExtra) text += `, ${char.nsfwExtra}`;
         }
-        if (item.outfitTags) text += `, ${item.outfitTags}`;
+        if (outfitText) text += `, ${outfitText}`;
         return text;
     }
 
@@ -240,7 +259,7 @@ export function renderCharacterForDialect(item, dialect) {
             if (matrix.nsfwTags.length) parts.push(normalizeBooruTags(matrix.nsfwTags.join(', ')));
             else if (char.nsfwExtra) parts.push(normalizeBooruTags(char.nsfwExtra));
         }
-        if (item.outfitTags) parts.push(normalizeBooruTags(item.outfitTags));
+        if (outfitText) parts.push(normalizeBooruTags(outfitText));
         return parts.filter(Boolean).join(', ');
     }
 
@@ -254,7 +273,7 @@ export function renderCharacterForDialect(item, dialect) {
         if (matrix.nsfwTags.length) tags.push(normalizeBooruTags(matrix.nsfwTags.join(', ')));
         else if (char.nsfwExtra) tags.push(normalizeBooruTags(char.nsfwExtra));
     }
-    if (item.outfitTags) tags.push(normalizeBooruTags(item.outfitTags));
+    if (outfitText) tags.push(normalizeBooruTags(outfitText));
 
     return tags.filter(Boolean).join(', ');
 }
@@ -267,8 +286,9 @@ export function renderCharacterForDialect(item, dialect) {
  * @param {object} persona
  * @param {string} dialect
  * @param {string[]} [modifiers] - the scene's own trigger modifiers (back/full/nsfw)
+ * @param {object} [item] - the parseTriggers entry, when the persona wears an outfit
  */
-export function renderPersonaForDialect(persona, dialect, modifiers = []) {
+export function renderPersonaForDialect(persona, dialect, modifiers = [], item = null) {
     if (!persona) return '';
     let mode = persona.povMode || 'auto';
 
@@ -293,10 +313,13 @@ export function renderPersonaForDialect(persona, dialect, modifiers = []) {
         return '';
     }
 
-    // 'full'
+    // 'full' - the only POV mode with the persona's body in frame, so the
+    // only one where clothing is meaningful. hidden/hands returned above.
+    const outfitText = resolveOutfitText(item, dialect);
     if (dialect === 'krea') {
         // Krea: natural description + persona's own krea style hints
         let text = persona.natural || persona.facts || 'a companion';
+        if (outfitText) text += `, ${outfitText}`;
         const h = persona.dialectHints?.krea;
         if (h?.stylePhrase) text += `, ${h.stylePhrase}`;
         if (h?.lighting) text += `, ${h.lighting}`;
@@ -305,6 +328,7 @@ export function renderPersonaForDialect(persona, dialect, modifiers = []) {
     }
     // Anima/Illustrious: countTag + booru + persona's own dialect hints
     const tags = [persona.countTag || '1boy', normalizeBooruTags(persona.booru || '')];
+    if (outfitText) tags.push(normalizeBooruTags(outfitText));
     if (dialect === 'anima') {
         const h = persona.dialectHints?.anima;
         if (h?.booruTags) tags.push(normalizeBooruTags(h.booruTags));
