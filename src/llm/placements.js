@@ -1,188 +1,222 @@
-// IF Image - Chat placement resolution: validates LLM output, resolves
-// anchor text → message index. Pure functions — no ST/DOM deps.
+// IF Image - Chat placement validation and subject-token preservation.
+// Pure functions only: anchors, structured metadata, repair, and rewrite
+// fallback are resolved before any marker reaches the compiler/backend.
 
-/**
- * Parse a size string like "832x1216" into {width, height}.
- * @param {string} text
- * @returns {{ width: number, height: number } | null}
- */
+import {
+    extractSubjectTokens,
+    repairBareSubjectNames,
+    resolveDeclaredSubjects,
+    validateScenePrompt,
+} from './subjects.js';
+
 export function parseSize(text) {
     if (typeof text !== 'string') return null;
-    const m = text.trim().toLowerCase().match(/^(\d{2,4})x(\d{2,4})$/);
-    if (!m) return null;
-    const width = Number(m[1]);
-    const height = Number(m[2]);
-    return (width >= 64 && width <= 2048 && height >= 64 && height <= 2048)
+    const match = text.trim().toLowerCase().match(/^(\d{2,4})x(\d{2,4})$/);
+    if (!match) return null;
+    const width = Number(match[1]);
+    const height = Number(match[2]);
+    return width >= 64 && width <= 2048 && height >= 64 && height <= 2048
         ? { width, height }
         : null;
 }
 
-/**
- * Normalize a string for fuzzy comparison: lowercase, strip punctuation,
- * collapse whitespace.
- * @param {string} text
- * @returns {string}
- */
 function normalize(text) {
-    return text
+    return String(text ?? '')
         .toLowerCase()
         .replace(/[^\p{L}\p{N}\s]/gu, ' ')
         .replace(/\s+/g, ' ')
         .trim();
 }
 
-/**
- * Tokenize a string into a Set of lowercase words.
- * @param {string} text
- * @returns {Set<string>}
- */
 function tokenize(text) {
     return new Set(normalize(text).split(' ').filter(Boolean));
 }
 
-/**
- * Jaccard similarity between two token sets.
- * @param {Set<string>} a
- * @param {Set<string>} b
- * @returns {number}
- */
 function jaccard(a, b) {
     if (!a.size && !b.size) return 1;
-    let inter = 0;
-    for (const w of a) if (b.has(w)) inter++;
-    const union = a.size + b.size - inter;
-    return union ? inter / union : 0;
+    let intersection = 0;
+    for (const value of a) if (b.has(value)) intersection += 1;
+    const union = a.size + b.size - intersection;
+    return union ? intersection / union : 0;
 }
 
-/**
- * Resolve an anchor string to a message index in the chat array.
- *
- * Three-layer matching:
- * 1. Exact substring — body.includes(needle) on the full text.
- * 2. Normalized substring — stripped punctuation, collapsed whitespace.
- * 3. Fuzzy — Jaccard similarity ≥ 0.5 on the last-N-tokens window.
- *
- * @param {Array<object>} chat - the SillyTavern chat array
- * @param {string} anchor - the LLM-provided anchor text
- * @param {{ onlyCharacter?: boolean }} [opts]
- * @returns {number|null} message index or null if no match
- */
+function isUserMessage(message) {
+    return message?.role === 'user' || message?.is_user === true;
+}
+
 export function resolveAnchor(chat, anchor, { onlyCharacter = true } = {}) {
-    if (typeof anchor !== 'string') return null;
+    if (typeof anchor !== 'string' || !anchor.trim()) return null;
     const needle = anchor.trim();
-    if (!needle) return null;
     const needleNorm = normalize(needle);
     if (!needleNorm) return null;
     const needleTokens = tokenize(needle);
-
     let bestFuzzyIdx = null;
     let bestFuzzyScore = 0;
 
     for (let i = (chat?.length ?? 0) - 1; i >= 0; i--) {
-        const m = chat[i];
-        if (!m || m.is_system) continue;
-        if (onlyCharacter && m.role === 'user') continue;
-        const body = m.mes ?? m.content ?? '';
+        const message = chat[i];
+        if (!message || message.is_system || (onlyCharacter && isUserMessage(message))) continue;
+        const body = message.mes ?? message.content ?? '';
         if (typeof body !== 'string' || !body) continue;
-
-        // Layer 1: exact substring
         if (body.includes(needle)) return i;
-
-        // Layer 2: normalized substring
         const bodyNorm = normalize(body);
         if (bodyNorm.includes(needleNorm)) return i;
-
-        // Layer 3: fuzzy — last 30 tokens of body vs anchor
-        const bodyTokens = bodyNorm.split(' ').filter(Boolean);
-        const tail = bodyTokens.slice(-30);
+        const tail = bodyNorm.split(' ').filter(Boolean).slice(-30);
         const score = jaccard(new Set(tail), needleTokens);
         if (score > bestFuzzyScore) {
             bestFuzzyScore = score;
             bestFuzzyIdx = i;
         }
     }
-
     return bestFuzzyScore >= 0.5 ? bestFuzzyIdx : null;
 }
 
+function validationErrors(validation) {
+    const errors = [];
+    if (validation.empty) errors.push('prompt is empty');
+    if (validation.missing.length) errors.push(`missing required subjects: ${validation.missing.join(', ')}`);
+    if (validation.added.length) errors.push(`added undeclared subjects: ${validation.added.join(', ')}`);
+    if (validation.unknown.length) errors.push(`unknown subject tokens: ${validation.unknown.join(', ')}`);
+    if (validation.nonCanonical.length) errors.push(`non-canonical tokens: ${validation.nonCanonical.join(', ')}`);
+    if (validation.styleLeak) errors.push('prompt contains compiler-owned style, quality, or LoRA content');
+    return errors;
+}
+
 /**
- * Validate raw LLM JSON output into a list of placements.
- * Drops invalid entries silently (no throw).
+ * Validate planner output. Invalid scene entries are rejected, while a
+ * legacy item without `subjects` remains parseable if its prompt itself is
+ * safe. Structured entries may repair exact declared bare names once.
  *
- * @param {object} parsed - raw parsed JSON from LLM
- * @param {Array<object>} chat - the SillyTavern chat array
- * @param {number} count - desired number of images
- * @param {{ onlyCharacter?: boolean }} [opts]
- * @returns {Array<{ messageId: number, prompt: string, negative?: string, width?: number, height?: number }>}
+ * @returns {Array<object>} with non-enumerable `.diagnostics`
  */
-export function validatePlacements(parsed, chat, count, { onlyCharacter = true } = {}) {
-    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.images)) return [];
+export function validatePlacements(parsed, chat, count, {
+    onlyCharacter = true, subjectCatalog = [], forbiddenFragments = [],
+} = {}) {
     const out = [];
-    for (const img of parsed.images) {
-        if (typeof img?.prompt !== 'string' || !img.prompt.trim()) continue;
+    const diagnostics = [];
+    const requested = Number(count);
+    const limit = Number.isFinite(requested) ? Math.max(0, Math.floor(requested)) : 0;
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.images) || limit === 0) {
+        Object.defineProperty(out, 'diagnostics', { value: diagnostics, enumerable: false });
+        return out;
+    }
+
+    for (let sourceIndex = 0; sourceIndex < parsed.images.length; sourceIndex++) {
+        const img = parsed.images[sourceIndex];
+        if (typeof img?.prompt !== 'string' || !img.prompt.trim()) {
+            diagnostics.push({ index: sourceIndex, errors: ['prompt is empty'] });
+            continue;
+        }
         const anchor = typeof img.anchor === 'string' ? img.anchor : img.text ?? '';
         const messageId = resolveAnchor(chat, anchor, { onlyCharacter });
-        if (messageId === null) continue;
-        // Deduplicate — only one image per message.
-        if (out.some(p => p.messageId === messageId)) continue;
+        if (messageId === null) {
+            diagnostics.push({ index: sourceIndex, errors: ['anchor did not resolve'] });
+            continue;
+        }
+        if (out.some(placement => placement.messageId === messageId)) {
+            diagnostics.push({ index: sourceIndex, errors: ['duplicate message anchor'] });
+            continue;
+        }
+
+        const declared = resolveDeclaredSubjects(img.subjects, subjectCatalog);
+        if (declared.errors.length) {
+            diagnostics.push({ index: sourceIndex, errors: declared.errors });
+            continue;
+        }
+        let prompt = img.prompt.trim();
+        let repaired = [];
+        if (declared.mode === 'structured' && declared.tokens.length) {
+            const result = repairBareSubjectNames(prompt, subjectCatalog, { requiredTokens: declared.tokens });
+            prompt = result.prompt;
+            repaired = result.repaired;
+        }
+
+        const extracted = extractSubjectTokens(prompt, subjectCatalog);
+        const requiredTokens = declared.mode === 'structured' ? declared.tokens : extracted.tokens;
+        const allowedTokens = declared.mode === 'structured' ? declared.tokens : extracted.tokens;
+        const scene = validateScenePrompt(prompt, subjectCatalog, {
+            requiredTokens,
+            allowedTokens,
+            forbiddenFragments,
+        });
+        if (!scene.ok) {
+            diagnostics.push({ index: sourceIndex, errors: validationErrors(scene), requiredTokens });
+            continue;
+        }
+
         const size = parseSize(img.size);
         out.push({
             messageId,
-            prompt: img.prompt.trim(),
-            negative: typeof img.negative === 'string' ? img.negative.trim() : '',
+            prompt,
+            negative: '', // deterministic compiler/profile owns negatives
+            subjects: requiredTokens,
+            subjectMode: declared.mode,
+            ...(repaired.length ? { repairedSubjects: repaired } : {}),
             ...(size ? { width: size.width, height: size.height } : {}),
         });
-        if (out.length >= count) break;
+        if (out.length >= limit) break;
     }
+    Object.defineProperty(out, 'diagnostics', { value: diagnostics, enumerable: false });
     return out;
 }
 
 /**
- * Merge a chat_rewrite reply back onto the planned placements.
- *
- * The rewrite pass may only change prompt/negative/size. messageId, order,
- * and array length are invariant: an entry the LLM skipped, mangled, or
- * indexed out of range leaves its placement untouched, so a bad rewrite
- * reply degrades to the original plan instead of losing images.
- *
- * @param {object} parsed - raw parsed JSON from the rewrite call
- * @param {Array<{ messageId: number, prompt: string, negative?: string, width?: number, height?: number }>} placements
- * @returns {{ placements: Array<object>, changed: number }}
+ * Merge rewrite output while preserving each draft token set. A malformed,
+ * identity-changing, style-leaking or unknown-token rewrite falls back to the
+ * valid draft independently, without losing other successful rewrites.
  */
-export function validateRewrites(parsed, placements) {
+export function validateRewrites(parsed, placements, {
+    subjectCatalog = [], forbiddenFragments = [],
+} = {}) {
     const base = Array.isArray(placements) ? placements : [];
-    const out = base.map(p => ({ ...p }));
+    const out = base.map(placement => ({ ...placement, subjects: [...(placement.subjects ?? [])] }));
+    const rejected = [];
     if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.images)) {
-        return { placements: out, changed: 0 };
+        return { placements: out, changed: 0, rejected };
     }
 
     const seen = new Set();
     let changed = 0;
-
     for (const img of parsed.images) {
         if (!img || typeof img !== 'object') continue;
-        const idx = Number(img.index);
-        if (!Number.isInteger(idx) || idx < 0 || idx >= out.length) continue;
-        // One rewrite per index; a repeated index is ignored.
-        if (seen.has(idx)) continue;
+        const index = Number(img.index);
+        if (!Number.isInteger(index) || index < 0 || index >= out.length || seen.has(index)) continue;
+        const promptInput = typeof img.prompt === 'string' ? img.prompt.trim() : '';
+        if (!promptInput) continue;
+        seen.add(index);
 
-        const prompt = typeof img.prompt === 'string' ? img.prompt.trim() : '';
-        if (!prompt) continue; // keep the original prompt
-
-        seen.add(idx);
-        const target = out[idx];
-        if (prompt !== target.prompt) changed++;
-        target.prompt = prompt;
-
-        if (typeof img.negative === 'string' && img.negative.trim()) {
-            target.negative = img.negative.trim();
+        const target = out[index];
+        const requiredTokens = Array.isArray(target.subjects) && target.subjects.length
+            ? target.subjects
+            : extractSubjectTokens(target.prompt, subjectCatalog).tokens;
+        const declared = resolveDeclaredSubjects(img.subjects, subjectCatalog);
+        if (declared.mode === 'structured'
+            && (declared.errors.length
+                || declared.tokens.length !== requiredTokens.length
+                || declared.tokens.some(token => !requiredTokens.includes(token)))) {
+            rejected.push({ index, errors: declared.errors.length ? declared.errors : ['rewrite subjects differ from draft'] });
+            continue;
         }
+
+        const repair = repairBareSubjectNames(promptInput, subjectCatalog, { requiredTokens });
+        const scene = validateScenePrompt(repair.prompt, subjectCatalog, {
+            requiredTokens,
+            allowedTokens: requiredTokens,
+            forbiddenFragments,
+        });
+        if (!scene.ok) {
+            rejected.push({ index, errors: validationErrors(scene) });
+            continue;
+        }
+
+        if (repair.prompt !== target.prompt) changed += 1;
+        target.prompt = repair.prompt;
+        target.negative = '';
         const size = parseSize(img.size);
         if (size) {
             target.width = size.width;
             target.height = size.height;
         }
     }
-
-    return { placements: out, changed };
+    return { placements: out, changed, rejected };
 }

@@ -97,7 +97,7 @@ test('validatePlacements: valid JSON returns placements', () => {
     assert.equal(result.length, 2);
     assert.equal(result[0].messageId, 3);
     assert.equal(result[0].prompt, '1girl, silver hair, closing door');
-    assert.equal(result[0].negative, 'lowres');
+    assert.equal(result[0].negative, '');
     assert.deepEqual({ width: result[0].width, height: result[0].height }, { width: 832, height: 1216 });
     assert.equal(result[1].messageId, 5);
 });
@@ -241,7 +241,7 @@ test('validateRewrites: applies negative and size when valid', () => {
         images: [{ index: 0, prompt: 'revised', negative: 'bad hands', size: '1216x832' }],
     };
     const { placements } = validateRewrites(parsed, planned);
-    assert.equal(placements[0].negative, 'bad hands');
+    assert.equal(placements[0].negative, '');
     assert.equal(placements[0].width, 1216);
     assert.equal(placements[0].height, 832);
 });

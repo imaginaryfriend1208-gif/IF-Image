@@ -18,12 +18,14 @@ import { getAllStyles, getAllPersonas, savePersona, createDefaultPersona, applyP
 import { getAllOutfits } from './src/storage/outfits.js';
 import { resolveActiveCharacters } from './src/prompt/binding.js';
 import { parseTriggers } from './src/prompt/triggers.js';
-import { assemblePrompt, resolveProfileKey, mergeProfileParams, applyMarkerParamOverrides, resolveLockedSeed, resolveSizeKeyword } from './src/prompt/render.js';
-import { getActiveProfile, mergeParams } from './src/backends/checkpoint-profiles.js';
+import { assemblePrompt, mergeProfileParams, applyMarkerParamOverrides, resolveLockedSeed, resolveSizeKeyword } from './src/prompt/render.js';
+import { mergeParams } from './src/backends/checkpoint-profiles.js';
 import { cleanupEnvelope } from './src/prompt/cleanup.js';
 import { applyReplaceRules } from './src/prompt/replace.js';
 import { maskLoras, unmaskLoras, reorderPrompt, collectLoras } from './src/prompt/ordering.js';
-import { resolveActiveStyle, readChatStyleId, writeChatStyleId } from './src/prompt/active-style.js';
+import { readChatStyleId, writeChatStyleId } from './src/prompt/active-style.js';
+import { resolveBackendKind, resolveGenerationContext } from './src/prompt/generation-context.js';
+import { buildSubjectCatalog, extractSubjectTokens, repairBareSubjectNames, resolveDeclaredSubjects, styleLeakFragments, validateScenePrompt } from './src/llm/subjects.js';
 import { PROFILES } from './src/profiles.js';
 import { createEngine } from './src/llm/engine.js';
 import { applyPlacements as injectPlacements } from './src/llm/inject.js';
@@ -70,9 +72,7 @@ function notify(kind, message) {
 
 /** Effective backend kind for chat generation, derived from persisted settings. */
 function defaultBackendKind() {
-    const pref = settings.generation.backend;   // null-safe: undefined !== 'nai'
-    if (pref === 'nai') return 'nai';
-    return settings.backends.comfy.connection === 'a1111' ? 'a1111' : 'comfy';
+    return resolveBackendKind(settings);
 }
 
 function defaultProfileKey() {
@@ -157,50 +157,51 @@ jQuery(async () => {
     // ------------------------------------------------------------------
     const execute = createExecutor({ nai, comfy, a1111, getSettings: () => settings });
 
-    function compile(content) {
+    function parseContent(content, { warnFallback = true } = {}) {
         const activeRoster = resolveActiveCharacters(roster.characters, currentCardId(), getContext().getCurrentChatId?.());
-        const parsed = parseTriggers(content, {
+        return parseTriggers(content, {
             roster: activeRoster,
             fullRoster: roster.characters,
             styles: roster.styles,
             defaultPersona: roster.persona,
             personas: roster.personas,
             outfits: roster.outfits,
-            onFallback: (tier, token) => notify('warning', `Character trigger "$${token}" resolved via ${tier} fallback (not active for this chat/card).`),
+            onFallback: warnFallback
+                ? (tier, token) => notify('warning', `Character trigger "$${token}" resolved via ${tier} fallback (not active for this chat/card).`)
+                : undefined,
         });
+    }
 
-        // A style only ever applied when the marker text literally said
-        // {{style: Name}}, which the LLM is instructed never to emit — so in
-        // the chat-placement flow no style (and no style LoRA) was reaching
-        // the prompt at all. Fall back to the style attached to this chat,
-        // then to the configured default. Injecting into parsed.styles here
-        // means the hints and the LoRA both travel their existing paths.
-        const activeStyle = resolveActiveStyle({
-            explicitStyles: parsed.styles,
-            chatStyleId: readChatStyleId(getContext()),
-            defaultStyleId: settings.generation?.defaultStyleId,
-            styles: roster.styles,
+    function effectiveGenerationContext(source = null) {
+        const parsedTriggers = typeof source === 'string' ? parseContent(source, { warnFallback: false }) : source;
+        return resolveGenerationContext({ settings, roster, chatStyleId: readChatStyleId(getContext()), parsedTriggers });
+    }
+
+    function fullSubjectCatalog() {
+        return buildSubjectCatalog({
+            characters: roster.characters, personas: roster.personas, persona: roster.persona,
+            includeAll: true, maxSubjects: Number.MAX_SAFE_INTEGER,
         });
-        if (activeStyle.style && activeStyle.source !== 'marker') {
-            parsed.styles = [...parsed.styles, activeStyle.style];
-        } else if (activeStyle.missingId) {
-            notify('warning', 'The style chosen for this chat no longer exists — no style was applied. Pick another in the Generation tab.');
+    }
+
+    function compile(content) {
+        const unknownSubjects = extractSubjectTokens(content, fullSubjectCatalog()).unknown;
+        if (unknownSubjects.length) {
+            const err = new Error(`Unknown subject token: ${unknownSubjects.join(', ')}`);
+            err.code = 'UNKNOWN_SUBJECT';
+            throw err;
         }
-        // R2/D14: with the A1111-compatible SD connection, the ACTIVE saved
-        // profile (Settings tab) supplies both the checkpoint title and the
-        // prompt style (still beaten by a marker {{dialect}} override). With
-        // no active profile the persisted checkpoint selection is used with
-        // the fallback prompt style. The checkpoint is NEVER derived from a
-        // profile/family name — only the reverse.
-        const backendKind = defaultBackendKind();
-        const activeProfile = backendKind === 'a1111' ? getActiveProfile(settings) : null;
-        const checkpointTitle = backendKind === 'a1111'
-            ? (activeProfile?.entry.checkpoint
-                || settings.generation?.checkpoint || settings.backends.a1111.checkpoint || '')
-            : '';
-        const configuredProfileKey = activeProfile?.entry.profile ?? defaultProfileKey();
-        const { profileKey } = resolveProfileKey(parsed.dialectOverride, configuredProfileKey);
-        const baseProfile = PROFILES[profileKey] ?? PROFILES.anima;
+        const parsed = parseContent(content);
+        // Planner and compiler consume this same effective context.
+        const generation = effectiveGenerationContext(parsed);
+        const activeStyle = generation.activeStyle;
+        if (activeStyle.style && activeStyle.source !== 'marker') parsed.styles = [...parsed.styles, activeStyle.style];
+        else if (activeStyle.missingId) notify('warning', 'The style chosen for this chat no longer exists — no style was applied. Pick another in the Generation tab.');
+        const backendKind = generation.backendKind;
+        const activeProfile = generation.activeCheckpointProfile;
+        const checkpointTitle = generation.checkpointTitle;
+        const profileKey = generation.profileKey;
+        const baseProfile = generation.profile;
         const effectiveProfile = mergeProfileParams(baseProfile, settings.generation?.params?.[profileKey]);
         const assembled = assemblePrompt(parsed, baseProfile.dialect, effectiveProfile);
 
@@ -307,13 +308,14 @@ jQuery(async () => {
         },
         compile,
         notify,
+        resolveGenerationContext: source => effectiveGenerationContext(source),
     });
 
     const activeLlmAborts = new Set();
     async function rewriteWithAbort(content, opts = {}) {
         const controller = new AbortController();
         activeLlmAborts.add(controller);
-        logEvent('llm_request', { content: String(content).slice(0, 200) });
+        logEvent('llm_request', { contentLength: String(content).length });
         try {
             const result = await engine.rewrite(content, { ...opts, signal: controller.signal });
             logEvent('llm_reply', { method: result.method, entries: result.entries.length, error: result.error });
@@ -528,7 +530,28 @@ jQuery(async () => {
     // prompt; parser-level <size>/<negative> overrides ride along in a
     // hash-keyed side map consumed by the onMarker wrapper below.
     // ------------------------------------------------------------------
-    const overridesByHash = new Map(); // contentHash(prompt) -> {width,height,negative}
+    const finalSceneMetadata = new Map(); // exact marker content -> queued metadata
+    function registerFinalScene(content, overrides = {}) {
+        const queue = finalSceneMetadata.get(content) ?? [];
+        const item = { overrides };
+        queue.push(item);
+        finalSceneMetadata.set(content, queue);
+        while (finalSceneMetadata.size > 64) finalSceneMetadata.delete(finalSceneMetadata.keys().next().value);
+        setTimeout(() => {
+            const pending = finalSceneMetadata.get(content);
+            if (!pending) return;
+            const index = pending.indexOf(item);
+            if (index >= 0) pending.splice(index, 1);
+            if (!pending.length) finalSceneMetadata.delete(content);
+        }, 15000);
+    }
+    function takeFinalScene(content) {
+        const queue = finalSceneMetadata.get(content);
+        if (!queue?.length) return null;
+        const item = queue.shift();
+        if (!queue.length) finalSceneMetadata.delete(content);
+        return item;
+    }
     function transformIfImageBlocks(messageId) {
         if (!settings.enabled || !settings.generation.enabled) return;
         if (settings.generation.mode !== 'full') return;
@@ -545,20 +568,21 @@ jQuery(async () => {
         const mes = message.mes.replace(/<ifimage[\s\S]*?>[\s\S]*?<\/ifimage>/gi, (block) => {
             const entry = parseLlmReply(block)[0];
             if (!entry?.prompt) return block;
-            // The prompt must never contain the end tag, or the marker would
-            // terminate early on render.
-            const promptText = entry.prompt.split(tags.endTag).join(' ').trim();
-            if (!promptText) return block;
-            // Bounded side map: parser-level overrides only matter for the
-            // detection pass that follows this event; old hashes are evicted.
-            if (overridesByHash.size > 64) {
-                overridesByHash.delete(overridesByHash.keys().next().value);
+            const catalog = fullSubjectCatalog();
+            const declared = resolveDeclaredSubjects(entry.subjects, catalog);
+            if (declared.errors.length) return block;
+            let promptText = entry.prompt.split(tags.endTag).join(' ').trim();
+            if (declared.mode === 'structured' && declared.tokens.length) {
+                promptText = repairBareSubjectNames(promptText, catalog, { requiredTokens: declared.tokens }).prompt;
             }
-            overridesByHash.set(contentHash(promptText), {
-                width: entry.width,
-                height: entry.height,
-                negative: entry.negative,
+            const generation = effectiveGenerationContext(promptText);
+            const validation = validateScenePrompt(promptText, catalog, {
+                requiredTokens: declared.mode === 'structured' ? declared.tokens : [],
+                allowedTokens: declared.mode === 'structured' ? declared.tokens : null,
+                forbiddenFragments: styleLeakFragments(generation.activeStyle?.style, generation.dialectKey),
             });
+            if (!validation.ok) return block;
+            registerFinalScene(promptText, { width: entry.width, height: entry.height });
             changed = true;
             return `${tags.startTag} ${promptText} ${tags.endTag}`;
         });
@@ -596,7 +620,7 @@ jQuery(async () => {
             const controller = new AbortController();
             activeLlmAborts.add(controller);
             if (signal) signal.addEventListener('abort', () => controller.abort(), { once: true });
-            logEvent('llm_request', { content: `[chat_place × ${count}]` });
+            logEvent('llm_request', { requestType: 'chat_place', count });
             try {
                 const result = await engine.planChatImages(count, { signal: controller.signal });
                 logEvent('llm_reply', { method: result.method, placements: result.placements.length });
@@ -610,7 +634,9 @@ jQuery(async () => {
             const tags = settings.generation ?? {};
             const { touched } = injectPlacements(placements, {
                 chat: ctx.chat ?? [],
-                mode: settings.generation?.mode ?? 'direct',
+                // The planner already returned validated scenes. Standard
+                // markers let the one existing runtime/pipeline pick them up.
+                mode: 'direct',
                 startTag: tags.startTag ?? 'image###',
                 endTag: tags.endTag ?? '###',
                 saveChat: () => ctx.saveChat?.(),
@@ -618,6 +644,10 @@ jQuery(async () => {
                     ? (id, message) => ctx.updateMessageBlock(id, message)
                     : undefined,
                 emit: (id) => eventSource.emit(event_types.MESSAGE_UPDATED, id),
+                onMarkerBuilt: ({ placement, content }) => registerFinalScene(content, {
+                    width: placement.width,
+                    height: placement.height,
+                }),
             });
             return touched.length;
         },
@@ -643,11 +673,11 @@ jQuery(async () => {
         // pipeline owns the assist/full LLM rewrite (after its IDB restore
         // check) via the injected `rewrite` dependency.
         onMarker: (marker) => {
-            const overrides = overridesByHash.get(contentHash(marker.content));
-            if (overrides) {
-                // Marker produced by the <ifimage> transform above: the
-                // prompt is already final; never send it back to the LLM.
-                pipeline.onMarker({ ...marker, final: true, overrides });
+            const finalScene = takeFinalScene(marker.content);
+            if (finalScene) {
+                // Validated planner/transformed scene: preserve restore-before-
+                // rewrite, but do not ask an LLM to rewrite it a third time.
+                pipeline.onMarker({ ...marker, final: true, overrides: finalScene.overrides });
                 return;
             }
             if (settings.generation.mode === 'full') {

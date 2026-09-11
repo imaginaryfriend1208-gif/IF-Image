@@ -72,9 +72,20 @@ function parseIfImageBlocks(text) {
         const prompt = extractTag(block, 'prompt');
         const negative = extractTag(block, 'negative');
         const image = extractTag(block, 'image');
+        const hasSubjects = /<subjects(?:\s[^>]*)?>/i.test(block);
+        const subjectsText = extractTag(block, 'subjects');
         const sizeStr = extractTag(block, 'size');
 
         if (!prompt) continue; // <prompt> is the only required tag
+
+        let subjects;
+        if (hasSubjects) {
+            subjects = null;
+            try {
+                const parsedSubjects = JSON.parse(subjectsText);
+                if (Array.isArray(parsedSubjects)) subjects = parsedSubjects;
+            } catch { /* null is intentionally rejected by structured validation */ }
+        }
 
         let width = 832, height = 1216;
         if (sizeStr) {
@@ -97,6 +108,7 @@ function parseIfImageBlocks(text) {
             height,
             prompt,
             negative,
+            ...(hasSubjects ? { subjects } : {}),
             raw: block,
             _pos: pos,
         });

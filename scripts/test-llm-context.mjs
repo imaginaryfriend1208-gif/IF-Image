@@ -72,10 +72,10 @@ test('scene window: last N messages in order', () => {
         contextProfile: {},
     });
     // Last 4: user(2), character(3), user(4), character(5) → roles: User/Character/User/Character
-    assert.match(result.sceneText, /User: Message 2/);
-    assert.match(result.sceneText, /Character: Message 3/);
-    assert.match(result.sceneText, /User: Message 4/);
-    assert.match(result.sceneText, /Character: Message 5/);
+    assert.match(result.sceneText, /\[User — user\]: Message 2/);
+    assert.match(result.sceneText, /\[Character — character\]: Message 3/);
+    assert.match(result.sceneText, /\[User — user\]: Message 4/);
+    assert.match(result.sceneText, /\[Character — character\]: Message 5/);
 });
 
 test('scene window clamp: minimum 2, maximum 8', () => {
@@ -129,9 +129,10 @@ test('character block from roster', () => {
         contextProfile: {},
         roster,
     });
-    assert.ok(result.charBlock.includes('Lyna'));
-    assert.ok(result.charBlock.includes('silver hair'));
-    assert.ok(result.charBlock.includes('Age 24'));
+    assert.ok(result.subjectBlock.includes('Lyna'));
+    assert.match(result.subjectBlock, /Exact token: \$Lyna/);
+    assert.ok(!result.subjectBlock.includes('silver hair'));
+    assert.ok(!result.subjectBlock.includes('Age 24'));
 });
 
 test('persona block from roster', () => {
@@ -142,8 +143,10 @@ test('persona block from roster', () => {
         contextProfile: {},
         roster,
     });
-    assert.ok(result.personaBlock.includes('User'));
-    assert.ok(result.personaBlock.includes('1boy'));
+    assert.ok(result.subjectBlock.includes('User'));
+    assert.ok(result.subjectBlock.includes('$me'));
+    assert.ok(!result.subjectBlock.includes('black hair'));
+    assert.equal(result.personaBlock, '');
 });
 
 test('persona block includes aliases and dialectHints', () => {
@@ -167,10 +170,11 @@ test('persona block includes aliases and dialectHints', () => {
         contextProfile: {},
         roster,
     });
-    assert.ok(result.personaBlock.includes('Aliases: user, narrator'));
-    assert.ok(result.personaBlock.includes('Krea: cinematic'));
-    assert.ok(result.personaBlock.includes('Anima: leather jacket'));
-    assert.ok(result.personaBlock.includes('Illus: artistB'));
+    assert.ok(result.subjectBlock.includes('Aliases: user, narrator'));
+    assert.ok(!result.subjectBlock.includes('cinematic'));
+    assert.ok(!result.subjectBlock.includes('leather jacket'));
+    assert.ok(!result.subjectBlock.includes('artistB'));
+    assert.equal(result.personaBlock, '');
 });
 
 test('includeCharCard=false suppresses character block', () => {

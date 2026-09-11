@@ -333,7 +333,7 @@ test('Phase B: dryRun logs the envelope and never enqueues', async () => {
     assert.equal(queue._tasks.size, 0);
     assert.equal(logged.length, 1);
     assert.equal(logged[0].type, 'dry_run');
-    assert.equal(logged[0].detail.prompt, marker.content);
+    assert.equal(logged[0].detail.promptLength, String(marker.content).length);
 });
 
 test('FIX 5: settings.enabled=false is silently skipped', async () => {

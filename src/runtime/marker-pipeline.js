@@ -671,8 +671,8 @@ export function createMarkerPipeline(deps) {
         if (settings.generation.dryRun === true) {
             logEvent?.('dry_run', {
                 key: entry.key,
-                prompt: entry.envelope.prompt,
-                negative: entry.envelope.negative,
+                promptLength: String(entry.envelope.prompt ?? '').length,
+                negativeLength: String(entry.envelope.negative ?? '').length,
                 params: entry.envelope.params,
                 profileKey: entry.profileKey,
                 backend: entry.backend,

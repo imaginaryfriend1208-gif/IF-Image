@@ -20,9 +20,13 @@
  * @param {{ mode?: string, startTag?: string, endTag?: string }} opts
  * @returns {string}
  */
+export function markerContent(prompt, endTag = '###') {
+    return String(prompt ?? '').split(endTag).join(' ').trim();
+}
+
 export function buildMarker(prompt, { mode = 'direct', startTag = 'image###', endTag = '###' } = {}) {
     // A prompt containing the end tag would truncate its own marker.
-    const promptText = String(prompt ?? '').split(endTag).join(' ').trim();
+    const promptText = markerContent(prompt, endTag);
     return mode === 'direct'
         ? `${startTag} ${promptText} ${endTag}`
         : `<ifimage>${promptText}</ifimage>`;
@@ -46,7 +50,7 @@ export function buildMarker(prompt, { mode = 'direct', startTag = 'image###', en
  */
 export function applyPlacements(placements, {
     chat = [], mode = 'direct', startTag = 'image###', endTag = '###',
-    saveChat, updateMessageBlock, emit, logger = console,
+    saveChat, updateMessageBlock, emit, onMarkerBuilt, logger = console,
 } = {}) {
     const list = Array.isArray(placements) ? placements : [];
     const touched = [];
@@ -56,7 +60,11 @@ export function applyPlacements(placements, {
     for (const p of [...list].reverse()) {
         const message = chat[p?.messageId];
         if (!message || seen.has(p.messageId)) continue;
-        const marker = buildMarker(p.prompt, { mode, startTag, endTag });
+        const content = markerContent(p.prompt, endTag);
+        const marker = buildMarker(content, { mode, startTag, endTag });
+        try { onMarkerBuilt?.({ placement: p, content, marker }); } catch (err) {
+            logger.warn?.(`[IF Image] placement metadata registration failed: ${err?.message ?? err}`);
+        }
         const sep = message.mes && !/\s$/.test(message.mes) ? '\n' : '';
         message.mes = `${message.mes ?? ''}${sep}${marker}`;
         seen.add(p.messageId);

@@ -127,7 +127,7 @@ export function createMarkerRuntime({
             const marker = { chatId, messageId, swipeId, revision, occurrence, content };
             onMarker(marker);
             emitted.add(occurrence);
-            logger.log(`[IF Image] Tag detected: ${content}`);
+            logger.log(`[IF Image] Tag detected (${content.length} chars).`);
         }
     }
 

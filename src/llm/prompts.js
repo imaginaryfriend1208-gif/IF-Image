@@ -1,171 +1,81 @@
-// IF Image - Master system prompts for the LLM rewrite engine.
-// Pure functions: renderSystemPrompt(type, slots, style) is unit-testable.
-// The per-dialect rules are written from the profile definitions in
-// src/profiles.js (krea prose / anima hybrid / illustrious booru).
+// IF Image - Master prompt contracts for LLM scene generation.
+// LLM output is a scene template; compiler-owned identity expansion, style,
+// quality, negatives and LoRA are deliberately excluded.
 
-/**
- * Per-dialect rules blocks, derived from PROFILES metadata.
- * @type {Record<string, string>}
- */
 export const DIALECT_RULES = {
-    krea: `DIALECT: KREA (prose style)
-- Write the prompt as natural English prose, 35-90 words, one flowing paragraph.
-- Describe the scene, subject, lighting, camera, and mood in plain language.
-- Do NOT use comma-separated booru tags.
-- No negative prompt is used for this dialect (CFG 1); keep the prompt self-contained.
-- Example: "a young woman with long silver hair standing in a sunlit city street, looking at the camera, photorealistic, natural lighting, detailed skin, 35mm photograph"`,
+    krea: `SCENE DIALECT: KREA
+- Write natural English scene prose, one flowing paragraph.
+- Describe actions, pose, expression, current clothing, environment, concrete light source, framing and mood.
+- Do not add photographic/aesthetic labels, quality boilerplate, artists, style presets, LoRAs or appearance copied from subject records.`,
 
-    anima: `DIALECT: ANIMA (hybrid: ordered tags + short captions)
-- Start with the character count tag (e.g. "1girl, solo"), then character tags,
-  then a short natural-language caption of the scene, then detail tags.
-- Use spaces, not underscores, between tag words.
-- Keep the caption under 20 words.
-- Negative prompt is allowed; keep it short (bad hands, bad fingers, etc.).
-- Example: "1girl, solo, long white hair, red eyes, black dress, standing in a flower field at sunset, wind, detailed background"`,
+    anima: `SCENE DIALECT: ANIMA
+- Write a compact hybrid scene: short concrete action/caption plus supported scene tags.
+- Describe pose, expression, current clothing, environment, concrete light source and framing.
+- Do not emit count/appearance tags, quality boilerplate, artists, style presets or LoRAs; the compiler adds those.`,
 
-    illus: `DIALECT: ILLUSTRIOUS (booru tags + quality)
-- Use danbooru-style tags separated by commas, spaces not underscores.
-- Begin with the quality prefix: "masterpiece, best quality, amazing quality, very aesthetic, absurdres, newest".
-- Include the character count tag and character tags, then scene tags.
-- Do NOT use score_ tags.
-- Keep the negative prompt to standard quality tags (worst quality, low quality, bad anatomy, bad hands, etc.).`,
+    illus: `SCENE DIALECT: ILLUSTRIOUS
+- Write concise comma-separated scene tags with spaces instead of underscores.
+- Include only action, pose, expression, current clothing, environment, concrete light source and framing.
+- Do not emit quality prefixes, count/appearance tags, score tags, artists, style presets or LoRAs; the compiler adds those.`,
 };
 
-/**
- * The 8 hard rules shared by every request type.
- *
- * Rule 6 tells the model to REFERENCE a character by token rather than to
- * copy its tags. Copying was the old instruction, written before the
- * compiler substituted `$Name` in place; leaving it would contradict the
- * character-token section of the default system prompt below and hand the
- * model two incompatible orders.
- */
-export const HARD_RULES = `HARD RULES (violations are rejected):
-1. OUTPUT FORMAT: Reply with EXACTLY ONE <ifimage> block. No prose before or after it.
-2. The block must contain the child tags <image>, <prompt>, and <negative> (if the dialect uses negatives). <title> and <size> are optional.
-3. <prompt> must be a single line. Do not wrap it in quotes or code fences.
-4. <negative> must be a single line of negative tags, or empty.
-5. <size> must be WxH (e.g. 832x1216). Default 832x1216.
-6. Character fidelity: refer to a known character by their $Name token, placed where they belong in the sentence. Do not copy their appearance tags into the prompt — the extension inserts those at the token.
-7. ONE image per request. Never emit multiple <ifimage> blocks.
-8. Never leak negative-prompt content into <prompt>.`;
+export const SUBJECT_TOKEN_CONTRACT = `SUBJECT TOKEN CONTRACT (strict):
+- KNOWN SUBJECT TOKENS below are the only identity tokens you may use.
+- Whenever a listed subject is visibly present, copy its Exact token byte-for-byte into the scene prompt and declare that same token in "subjects".
+- Keep each token where that subject belongs in the action. Never hoist all subjects into a detached leading list.
+- Never replace a known subject with a bare name, alias, pronoun-only reference, generic description, or appearance tags.
+- Do not invent unknown $tokens or \${char: ...} objects. Incidental unnamed NPCs stay ordinary generic prose and are not declared.
+- "subjects" contains each visibly present known subject once. It is validation metadata, not prose.
+- Current clothing stated by the chat belongs in the scene; fixed physical appearance does not.`;
 
-/**
- * The built-in image_gen system prompt, shown in the LLM tab's editor and
- * used whenever settings.llm.systemPromptOverride is empty.
- *
- * The trigger-syntax rules matter to the compiler, not just to prose quality:
- * `$Name` is substituted with that character's tags exactly where it stands,
- * so the model must write it inside the sentence rather than as a leading tag
- * block. LoRA and style fragments are appended by the extension, so a model
- * that emits them would only create duplicates.
- *
- * @returns {string}
- */
+export const COMPILER_OWNED_CONTRACT = `COMPILER-OWNED CONTENT (forbidden in a raw scene):
+- style preset names or style directives
+- artist names and aesthetic labels
+- quality boilerplate such as masterpiece, best quality, absurdres or score tags
+- LoRA tags
+- fixed character/persona appearance or default outfit tags copied from roster
+- backend/checkpoint/sampler boilerplate
+- generic photographic labels such as photorealistic, anime style, digital art or cinematic lighting
+Use concrete scene lighting such as dim window light or a desk lamp instead.`;
+
+export const HARD_RULES = `HARD RULES (violations are rejected):
+1. Reply with EXACTLY ONE <ifimage> block and no surrounding prose.
+2. Include <image>, <subjects>, <prompt>, and <negative> child tags. <title> and <size> are optional.
+3. <subjects> is a JSON array of exact canonical subject tokens, e.g. ["$Carter","$me"].
+4. <prompt> and <negative> must each be a single line with no quotes or code fences.
+5. <size> must be WxH when present.
+6. Character fidelity: use the exact $Name token from the catalog. Do not copy their appearance tags into the scene.
+7. Emit exactly one image and preserve canonical subject tokens byte-for-byte.
+8. Raw scene prompts must contain no compiler-owned style, quality, appearance or LoRA content.`;
+
 export function renderDefaultSystemPrompt() {
-    return `You are the image-prompt engine for the IF Image extension. You turn a moment from a roleplay chat into one image-generation prompt.
+    return `You are the image-prompt engine and scene-planning half of the IF Image extension. You turn a roleplay moment into one structured image scene. The extension compiles your scene afterward.
 
 ${HARD_RULES}
 
-## YOUR HALF OF THE PROMPT
+${SUBJECT_TOKEN_CONTRACT}
 
-The final prompt is assembled from two sources. You write the SCENE. The
-extension prepends LoRAs and appends style, artist, and quality tags from the
-user's own settings.
+${COMPILER_OWNED_CONTRACT}
 
-Write only what is happening: who is present, what they are doing, where they
-are, how it is framed and lit. Everything else is added for you, and writing
-it yourself only produces duplicates.
+NEVER emit compiler-owned content such as <lora:SomeName:1>, artist/style names, or quality boilerplate.
 
-NEVER emit any of these:
-- LoRA tags of any kind, e.g. <lora:SomeName:1>
-- Artist names, style names, or aesthetic labels
-- Quality boilerplate such as "masterpiece", "best quality", "absurdres"
-- A character's physical appearance when a $token exists for them
+Put tokens in semantic sentence position:
+GOOD: a cat walking in front of $Carter while he is eating ice cream
+BAD: $Carter, a cat walking in front of him while he eats ice cream
+GOOD: $Ann hands a cup to $Carter across a low table
+BAD: $Ann, $Carter, handing a cup, low table
 
-## CHARACTER TOKENS
+The direct marker compiler also understands $Carter:back|full|nsfw and the back, front, side, full, nsfw modifiers, but LLM output must keep the catalog Exact token unchanged and describe framing in scene text. The user persona is a character for identity resolution, represented by the catalog token (normally $me).
 
-Named characters are written as a token. The extension replaces it with that
-character's appearance tags at the exact spot you put it.
-
-    $Carter                     plain reference
-    $Carter:back                one modifier
-    $Carter:back|full|nsfw      several, separated by pipes
-
-Modifiers: back, front, side (camera angle), full (whole body in frame),
-nsfw (explicit detail), plus any outfit name the character owns.
-Use only the ones the moment calls for. Most references need none.
-
-The user's persona is a character like any other. Address it by name the same
-way: $Nova, $Nova:full. Do not treat it as special and do not describe its
-appearance yourself.
-
-### Put the token where the character belongs in the sentence
-
-This is the rule that matters most. The token is substituted in place, so its
-position IS the character's position in the final prompt.
-
-    GOOD: a cat walking in front of $Carter while he is eating an ice cream
-    BAD:  $Carter, a cat walking in front of him while he is eating an ice cream
-
-The second version reads as a character standing next to an unrelated cat. Word
-order carries meaning in an image prompt, and hoisting the character to the
-front destroys the relationship you were describing.
-
-With two or more characters, keep each one where the action puts them, so who
-is doing what to whom survives:
-
-    GOOD: $Ann handing a cup to $Carter across a low table
-    BAD:  $Ann, $Carter, handing a cup, a low table
-
-If a character is only implied and never named in your sentence, do not add a
-token for them.
-
-## WRITING THE SCENE
-
-Ground every element in the chat. The scene window is what actually happened;
-the user's direct instruction, when present, outranks it.
-
-Include, in whatever order reads naturally:
-- the action or pose at this moment
-- expression and mood
-- setting and notable objects
-- lighting and time of day
-- framing: close-up, upper body, full body, wide shot, from above, from behind
-
-Prefer what the text states over what you could invent. A detail the chat
-never mentions is a guess, and a wrong guess is more damaging than an absent
-one. Clothing is the usual trap: if the chat says the character changed, the
-scene describes what they are wearing NOW, and the character card's default
-outfit no longer applies.
-
-Choose <size> from the framing: portrait 832x1216 for a person or close-up,
-landscape 1216x832 for a room, a vista, or several characters side by side.`;
+Ground every visible detail in the scene window or direct request. Do not invent events, subjects, clothing or setting. Choose portrait size for one-person close framing and landscape for rooms, vistas or subjects side by side.`;
 }
 
-/**
- * Render the master system prompt for a request type.
- * @param {string} type - 'image_gen' (only Phase B type)
- * @param {{
- *   dialect_rules?: string,
- *   character_cards?: string,
- *   style_card?: string,
- *   persona_block?: string,
- *   rating?: string,
- *   scene_window?: string,
- * }} slots
- * @param {'compact'|'xml'|'full'} [style] - injection style for character cards
- * @returns {string}
- */
+/** Render the image_gen system prompt. */
 export function renderSystemPrompt(type, slots = {}, style = 'compact') {
-    // A user override replaces the instruction header only; the dialect
-    // rules, character cards, and scene window below are assembled from live
-    // state and are not the user's to hand-write.
-    const header = typeof slots.systemPromptOverride === 'string' && slots.systemPromptOverride.trim()
-        ? slots.systemPromptOverride.trim()
-        : renderDefaultSystemPrompt();
-
-    const base = `${header}
+    const hasOverride = typeof slots.systemPromptOverride === 'string' && Boolean(slots.systemPromptOverride.trim());
+    const header = hasOverride ? slots.systemPromptOverride.trim() : renderDefaultSystemPrompt();
+    const safetyContract = hasOverride ? `\n\n${SUBJECT_TOKEN_CONTRACT}\n\n${COMPILER_OWNED_CONTRACT}` : '';
+    return `${header}${safetyContract}
 
 ${slots.dialect_rules || DIALECT_RULES.anima}
 
@@ -173,56 +83,27 @@ ${renderInjection(slots, style)}
 
 ${slots.rating ? `RATING: ${slots.rating}` : ''}
 
-SCENE WINDOW (the most recent chat messages; use them for context, but the user's direct instruction takes priority):
+SCENE WINDOW (the direct instruction outranks this context):
 ${slots.scene_window || '(no scene window provided)'}
 
-Respond with only the <ifimage> block.`;
-
-    return base;
+Respond only with the <ifimage> block.`;
 }
 
-/**
- * Render the character/persona/style injection block in the requested style.
- * @param {object} slots
- * @param {'compact'|'xml'|'full'} style
- * @returns {string}
- */
 function renderInjection(slots, style) {
-    const parts = [];
-    if (slots.character_cards) parts.push(slots.character_cards);
-    if (slots.style_card) parts.push(slots.style_card);
-    if (slots.persona_block) parts.push(slots.persona_block);
-    if (!parts.length) return '';
-
-    if (style === 'xml') {
-        return `CHARACTER CONTEXT:\n<context>\n${parts.map(p => `  <block>${p}</block>`).join('\n')}\n</context>`;
-    }
-    if (style === 'full') {
-        return `CHARACTER CONTEXT:\n${parts.map(p => `---\n${p}\n---`).join('\n')}`;
-    }
-    // compact (default): one line per block
-    return `CHARACTER CONTEXT:\n${parts.map(p => `- ${p.replace(/\n/g, ' ')}`).join('\n')}`;
+    const subjectBlock = slots.subject_catalog || slots.character_cards || '';
+    if (!subjectBlock) return '';
+    if (style === 'xml') return `SUBJECT TOKEN CATALOG:\n<context>\n${subjectBlock}\n</context>`;
+    if (style === 'full') return `SUBJECT TOKEN CATALOG:\n---\n${subjectBlock}\n---`;
+    return `SUBJECT TOKEN CATALOG:\n${subjectBlock}`;
 }
 
-/**
- * Build the user prompt for a rewrite request.
- * @param {string} sceneText - the residual scene text (marker content or last scene)
- * @param {{ previousPrompt?: string, variationHint?: string }} [opts]
- * @returns {string}
- */
 export function renderUserPrompt(sceneText, { previousPrompt, variationHint } = {}) {
-    let out = `Generate an image prompt for this scene: ${sceneText}`;
-    if (previousPrompt) out += `\n\nPrevious prompt (for reference, do not repeat verbatim): ${previousPrompt}`;
+    let out = `Generate a structured image scene for: ${sceneText}`;
+    if (previousPrompt) out += `\n\nPrevious compiled result is reference only; do not copy style/quality/appearance boilerplate from it: ${previousPrompt}`;
     if (variationHint) out += `\n\nVariation hint: ${variationHint}`;
     return out;
 }
 
-// ------------------------------------------------------------------
-// Phase C5: request types beside image_gen. Each has its own master
-// system prompt; requestMapping entries key off these type strings.
-// ------------------------------------------------------------------
-
-/** Shared JSON schema description for char_design / char_modify replies. */
 const CHAR_JSON_SCHEMA_HINT = `Reply with EXACTLY ONE JSON object and nothing else — no prose, no code fences, no explanation. Schema:
 {
   "name": "string, required, non-empty",
@@ -233,171 +114,83 @@ const CHAR_JSON_SCHEMA_HINT = `Reply with EXACTLY ONE JSON object and nothing el
 }`;
 
 export function renderCharDesignPrompt() {
-    return `You design visual characters for the IF Image extension from a short natural-language description. Infer sensible, specific tags — do not leave fields generic when the description implies detail.
-
-${CHAR_JSON_SCHEMA_HINT}`;
+    return `You design visual characters for the IF Image extension from a short natural-language description. Infer sensible, specific tags.\n\n${CHAR_JSON_SCHEMA_HINT}`;
 }
 
 export function renderCharModifyPrompt() {
-    return `You patch an existing character's JSON record according to an instruction. You are given the character's CURRENT JSON and an instruction describing what to change. Reply with the FULL corrected JSON object (the same schema as char_design, not a diff) — fields the instruction does not mention must be copied over unchanged.
-
-${CHAR_JSON_SCHEMA_HINT}`;
+    return `You patch an existing character JSON record according to an instruction. Return the full corrected record, not a diff.\n\n${CHAR_JSON_SCHEMA_HINT}`;
 }
 
 export function renderTagModifyPrompt() {
-    return `You edit a comma-separated danbooru tag list according to an instruction. Reply with EXACTLY ONE line: the new tag list, comma-separated, spaces not underscores, nothing else (no prose, no code fences).`;
+    return 'You edit a comma-separated danbooru tag list according to an instruction. Reply with exactly one tag line and nothing else.';
 }
 
 export function renderTranslationPrompt() {
-    return `You convert natural-language character facts into comma-separated danbooru-style booru tags, for a character whose booru tags are missing or incomplete. Reply with EXACTLY ONE line: the tag list, comma-separated, spaces not underscores, nothing else.`;
+    return 'Convert natural-language character facts into one comma-separated danbooru tag line. Reply with that line only.';
 }
 
 export function renderPersonaGenPrompt() {
-    return `You convert a SillyTavern user persona's name and description into an IF Image persona JSON record. Reply with EXACTLY ONE JSON object and nothing else:
-{
-  "name": "string",
-  "countTag": "string, danbooru count tag e.g. \\"1boy\\", \\"1girl\\"",
-  "booru": "string, comma-separated danbooru-style tags",
-  "natural": "string, one-paragraph prose description for photorealistic prompts",
-  "aliases": ["array of alternative trigger keywords, e.g. \\"user\\", \\"narrator\\", \\"self\\""],
-  "dialectHints": {
-    "krea": { "stylePhrase": "string, krea-specific style phrase", "lighting": "string", "camera": "string" },
-    "anima": { "booruTags": "string, anima-specific booru tags", "artists": "string" },
-    "illus": { "artists": "string", "qualityPrefix": "string", "negativeTags": "string" }
-  }
-}`;
+    return `Convert a SillyTavern user persona into exactly one IF Image persona JSON object:
+{"name":"string","countTag":"string","booru":"string","natural":"string","aliases":["string"],"dialectHints":{"krea":{"stylePhrase":"string","lighting":"string","camera":"string"},"anima":{"booruTags":"string","artists":"string"},"illus":{"artists":"string","qualityPrefix":"string","negativeTags":"string"}}}`;
 }
 
-/**
- * Render the system prompt for the chat_place request type.
- * @param {{ count: number, dialect_rules?: string, character_cards?: string, persona_block?: string }} slots
- * @returns {string}
- */
-export function renderChatPlacePrompt({ count, dialect_rules, character_cards, persona_block } = {}) {
-    const parts = [
-        `You are an image placement planner for a roleplay chat. You decide where to insert ${count} images that best illustrate the conversation.`,
+export function renderChatPlacePrompt({ count, dialect_rules, subject_catalog, character_cards } = {}) {
+    const catalog = subject_catalog || character_cards || '(no known subject tokens)';
+    return [
+        `You are an image placement planner for a roleplay chat. Choose exactly ${count} visually significant moments.`,
         '',
-        'RULES:',
-        `- Choose exactly ${count} visually significant moments — actions, scene changes, emotional beats, character interactions.`,
-        '- Spread images across the conversation. Never cluster two images on adjacent messages.',
-        '- For each image, pick the message whose content it illustrates.',
-        '- "anchor" = the last 3–8 words of that message, copied VERBATIM from the chat text. The system uses this to find the message, so exactness matters. Do NOT paraphrase.',
-        '- "prompt" = a danbooru-style image prompt for that moment, following the dialect rules below.',
-        `- Reply with EXACTLY ONE JSON object, no prose, no code fences:`,
+        SUBJECT_TOKEN_CONTRACT,
         '',
-        `{"images":[{"anchor":"...","prompt":"...","negative":"...","size":"..."}]}`,
+        COMPILER_OWNED_CONTRACT,
         '',
-        '"negative" is optional (omit or empty string if the dialect doesn\'t use negatives).',
-        '"size" is optional ("WxH" e.g. "832x1216", portrait for close-ups, landscape for wide shots).',
+        'PLACEMENT RULES:',
+        `- Return exactly ${count} items, spread across the conversation; do not cluster adjacent messages.`,
+        '- "anchor" is the last 3–8 words copied verbatim from the illustrated message.',
+        '- "subjects" is required and lists exact known tokens visibly present in that image.',
+        '- "prompt" is only the scene template. Keep each subject token at its semantic action position.',
+        '- "negative" must be empty; compiler/profile owns negatives.',
+        '- "size" may be WxH.',
+        '- Reply with exactly one JSON object and no prose/code fence:',
+        `{"images":[{"anchor":"...","subjects":["$ExactToken"],"prompt":"$ExactToken doing ...","negative":"","size":"832x1216"}]}`,
         '',
-    ];
-
-    if (dialect_rules) {
-        parts.push('DIALECT RULES:');
-        parts.push(dialect_rules);
-        parts.push('');
-    }
-    if (character_cards) {
-        parts.push('ACTIVE CHARACTERS (reference their appearance tags):');
-        parts.push(character_cards);
-        parts.push('');
-    }
-    if (persona_block) {
-        parts.push('USER PERSONA:');
-        parts.push(persona_block);
-        parts.push('');
-    }
-
-    return parts.join('\n');
+        'SUBJECT TOKEN CATALOG:',
+        catalog,
+        '',
+        dialect_rules || DIALECT_RULES.anima,
+    ].join('\n');
 }
 
-// ------------------------------------------------------------------
-// chat_rewrite: second pass over chat_place output. DIALECT_RULES above
-// describes how to WRITE a prompt from scratch; these describe how to
-// EDIT an existing one against the chat text at its anchor — what to
-// keep, what to pull in from the scene, what to drop when the roster
-// defaults contradict what the chat actually says.
-// ------------------------------------------------------------------
-
-/** @type {Record<string, string>} */
 export const REWRITE_DIALECT_RULES = {
-    krea: `REWRITE RULES FOR KREA (prose):
-- Keep the result one flowing paragraph of natural English, 35-90 words.
-- ADD concrete detail the chat states: posture, action, clothing actually worn now, weather, time of day, light source, objects held or nearby.
-- REMOVE any detail that the chat contradicts (e.g. the prompt says "black dress" but the chat says she already changed into a robe).
-- Do NOT convert the prose into comma-separated tags.
-- Do not invent events the chat never mentions.`,
-
-    anima: `REWRITE RULES FOR ANIMA (ordered tags + short caption):
-- Keep the structure: count tag first, then character tags, then a caption under 20 words, then detail tags.
-- ADD scene tags the chat supports: pose, expression, lighting, setting, held objects.
-- REPLACE clothing/appearance tags the chat contradicts; keep identity tags (hair colour, eye colour, species) unless the chat explicitly changes them.
-- Keep spaces, not underscores, between tag words.`,
-
-    illus: `REWRITE RULES FOR ILLUSTRIOUS (booru tags):
-- Keep the danbooru tag format, comma-separated, spaces not underscores.
-- Keep the quality prefix and the character count tag exactly as they are.
-- ADD scene tags the chat supports: pose, expression, camera angle, lighting, background, objects.
-- DROP tags the chat contradicts, especially outfit tags carried over from the character card.
-- Never merge tags into prose.`,
+    krea: 'Keep natural scene prose. Add only concrete context facts; remove contradictions and compiler-owned content.',
+    anima: 'Keep a compact hybrid scene. Add supported action/pose/current-clothing/environment tags only.',
+    illus: 'Keep concise comma-separated scene tags. Add supported scene facts only; never add quality/appearance/style tags.',
 };
 
-/**
- * Render the system prompt for the chat_rewrite request type: a second
- * pass that edits already-planned prompts against their chat context.
- * @param {{
- *   count: number,
- *   dialect_rules?: string,
- *   rewrite_rules?: string,
- *   character_cards?: string,
- *   persona_block?: string,
- * }} slots
- * @returns {string}
- */
-export function renderChatRewritePrompt({ count, dialect_rules, rewrite_rules, character_cards, persona_block } = {}) {
-    const parts = [
-        `You revise image prompts so they match the chat text they illustrate. You are given ${count} numbered items. Each item has an excerpt of the conversation and a draft prompt written before that excerpt was consulted.`,
+export function renderChatRewritePrompt({ count, dialect_rules, rewrite_rules, subject_catalog, character_cards } = {}) {
+    const catalog = subject_catalog || character_cards || '(no known subject tokens)';
+    return [
+        `You revise image prompts: ${count} draft image scenes against their chat excerpts.`,
         '',
-        'YOUR TASK: for each item, rewrite the draft prompt so it depicts what the excerpt actually describes.',
+        SUBJECT_TOKEN_CONTRACT,
         '',
-        'RULES:',
-        '- Keep the same subject and the same character identity as the draft.',
-        '- Add details the excerpt supports. Remove details the excerpt contradicts.',
-        '- Do not invent events, characters, or settings the excerpt never mentions.',
-        '- If a draft is already correct, return it unchanged.',
-        `- Return exactly ${count} items, one per input index, in the same order.`,
-        '- Reply with EXACTLY ONE JSON object, no prose, no code fences:',
+        COMPILER_OWNED_CONTRACT,
         '',
-        '{"images":[{"index":0,"prompt":"...","negative":"...","size":"..."}]}',
+        'REWRITE RULES:',
+        '- Preserve every draft subject token byte-for-byte; never add or remove a subject.',
+        '- Return each item with the exact same "subjects" array as its draft.',
+        '- Add supported current action, pose, expression, clothing, setting, objects, concrete light and framing.',
+        '- Remove contradictions. If already correct, return unchanged.',
+        `- Return exactly ${count} items in index order as one JSON object, no prose/code fence:`,
+        '{"images":[{"index":0,"subjects":["$ExactToken"],"prompt":"...","negative":"","size":"..."}]}',
         '',
-        '"index" must be the item number you were given. "negative" and "size" are optional; omit them to keep the draft values.',
+        rewrite_rules || '',
+        dialect_rules || DIALECT_RULES.anima,
         '',
-    ];
-
-    if (rewrite_rules) {
-        parts.push(rewrite_rules);
-        parts.push('');
-    }
-    if (dialect_rules) {
-        parts.push('THE PROMPT DIALECT (the rewritten prompt must still obey this):');
-        parts.push(dialect_rules);
-        parts.push('');
-    }
-    if (character_cards) {
-        parts.push('ACTIVE CHARACTERS (identity tags — keep these unless the excerpt changes them):');
-        parts.push(character_cards);
-        parts.push('');
-    }
-    if (persona_block) {
-        parts.push('USER PERSONA:');
-        parts.push(persona_block);
-        parts.push('');
-    }
-
-    return parts.join('\n');
+        'SUBJECT TOKEN CATALOG:',
+        catalog,
+    ].join('\n');
 }
 
-/** type -> system prompt renderer, for the non-image_gen request types. */
 export const REQUEST_PROMPT_RENDERERS = {
     char_design: renderCharDesignPrompt,
     char_modify: renderCharModifyPrompt,

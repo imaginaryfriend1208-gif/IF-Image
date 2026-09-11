@@ -8,8 +8,7 @@ import { renderSystemPrompt, renderUserPrompt, renderChatPlacePrompt, renderChat
 import { parseLlmReply } from './parser.js';
 import { resolveRequestMapping } from './profiles.js';
 import { validatePlacements, validateRewrites } from './placements.js';
-import { resolveProfileKey } from '../prompt/render.js';
-import { PROFILES } from '../profiles.js';
+import { extractSubjectTokens, repairBareSubjectNames, resolveDeclaredSubjects, styleLeakFragments, validateScenePrompt } from './subjects.js';
 
 /**
  * @param {{
@@ -19,131 +18,140 @@ import { PROFILES } from '../profiles.js';
  *   substituteParams: (text: string) => string,
  *   compile: (content: string) => { profileKey: string, envelope: object },
  *   notify: (kind: string, message: string) => void,
+ *   resolveGenerationContext?: (parsedTriggers?: object|null) => object,
+ *   resolveSubjectContext?: (options?: object) => object,
  *   [llmClient]: object,
  *   [fetchImpl]: typeof fetch,
  * }} deps
  */
 export function createEngine({
     getSettings, getContext, roster, substituteParams,
-    compile, notify,
+    compile, notify, resolveGenerationContext, resolveSubjectContext,
     llmClient, fetchImpl,
 } = {}) {
     // Injectable for offline tests; production builds it from settings/context.
     const client = llmClient ?? createLlmClient({ getSettings, getContext, fetchImpl });
 
-    /**
-     * Rewrite marker text through the LLM, then compile it.
-     * @param {string} markerText - the scene description from the marker
-     * @param {{ previousPrompt?: string, variationHint?: string, signal?: AbortSignal }} opts
-     * @returns {Promise<{ entries: Array<{profileKey, envelope}>, method: string, elapsedMs: number }>}
-     */
-    async function rewrite(markerText, { previousPrompt, variationHint, signal } = {}) {
+    function rosterData() {
+        return typeof roster === 'function' ? (roster() ?? {}) : (roster ?? {});
+    }
+
+    function generationContext(source = null) {
+        if (typeof resolveGenerationContext === 'function') return resolveGenerationContext(source) ?? {};
+        const configured = getSettings()?.generation?.profile ?? 'anima';
+        const fallback = configured === 'krea2' ? 'krea' : configured === 'illustrious' ? 'illus' : 'anima';
+        return { profileKey: configured, dialectKey: fallback, activeStyle: { style: null, source: 'none' } };
+    }
+
+    function subjectContext(options = {}) {
+        if (typeof resolveSubjectContext === 'function') return resolveSubjectContext(options) ?? {};
         const settings = getSettings();
         const ctx = getContext();
-        const injectionStyle = settings.llm?.injectionStyle ?? 'compact';
-
-        // Resolve the request mapping first: image_gen → {apiProfile,
-        // contextProfile}. The mapped API profile wins over the global
-        // default profile id.
-        const mapping = resolveRequestMapping(settings, 'image_gen');
-        const profileId = mapping.apiProfile?.id
-            ?? settings.llm?.defaultApiProfileId
-            ?? '';
-
-        // Build context blocks
-        const contextResult = buildContext({
-            chat: ctx.chat ?? [],
+        return buildContext({
+            chat: options.chat ?? ctx.chat ?? [],
             settings,
-            contextProfile: mapping.contextProfile,
+            contextProfile: options.contextProfile,
             substituteParams,
-            roster: typeof roster === 'function' ? roster() : (roster ?? {}),
+            roster: rosterData(),
+            host: ctx,
+            activeCardId: (() => {
+                const id = ctx?.characterId ?? ctx?.character_id;
+                return ctx?.characters?.[id]?.avatar ?? null;
+            })(),
+            chatId: ctx?.getCurrentChatId?.() ?? null,
+            activeCharacterName: ctx?.name2 ?? '',
+            includeAllSubjects: options.includeAllSubjects === true,
+            maxSubjects: options.maxSubjects ?? 12,
+            additionalRelevanceText: options.additionalRelevanceText ?? '',
         });
+    }
 
-        // Resolve dialect for the rules block
-        const configuredProfileKey = settings.generation?.profile || 'anima';
-        const { profileKey } = resolveProfileKey(null, configuredProfileKey);
-        const profile = PROFILES[profileKey] ?? PROFILES.anima;
-        const dialectKey = profile.dialect ?? 'anima';
-        const dialectRules = DIALECT_RULES[dialectKey] ?? DIALECT_RULES.anima;
+    function forbiddenStyleFragments(gen) {
+        return styleLeakFragments(gen?.activeStyle?.style, gen?.dialectKey);
+    }
 
-        // Build character card text from roster
-        const rosterData = typeof roster === 'function' ? roster() : (roster ?? {});
-        const chars = rosterData.characters ?? [];
-        const styleCard = (rosterData.styles ?? []).map(s => {
-            const parts = [`Style: ${s.name}`];
-            if (s.dialectHints?.krea?.stylePhrase) parts.push(`Krea: ${s.dialectHints.krea.stylePhrase}`);
-            if (s.dialectHints?.illus?.artists) parts.push(`Illus: ${s.dialectHints.illus.artists}`);
-            return parts.join(' | ');
-        }).join('\n');
+    function safeDirectFallback(markerText, error, elapsedMs = 0) {
+        const fallback = compile(markerText);
+        return {
+            entries: [fallback],
+            method: 'fallback_direct',
+            elapsedMs,
+            ...(error ? { error: error?.message ?? String(error) } : {}),
+        };
+    }
 
+    function validateImageEntry(entry, catalog, forbiddenFragments, sourceTokens = []) {
+        const declared = resolveDeclaredSubjects(entry?.subjects, catalog);
+        if (declared.errors.length) return { ok: false, errors: declared.errors };
+        const required = sourceTokens.length ? sourceTokens : declared.tokens;
+        if (sourceTokens.length && declared.mode === 'structured'
+            && (declared.tokens.length !== sourceTokens.length
+                || declared.tokens.some(token => !sourceTokens.includes(token)))) {
+            return { ok: false, errors: ['Reply subjects differ from the source marker.'] };
+        }
+        let prompt = typeof entry?.prompt === 'string' ? entry.prompt.trim() : '';
+        if (required.length) prompt = repairBareSubjectNames(prompt, catalog, { requiredTokens: required }).prompt;
+        const scene = validateScenePrompt(prompt, catalog, {
+            requiredTokens: required,
+            allowedTokens: required.length ? required : null,
+            forbiddenFragments,
+        });
+        return { ok: scene.ok, prompt, subjects: required, errors: scene };
+    }
+
+    /** Rewrite marker text through the LLM, validate identity, then compile. */
+    async function rewrite(markerText, { previousPrompt, variationHint, signal } = {}) {
+        const settings = getSettings();
+        const mapping = resolveRequestMapping(settings, 'image_gen');
+        const profileId = mapping.apiProfile?.id ?? settings.llm?.defaultApiProfileId ?? '';
+        const contextResult = subjectContext({ contextProfile: mapping.contextProfile, additionalRelevanceText: markerText });
+        const gen = generationContext(markerText);
+        const dialectRules = DIALECT_RULES[gen.dialectKey] ?? DIALECT_RULES.anima;
         const systemPrompt = renderSystemPrompt('image_gen', {
             dialect_rules: dialectRules,
-            character_cards: contextResult.charBlock,
-            style_card: styleCard,
-            persona_block: contextResult.personaBlock,
+            subject_catalog: contextResult.subjectBlock,
             scene_window: contextResult.sceneText,
             systemPromptOverride: settings.llm?.systemPromptOverride,
-        }, injectionStyle);
-
+        }, settings.llm?.injectionStyle ?? 'compact');
         const userPrompt = renderUserPrompt(markerText, { previousPrompt, variationHint });
 
-        // Call the LLM
         let result;
         try {
-            result = await client.request({
-                type: 'image_gen',
-                systemPrompt,
-                userPrompt,
-                profileId,
-                signal,
-            });
+            result = await client.request({ type: 'image_gen', systemPrompt, userPrompt, profileId, signal });
         } catch (err) {
-            // Abort propagates; other failures fall back to direct compile.
             if (err?.code === 'ABORTED' || err?.name === 'AbortError' || signal?.aborted) throw err;
-            console.warn('[IF Image] LLM request failed, falling back to direct compile:', err?.message ?? err);
-            const fallback = compile(markerText);
-            return { entries: [fallback], method: 'fallback_direct', elapsedMs: 0, error: err?.message ?? String(err) };
+            console.warn('[IF Image] LLM request failed; using direct marker compilation.');
+            return safeDirectFallback(markerText, err);
         }
 
-        // Parse the LLM reply
-        const entries = parseLlmReply(result.text);
-
-        if (!entries.length) {
-            console.warn('[IF Image] LLM returned no parseable image blocks; falling back to direct compile.');
-            const fallback = compile(markerText);
-            return { entries: [fallback], method: 'fallback_direct', elapsedMs: result.elapsedMs };
+        const catalog = contextResult.subjectCatalog ?? [];
+        const forbiddenFragments = forbiddenStyleFragments(gen);
+        const sourceTokens = extractSubjectTokens(markerText, catalog).tokens;
+        const validEntries = [];
+        for (const entry of parseLlmReply(result.text)) {
+            const validation = validateImageEntry(entry, catalog, forbiddenFragments, sourceTokens);
+            if (validation.ok) validEntries.push({ ...entry, prompt: validation.prompt, subjects: validation.subjects });
+        }
+        if (!validEntries.length) {
+            console.warn('[IF Image] LLM scene failed identity/style validation; using direct marker compilation.');
+            return safeDirectFallback(markerText, null, result.elapsedMs);
         }
 
-        // Compile each entry through the existing prompt pipeline, then merge
-        // the parser-level overrides (<size> dims, <negative> tags) into the
-        // compiled envelope.
-        const compiled = entries.map(entry => {
-            // Use the entry's prompt as if it were a marker text
-            const content = entry.prompt;
+        const compiled = validEntries.map(entry => {
             try {
-                const result = compile(content);
-                const params = { ...result.envelope.params };
+                const compiledEntry = compile(entry.prompt);
+                const params = { ...compiledEntry.envelope.params };
                 if (Number.isFinite(entry.width) && Number.isFinite(entry.height)) {
                     params.width = entry.width;
                     params.height = entry.height;
                 }
-                let negative = result.envelope.negative;
-                if (entry.negative) {
-                    negative = negative ? `${negative}, ${entry.negative}` : entry.negative;
-                }
-                return { ...result, envelope: { ...result.envelope, negative, params } };
-            } catch (err) {
-                console.error('[IF Image] Compile failed for LLM entry:', err?.message ?? err);
+                // LLM negatives are never merged; active profile/style owns them.
+                return { ...compiledEntry, envelope: { ...compiledEntry.envelope, params } };
+            } catch {
                 return null;
             }
         }).filter(Boolean);
-
-        if (!compiled.length) {
-            console.warn('[IF Image] All LLM entries failed to compile; falling back to direct compile.');
-            const fallback = compile(markerText);
-            return { entries: [fallback], method: 'fallback_direct', elapsedMs: result.elapsedMs };
-        }
-
+        if (!compiled.length) return safeDirectFallback(markerText, null, result.elapsedMs);
         return { entries: compiled, method: result.method, elapsedMs: result.elapsedMs };
     }
 
@@ -327,82 +335,28 @@ export function createEngine({
     // chat_place: LLM plans N image placements across the current chat.
     // ------------------------------------------------------------------
 
-    /**
-     * LLM plans N image placements across the current chat.
-     * @param {number} count - number of images to place (1..6)
-     * @param {{ signal?: AbortSignal }} [opts]
-     * @returns {Promise<{ placements: Array<{ messageId: number, prompt: string, negative?: string, width?: number, height?: number }>, method: string, elapsedMs: number }>}
-     */
+    /** LLM plans validated scene-template placements across the chat. */
     async function planChatImages(count, { signal } = {}) {
         const settings = getSettings();
         const ctx = getContext();
         const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
         const chatPlaceSettings = settings.llm?.chatPlace ?? {};
         const onlyCharacter = chatPlaceSettings.onlyCharacter !== false;
-
-        // Build full-chat context (wider scene window for placement planning)
-        const maxWindow = Math.min(40, Math.max(2, chatPlaceSettings.maxChatWindow ?? 40));
-        const contextResult = buildContext({
+        const maxWindow = Math.min(40, Math.max(2, Number(chatPlaceSettings.maxChatWindow) || 40));
+        const contextResult = subjectContext({
             chat,
-            settings,
-            contextProfile: { sceneWindow: maxWindow, scope: 'scene' },
-            substituteParams,
-            roster: typeof roster === 'function' ? roster() : (roster ?? {}),
+            contextProfile: { sceneWindow: maxWindow, maxSceneWindow: 40, scope: 'scene' },
+            maxSubjects: 12,
         });
-
-        // Resolve dialect rules (same logic as rewrite())
-        const configuredProfileKey = settings.generation?.profile || 'anima';
-        const { profileKey } = resolveProfileKey(null, configuredProfileKey);
-        const profile = PROFILES[profileKey] ?? PROFILES.anima;
-        const dialectKey = profile.dialect ?? 'anima';
-        const dialectRules = DIALECT_RULES[dialectKey] ?? DIALECT_RULES.anima;
-
-        // Build character cards text
-        const rosterData = typeof roster === 'function' ? roster() : (roster ?? {});
-        const chars = rosterData.characters ?? [];
-        const charBlock = chars.map(c => {
-            const parts = [];
-            if (c.name) parts.push(`Name: ${c.name}`);
-            if (c.countTag) parts.push(`Count: ${c.countTag}`);
-            if (c.booru) parts.push(`Tags: ${c.booru}`);
-            if (c.facts) parts.push(`Facts: ${c.facts}`);
-            return parts.join(' | ');
-        }).join('\n');
-
-        // Persona block
-        const persona = rosterData.persona ?? null;
-        let personaBlock = '';
-        if (persona) {
-            const parts = [];
-            if (persona.name) parts.push(`Name: ${persona.name}`);
-            if (persona.booru) parts.push(`Tags: ${persona.booru}`);
-            if (persona.natural) parts.push(`Description: ${persona.natural}`);
-            if (Array.isArray(persona.aliases) && persona.aliases.length) {
-                parts.push(`Aliases: ${persona.aliases.join(', ')}`);
-            }
-            const h = persona.dialectHints;
-            if (h) {
-                const hintParts = [];
-                if (h.krea?.stylePhrase) hintParts.push(`Krea: ${h.krea.stylePhrase}`);
-                if (h.anima?.booruTags) hintParts.push(`Anima: ${h.anima.booruTags}`);
-                if (h.illus?.artists) hintParts.push(`Illus: ${h.illus.artists}`);
-                if (hintParts.length) parts.push(`Style hints: ${hintParts.join(' | ')}`);
-            }
-            personaBlock = parts.join(' | ');
-        }
-
-        // System prompt
+        const gen = generationContext();
+        const dialectRules = DIALECT_RULES[gen.dialectKey] ?? DIALECT_RULES.anima;
+        const forbiddenFragments = forbiddenStyleFragments(gen);
         const systemPrompt = renderChatPlacePrompt({
             count,
             dialect_rules: dialectRules,
-            character_cards: charBlock,
-            persona_block: personaBlock,
+            subject_catalog: contextResult.subjectBlock,
         });
-
-        // User prompt: full scene text
-        const userPrompt = `Plan ${count} image placements for this conversation.\n\n${contextResult.sceneText}`;
-
-        // Resolve API profile (chat_place → fallback to image_gen mapping)
+        const baseUserPrompt = `Plan ${count} image placements for this conversation.\n\n${contextResult.sceneText}`;
         const mapping = resolveRequestMapping(settings, 'chat_place');
         const fallbackMapping = resolveRequestMapping(settings, 'image_gen');
         const profileId = mapping.apiProfile?.id
@@ -410,97 +364,108 @@ export function createEngine({
             ?? settings.llm?.defaultApiProfileId
             ?? '';
 
-        // LLM call
-        const result = await client.request({
-            type: 'chat_place',
-            systemPrompt,
-            userPrompt,
-            profileId,
-            signal,
-        });
+        let result;
+        let placements = [];
+        let lastDiagnostics = [];
+        let attempts = 0;
+        for (let attempt = 0; attempt < 2; attempt++) {
+            attempts += 1;
+            const correction = attempt === 0 ? '' : [
+                '',
+                'Your previous placement JSON failed deterministic validation.',
+                'Correct every item using only exact tokens from the catalog. Keep "subjects" and prompt tokens identical.',
+                'Do not use generic replacements for known subjects. Remove style, quality, artist, appearance and LoRA content.',
+                lastDiagnostics.length
+                    ? `Validation summary: ${lastDiagnostics.map(item => item.errors.join('; ')).join(' | ')}`
+                    : 'Validation summary: malformed or missing placement JSON.',
+                'Return corrected JSON only.',
+            ].join('\n');
+            result = await client.request({
+                type: 'chat_place',
+                systemPrompt,
+                userPrompt: baseUserPrompt + correction,
+                profileId,
+                signal,
+            });
+            const parsed = parseJsonLoose(result.text);
+            placements = validatePlacements(parsed, chat, count, {
+                onlyCharacter,
+                subjectCatalog: contextResult.subjectCatalog,
+                forbiddenFragments,
+            });
+            lastDiagnostics = placements.diagnostics ?? [];
+            const correctable = Boolean(parsed) && lastDiagnostics.some(item =>
+                item.errors.some(error => !/anchor did not resolve|duplicate message anchor|prompt is empty/i.test(error)));
+            if (placements.length >= count || attempt === 1 || !correctable) break;
+        }
 
-        // Parse and validate
-        const parsed = parseJsonLoose(result.text);
-        const placements = validatePlacements(parsed, chat, count, { onlyCharacter });
-
-        // Second pass: rewrite each prompt against the chat text at its
-        // anchor. Off switch: settings.llm.chatPlace.rewrite === false.
-        if (chatPlaceSettings.rewrite === false || !placements.length) {
-            return { placements, method: result.method, elapsedMs: result.elapsedMs, rewritten: false };
+        if (!placements.length || chatPlaceSettings.rewrite === false) {
+            return {
+                placements,
+                method: result?.method ?? 'unknown',
+                elapsedMs: result?.elapsedMs ?? 0,
+                plannerAttempts: attempts,
+                rewritten: false,
+            };
         }
 
         const rewriteResult = await rewritePlacements(placements, {
             chat,
             settings,
             dialectRules,
-            dialectKey,
-            charBlock,
-            personaBlock,
+            dialectKey: gen.dialectKey,
+            contextResult,
+            forbiddenFragments,
             signal,
         });
-
         return {
             placements: rewriteResult.placements,
             method: result.method,
             elapsedMs: result.elapsedMs,
+            plannerAttempts: attempts,
             rewritten: rewriteResult.rewritten,
             rewriteChanged: rewriteResult.changed,
+            rewriteRejected: rewriteResult.rejected,
             rewriteElapsedMs: rewriteResult.elapsedMs,
             rewriteError: rewriteResult.error,
         };
     }
 
-    /**
-     * chat_rewrite: revise planned prompts against the chat text around each
-     * anchor. One call for all placements.
-     *
-     * This pass is strictly an improvement step: any failure short of an
-     * abort returns the input placements unchanged with rewritten:false and
-     * the reason in .error, so a broken rewrite never costs the user their
-     * planned images. Aborts propagate, matching planChatImages.
-     *
-     * @returns {Promise<{ placements: Array<object>, rewritten: boolean, changed: number, elapsedMs: number, error?: string }>}
-     */
+    /** Rewrite is an improvement-only pass; invalid items keep their drafts. */
     async function rewritePlacements(placements, {
-        chat, settings, dialectRules, dialectKey, charBlock, personaBlock, signal,
+        chat, settings, dialectRules, dialectKey, contextResult, forbiddenFragments, signal,
     } = {}) {
         const rewriteRules = REWRITE_DIALECT_RULES[dialectKey] ?? REWRITE_DIALECT_RULES.anima;
-
-        // One item per placement: the message at the anchor plus its
-        // immediate neighbours, so the LLM sees how the moment is set up
-        // and what it leads into.
-        const items = placements.map((p, index) => {
-            const from = Math.max(0, p.messageId - 1);
-            const to = Math.min(chat.length - 1, p.messageId + 1);
-            const excerptParts = [];
+        const host = getContext();
+        const items = placements.map((placement, index) => {
+            const from = Math.max(0, placement.messageId - 1);
+            const to = Math.min(chat.length - 1, placement.messageId + 1);
+            const excerpt = [];
             for (let i = from; i <= to; i++) {
-                const m = chat[i];
-                if (!m || m.is_system) continue;
-                const body = stripRenderedArtifacts(m.mes ?? m.content ?? '');
+                const message = chat[i];
+                if (!message || message.is_system) continue;
+                const body = stripRenderedArtifacts(message.mes ?? message.content ?? '');
                 if (!body) continue;
-                const role = m.role === 'user' ? 'User' : 'Character';
-                const marker = i === p.messageId ? ' <- the illustrated message' : '';
-                excerptParts.push(`${role}${marker}: ${body}`);
+                const role = message.role === 'user' || message.is_user === true
+                    ? (host?.name1 || 'User')
+                    : (message.name || host?.name2 || 'Character');
+                excerpt.push(`${role}${i === placement.messageId ? ' <- illustrated message' : ''}: ${body}`);
             }
             return [
                 `### ITEM ${index}`,
+                `SUBJECTS: ${JSON.stringify(placement.subjects ?? [])}`,
                 'CHAT EXCERPT:',
-                excerptParts.join('\n') || '(no readable text)',
-                '',
-                `DRAFT PROMPT: ${p.prompt}`,
+                excerpt.join('\n') || '(no readable text)',
+                `DRAFT PROMPT: ${placement.prompt}`,
             ].join('\n');
         });
-
         const systemPrompt = renderChatRewritePrompt({
             count: placements.length,
             dialect_rules: dialectRules,
             rewrite_rules: rewriteRules,
-            character_cards: charBlock,
-            persona_block: personaBlock,
+            subject_catalog: contextResult.subjectBlock,
         });
         const userPrompt = `Rewrite these ${placements.length} prompts against their chat excerpts.\n\n${items.join('\n\n')}`;
-
-        // chat_rewrite → chat_place → image_gen → global default.
         const profileId = resolveRequestMapping(settings, 'chat_rewrite').apiProfile?.id
             ?? resolveRequestMapping(settings, 'chat_place').apiProfile?.id
             ?? resolveRequestMapping(settings, 'image_gen').apiProfile?.id
@@ -508,35 +473,28 @@ export function createEngine({
             ?? '';
 
         try {
-            const result = await client.request({
-                type: 'chat_rewrite',
-                systemPrompt,
-                userPrompt,
-                profileId,
-                signal,
-            });
+            const result = await client.request({ type: 'chat_rewrite', systemPrompt, userPrompt, profileId, signal });
             const parsed = parseJsonLoose(result.text);
-            const merged = validateRewrites(parsed, placements);
             if (!parsed) {
-                console.warn('[IF Image] chat_rewrite reply was not parseable JSON; keeping the planned prompts.');
-                return {
-                    placements, rewritten: false, changed: 0,
-                    elapsedMs: result.elapsedMs, error: 'reply was not valid JSON',
-                };
+                return { placements, rewritten: false, changed: 0, rejected: [], elapsedMs: result.elapsedMs, error: 'reply was not valid JSON' };
             }
+            const merged = validateRewrites(parsed, placements, {
+                subjectCatalog: contextResult.subjectCatalog,
+                forbiddenFragments,
+            });
+            const allRejected = placements.length > 0 && merged.rejected.length >= placements.length;
             return {
                 placements: merged.placements,
-                rewritten: true,
+                rewritten: !allRejected,
                 changed: merged.changed,
+                rejected: merged.rejected.length,
                 elapsedMs: result.elapsedMs,
+                ...(allRejected ? { error: 'all rewritten scenes failed identity/style validation' } : {}),
             };
         } catch (err) {
             if (err?.code === 'ABORTED' || err?.name === 'AbortError' || signal?.aborted) throw err;
-            console.warn('[IF Image] chat_rewrite failed, keeping the planned prompts:', err?.message ?? err);
-            return {
-                placements, rewritten: false, changed: 0,
-                elapsedMs: 0, error: err?.message ?? String(err),
-            };
+            console.warn('[IF Image] chat_rewrite failed; keeping validated draft scenes.');
+            return { placements, rewritten: false, changed: 0, rejected: 0, elapsedMs: 0, error: err?.message ?? String(err) };
         }
     }
 
