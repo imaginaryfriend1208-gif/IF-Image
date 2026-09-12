@@ -12,7 +12,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     HARD_RULES, DIALECT_RULES,
-    renderDefaultSystemPrompt, renderSystemPrompt, renderUserPrompt,
+    renderDefaultSystemPrompt, renderSystemPrompt, renderUserPrompt, renderChatPlacePrompt,
 } from '../src/llm/prompts.js';
 
 const DEFAULT = renderDefaultSystemPrompt();
@@ -134,4 +134,12 @@ test('renderUserPrompt: omits both sections when absent', () => {
     const out = renderUserPrompt('scene');
     assert.ok(!/Previous prompt/i.test(out));
     assert.ok(!/Variation hint/i.test(out));
+});
+
+test('chat placement modes give distinct together and chronological instructions', () => {
+    const together = renderChatPlacePrompt({ count: 2, planning_mode: 'together' });
+    const separate = renderChatPlacePrompt({ count: 2, planning_mode: 'separate' });
+    assert.match(together, /spread across the conversation/);
+    assert.match(separate, /oldest to newest/);
+    assert.match(separate, /never merge events from later messages/);
 });

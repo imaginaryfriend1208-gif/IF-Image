@@ -95,6 +95,16 @@ test('matchCharacter matches exact and aliases', () => {
     assert.equal(matchCharacter('dark elf', roster)?.id, 'c1');
     assert.equal(matchCharacter('Đào', roster)?.id, 'c2');
     assert.equal(matchCharacter('dao', roster)?.id, 'c2');
+    assert.equal(matchCharacter('Lyn', roster), null, 'partial names must not trigger a character');
+    assert.equal(matchCharacter('LynaAlt', roster), null, 'longer unrelated tokens must not trigger Lyna');
+});
+
+test('Rosario trigger resolves only the exact character preset', () => {
+    const rosario = { id: 'rosario', name: 'Rosario', aliases: ['Rosa'], countTag: '1boy', booru: 'black hair' };
+    const other = { id: 'rosario-alt', name: 'Rosario Alt', aliases: [], countTag: '1boy', booru: 'white hair' };
+    const exact = parseTriggers('$Rosario walking away, looking aside', { roster: [rosario, other] });
+    assert.equal(exact.characters[0]?.char?.id, 'rosario');
+    assert.equal(parseTriggers('$RosarioAlt walking', { roster: [rosario, other] }).characters.length, 0);
 });
 
 // 5. Parse Triggers

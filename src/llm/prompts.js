@@ -134,7 +134,7 @@ export function renderPersonaGenPrompt() {
 {"name":"string","countTag":"string","booru":"string","natural":"string","aliases":["string"],"dialectHints":{"krea":{"stylePhrase":"string","lighting":"string","camera":"string"},"anima":{"booruTags":"string","artists":"string"},"illus":{"artists":"string","qualityPrefix":"string","negativeTags":"string"}}}`;
 }
 
-export function renderChatPlacePrompt({ count, dialect_rules, subject_catalog, character_cards } = {}) {
+export function renderChatPlacePrompt({ count, planning_mode = 'together', dialect_rules, subject_catalog, character_cards } = {}) {
     const catalog = subject_catalog || character_cards || '(no known subject tokens)';
     return [
         `You are an image placement planner for a roleplay chat. Choose exactly ${count} visually significant moments.`,
@@ -144,7 +144,9 @@ export function renderChatPlacePrompt({ count, dialect_rules, subject_catalog, c
         COMPILER_OWNED_CONTRACT,
         '',
         'PLACEMENT RULES:',
-        `- Return exactly ${count} items, spread across the conversation; do not cluster adjacent messages.`,
+        planning_mode === 'separate'
+            ? `- Scan eligible messages from oldest to newest and return exactly ${count} scenes in chronological message order. Treat each selected message as its own scene; never merge events from later messages into an earlier scene.`
+            : `- Return exactly ${count} items, spread across the conversation; do not cluster adjacent messages.`,
         '- "anchor" is the last 3–8 words copied verbatim from the illustrated message.',
         '- "subjects" is required and lists exact known tokens visibly present in that image.',
         '- "prompt" is only the scene template. Keep each subject token at its semantic action position.',

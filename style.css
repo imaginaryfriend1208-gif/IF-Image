@@ -746,3 +746,54 @@
     max-height: 90vh;
     overflow-y: auto;
 }
+
+/* Narrow drawer safety: host themes often force checkbox/button widths. */
+.if-image-settings,
+.if-image-panel,
+.if-image-row,
+.if-image-row > div,
+.if-image-check,
+.if-image-check > span {
+    min-width: 0;
+    max-width: 100%;
+    box-sizing: border-box;
+}
+
+.if-image-check {
+    align-items: flex-start;
+    white-space: normal !important;
+    overflow-wrap: anywhere;
+    word-break: normal;
+}
+
+.if-image-check input[type="checkbox"] {
+    flex: 0 0 auto;
+    width: auto !important;
+    min-width: 0 !important;
+    margin-top: 0.2em;
+}
+
+.if-image-choice-list {
+    gap: 6px;
+}
+
+.if-image-settings .if-image-row > .menu_button,
+.if-image-settings .if-image-row > div > .menu_button {
+    min-width: 0 !important;
+    max-width: 100%;
+    white-space: normal !important;
+    overflow-wrap: anywhere;
+    word-break: normal;
+}
+
+@media (max-width: 480px) {
+    .if-image-tabs {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .if-image-row > div[style*="display:flex"] {
+        flex-wrap: wrap;
+    }
+    .if-image-row > div[style*="display:flex"] > select {
+        flex-basis: 100% !important;
+    }
+}

@@ -7,7 +7,7 @@ import { NAI_MODELS } from './backends/nai.js';
 import { resolveCheckpoint } from './backends/a1111.js';
 import { getActiveProfile, mergeParams, suggestCheckpointProfile, normalizeCheckpointProfile, SIZE_PRESETS, matchSizePreset } from './backends/checkpoint-profiles.js';
 import { PROFILES, PROFILE_KEYS } from './profiles.js';
-import { getAllCharacters, saveCharacter, removeCharacter, createDefaultCharacter, createCharacterFromStCard, findCharacterByCardId, getStCharacters, emptyBooruDetail, applyCharMigrations } from './storage/chars.js';
+import { getAllCharacters, saveCharacter, removeCharacter, createDefaultCharacter, emptyBooruDetail, applyCharMigrations } from './storage/chars.js';
 import { getAllPersonas, savePersona, removePersona, getAllStyles, saveStyle, removeStyle, createDefaultPersona, createDefaultStyle, applyPersonaSync, getReplaceRules, saveReplaceRules } from './storage/presets.js';
 import { getOutfitsForCharacter, getAllOutfits, saveOutfit, removeOutfit, createDefaultOutfit } from './storage/outfits.js';
 import { buildExport, validateImport, planMerge } from './storage/transfer.js';
@@ -52,7 +52,7 @@ export const EXTENSION_VERSION = '0.3.0';
  * @param {Promise<boolean>} [args.initialPersonaSync] - resolves true when
  *   the silent first-load sync created a Persona and the selector must reload.
  */
-export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQueue, regenerateImage, getCurrentChatId, planChatImages, applyPlacements, getChatContext, eventSource, event_types, syncPersonaFromSt, refreshRoster, initialPersonaSync, syncRoster }) {
+export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQueue, regenerateImage, getCurrentChatId, planChatImages, applyPlacements, getChatContext, eventSource, event_types, syncPersonaFromSt, refreshRoster, initialPersonaSync }) {
     const html = `
     <div class="if-image-settings">
         <div class="if-image-title">
@@ -170,13 +170,28 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             <h3>Chat Image Placement (LLM)</h3>
             <div class="if-image-note">Let the LLM plan image placements across the current chat. It reads the conversation, picks N visually significant moments, and injects image markers at those positions — the pipeline then generates images automatically.</div>
             <div class="if-image-row">
+                <label for="if_plan_mode">Placement mode</label>
+                <select id="if_plan_mode" class="text_pole">
+                    <option value="together">Together — plan all significant moments at once</option>
+                    <option value="separate">Separate — scan and place scenes chronologically</option>
+                </select>
+            </div>
+            <div class="if-image-note">Together submits the selected conversation as one plan and queues all markers together. Separate asks for message-by-message chronological scenes and inserts markers in timeline order.</div>
+            <div class="if-image-row">
                 <label for="if_plan_count">Number of images</label>
                 <input id="if_plan_count" type="number" min="1" max="6" value="3" class="text_pole" style="width:60px;">
             </div>
             <div class="if-image-row">
-                <label class="if-image-check">
-                    <input type="checkbox" id="if_plan_charonly" checked> Character messages only
-                </label>
+                <label for="if_plan_context">Recent messages to read (0 = entire chat)</label>
+                <input id="if_plan_context" type="number" min="0" max="200" value="40" class="text_pole">
+            </div>
+            <div class="if-image-row if-image-choice-list">
+                <label class="if-image-check"><input type="checkbox" id="if_plan_include_character" checked><span>Include character messages</span></label>
+                <label class="if-image-check"><input type="checkbox" id="if_plan_include_user" checked><span>Include user/persona messages</span></label>
+                <label class="if-image-check"><input type="checkbox" id="if_plan_include_first"><span>Include the character card's first message</span></label>
+                <label class="if-image-check"><input type="checkbox" id="if_plan_include_card"><span>Include character-card description, personality, and scenario</span></label>
+                <label class="if-image-check"><input type="checkbox" id="if_plan_include_injections"><span>Include active extension prompt injections</span></label>
+                <label class="if-image-check"><input type="checkbox" id="if_plan_charonly" checked><span>Place images after character messages only</span></label>
             </div>
             <div class="if-image-row">
                 <label class="if-image-check">
@@ -584,28 +599,12 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             </div>
             <div id="if_preset_status" class="if-image-result"></div>
             <div class="if-image-row">
-                <label class="if-image-check">
-                    <input type="checkbox" id="if_roster_sync_enabled"> Create an optional separate roster backup
-                </label>
-            </div>
-            <div class="if-image-note">Characters, outfits, styles, personas and replace rules are saved automatically in SillyTavern settings and follow the account without using this control. This legacy sync creates a separate server-file backup. Generated images stay local.</div>
-            <div class="if-image-row">
-                <button id="if_roster_sync_now" class="menu_button">Sync now</button>
-                <select id="if_roster_sync_mode" class="text_pole" title="How to resolve a record that exists on both sides">
-                    <option value="keep-mine" selected>Conflicts: keep mine</option>
-                    <option value="overwrite">Conflicts: server wins</option>
-                </select>
-            </div>
-            <div id="if_roster_sync_status" class="if-image-result"></div>
-            <div class="if-image-row">
                 <label for="if_char_select">Select Character</label>
                 <div style="display:flex; gap:6px;">
                     <select id="if_char_select" class="text_pole" style="flex:1;">
                         <option value="">-- New Character --</option>
                     </select>
                     <button id="if_char_new" class="menu_button">+ New</button>
-                    <button id="if_char_import_active" class="menu_button">Import from active character</button>
-                    <button id="if_char_import_all" class="menu_button">Import all ST characters</button>
                 </div>
             </div>
             <div class="if-image-row">
@@ -1094,8 +1093,15 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     mainMode.addEventListener('change', () => { settings.generation.mode = mainMode.value; save(); });
 
     // ================= Chat Placement Wiring =================
+    const planMode = $('if_plan_mode');
     const planCount = $('if_plan_count');
     const planCharOnly = $('if_plan_charonly');
+    const planContext = $('if_plan_context');
+    const planIncludeCharacter = $('if_plan_include_character');
+    const planIncludeUser = $('if_plan_include_user');
+    const planIncludeFirst = $('if_plan_include_first');
+    const planIncludeCard = $('if_plan_include_card');
+    const planIncludeInjections = $('if_plan_include_injections');
     const planRewrite = $('if_plan_rewrite');
     const planRun = $('if_plan_run');
     const planUndo = $('if_plan_undo');
@@ -1104,6 +1110,10 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     let planAbort = null;
     let lastPlacementSnapshots = []; // [{ messageId, prevMes }] for undo
 
+    if (planMode) {
+        planMode.value = chatPlace.planningMode === 'separate' ? 'separate' : 'together';
+        planMode.addEventListener('change', () => { chatPlace.planningMode = planMode.value; save(); });
+    }
     if (planCount) {
         planCount.value = chatPlace.count ?? 3;
         planCount.addEventListener('change', () => {
@@ -1112,6 +1122,25 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             chatPlace.count = n;
             save();
         });
+    }
+    if (planContext) {
+        planContext.value = chatPlace.maxChatWindow ?? 40;
+        planContext.addEventListener('change', () => {
+            chatPlace.maxChatWindow = Math.min(200, Math.max(0, parseInt(planContext.value, 10) || 0));
+            planContext.value = chatPlace.maxChatWindow;
+            save();
+        });
+    }
+    for (const [control, key, fallback] of [
+        [planIncludeCharacter, 'includeCharacterMessages', true],
+        [planIncludeUser, 'includeUserMessages', true],
+        [planIncludeFirst, 'includeFirstMessage', false],
+        [planIncludeCard, 'includeCharacterCard', false],
+        [planIncludeInjections, 'includeExtensionPrompts', false],
+    ]) {
+        if (!control) continue;
+        control.checked = chatPlace[key] ?? fallback;
+        control.addEventListener('change', () => { chatPlace[key] = control.checked; save(); });
     }
     if (planCharOnly) {
         planCharOnly.checked = chatPlace.onlyCharacter !== false;
@@ -2241,8 +2270,6 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     // ================= Characters Tab Wiring =================
     const charSelect = $('if_char_select');
     const charNewBtn = $('if_char_new');
-    const charImportActiveBtn = $('if_char_import_active');
-    const charImportAllBtn = $('if_char_import_all');
     const charName = $('if_char_name');
     const charAliases = $('if_char_aliases');
     const charCount = $('if_char_count');
@@ -2283,64 +2310,6 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     loadCharactersList();
 
     // ---- Roster sync (per-user server storage) -----------------------------
-    const rosterSyncEnabled = $('if_roster_sync_enabled');
-    const rosterSyncNow = $('if_roster_sync_now');
-    const rosterSyncMode = $('if_roster_sync_mode');
-    const rosterSyncStatus = $('if_roster_sync_status');
-
-    function renderRosterSyncState() {
-        if (!rosterSyncStatus) return;
-        const sync = settings.rosterSync ?? {};
-        if (!sync.enabled) {
-            rosterSyncStatus.textContent = 'Optional roster-file backup is off. Automatic SillyTavern settings persistence remains on.';
-            return;
-        }
-        rosterSyncStatus.textContent = sync.lastSyncedAt
-            ? `Last synced ${new Date(sync.lastSyncedAt).toLocaleString()}.`
-            : 'Enabled — not synced yet.';
-    }
-
-    if (rosterSyncEnabled) {
-        rosterSyncEnabled.checked = settings.rosterSync?.enabled === true;
-        rosterSyncEnabled.addEventListener('change', () => {
-            if (!settings.rosterSync) settings.rosterSync = {};
-            settings.rosterSync.enabled = rosterSyncEnabled.checked;
-            save();
-            renderRosterSyncState();
-        });
-    }
-    if (rosterSyncNow) {
-        rosterSyncNow.addEventListener('click', async () => {
-            if (typeof syncRoster !== 'function') {
-                showResult(rosterSyncStatus, 'Sync is unavailable in this context.', true);
-                return;
-            }
-            if (!settings.rosterSync?.enabled) {
-                showResult(rosterSyncStatus, 'Turn sync on first.', true);
-                return;
-            }
-            const original = rosterSyncNow.textContent;
-            rosterSyncNow.disabled = true;
-            rosterSyncNow.textContent = 'Syncing…';
-            try {
-                const result = await syncRoster({ mode: rosterSyncMode?.value ?? 'keep-mine' });
-                // A refusal is not an exception: the policy deliberately
-                // blocks destructive syncs, and the user needs the reason.
-                showResult(rosterSyncStatus, result.message, !result.ok);
-                if (result.ok) {
-                    await loadCharactersList();
-                    renderRosterSyncState();
-                }
-            } catch (err) {
-                showResult(rosterSyncStatus, err?.message ?? String(err), true);
-            } finally {
-                rosterSyncNow.disabled = false;
-                rosterSyncNow.textContent = original;
-            }
-        });
-    }
-    renderRosterSyncState();
-
     // ---- D7: preset export/import -----------------------------------------
     const presetExportBtn = $('if_preset_export');
     const presetImportBtn = $('if_preset_import');
@@ -2558,106 +2527,6 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     charNewBtn.addEventListener('click', () => {
         charSelect.value = '';
         populateCharForm(null);
-    });
-
-    async function readHostContext() {
-        try { return getChatContext?.() ?? null; } catch { return null; }
-    }
-
-    if (charImportActiveBtn) charImportActiveBtn.addEventListener('click', async () => {
-        const originalText = charImportActiveBtn.textContent;
-        charImportActiveBtn.disabled = true;
-        charImportActiveBtn.textContent = 'Importing...';
-        try {
-            const ctx = await readHostContext();
-            const stChar = ctx?.characters?.[ctx.characterId];
-            if (!stChar) {
-                showResult(charStatus, 'No character selected in SillyTavern', true);
-                if (typeof toastr !== 'undefined') toastr.warning('No character selected in SillyTavern', 'IF Image');
-                return;
-            }
-
-            const existing = await getAllCharacters();
-            const duplicate = findCharacterByCardId(existing, stChar.avatar);
-            if (duplicate) {
-                currentChars = existing;
-                activeCharId = duplicate.id;
-                await loadCharactersList();
-                charSelect.value = duplicate.id;
-                populateCharForm(duplicate);
-                showResult(charStatus, 'Already imported', false);
-                if (typeof toastr !== 'undefined') toastr.info('Already imported', 'IF Image');
-                return;
-            }
-
-            const imported = createCharacterFromStCard(stChar);
-            await saveCharacter(imported);
-            activeCharId = imported.id;
-            await loadCharactersList();
-            charSelect.value = imported.id;
-            populateCharForm(imported);
-            await refreshRoster?.();
-            const message = `Imported character: ${imported.name}`;
-            showResult(charStatus, message, false);
-            if (typeof toastr !== 'undefined') toastr.success(message, 'IF Image');
-        } catch (err) {
-            const message = err?.message ?? String(err);
-            showResult(charStatus, message, true);
-            if (typeof toastr !== 'undefined') toastr.error(message, 'IF Image');
-        } finally {
-            charImportActiveBtn.disabled = false;
-            charImportActiveBtn.textContent = originalText;
-        }
-    });
-
-    if (charImportAllBtn) charImportAllBtn.addEventListener('click', async () => {
-        const originalText = charImportAllBtn.textContent;
-        charImportAllBtn.disabled = true;
-        charImportAllBtn.textContent = 'Importing...';
-        try {
-            const ctx = await readHostContext();
-            const stCharacters = getStCharacters(ctx);
-            if (!stCharacters.length) {
-                showResult(charStatus, 'No SillyTavern characters found', true);
-                if (typeof toastr !== 'undefined') toastr.warning('No SillyTavern characters found', 'IF Image');
-                return;
-            }
-
-            const existing = await getAllCharacters();
-            const knownCardIds = new Set(existing.map(character => character?.binding?.cardId).filter(Boolean));
-            const imported = [];
-            let skipped = 0;
-            for (const stChar of stCharacters) {
-                const cardId = typeof stChar.avatar === 'string' && stChar.avatar ? stChar.avatar : null;
-                if (cardId && knownCardIds.has(cardId)) {
-                    skipped += 1;
-                    continue;
-                }
-                const character = createCharacterFromStCard(stChar);
-                await saveCharacter(character);
-                imported.push(character);
-                if (cardId) knownCardIds.add(cardId);
-            }
-
-            const lastImported = imported.at(-1) ?? null;
-            if (lastImported) activeCharId = lastImported.id;
-            await loadCharactersList();
-            if (lastImported) {
-                charSelect.value = lastImported.id;
-                populateCharForm(lastImported);
-            }
-            if (imported.length) await refreshRoster?.();
-            const message = `Imported ${imported.length} character${imported.length === 1 ? '' : 's'}; skipped ${skipped} already imported.`;
-            showResult(charStatus, message, false);
-            if (typeof toastr !== 'undefined') toastr.success(message, 'IF Image');
-        } catch (err) {
-            const message = err?.message ?? String(err);
-            showResult(charStatus, message, true);
-            if (typeof toastr !== 'undefined') toastr.error(message, 'IF Image');
-        } finally {
-            charImportAllBtn.disabled = false;
-            charImportAllBtn.textContent = originalText;
-        }
     });
 
     charSaveBtn.addEventListener('click', async () => {

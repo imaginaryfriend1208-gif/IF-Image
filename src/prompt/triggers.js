@@ -44,13 +44,11 @@ export function matchCharacter(token, roster = []) {
             const norm = normalizeName(candidate);
             if (!norm) continue;
 
-            let score = 0;
-            if (norm === target) {
-                score = 1000 + norm.length;
-            } else if (norm.includes(target) || target.includes(norm)) {
-                score = 100 + Math.min(norm.length, target.length);
-            }
-
+            // Explicit $Name tokens must match a full preset name or alias.
+            // Substring matching made tokens such as $RosarioAlt silently
+            // resolve to Rosario and generated the wrong character.
+            if (norm !== target) continue;
+            const score = 1000 + norm.length;
             if (score > highestScore) {
                 highestScore = score;
                 bestMatch = char;
@@ -413,8 +411,18 @@ export function parseTriggers(input, context = {}) {
             const aliases = Array.isArray(p.aliases) ? p.aliases : [];
             if (!aliases.length) continue;
             // Build a temporary roster shape for matchCharacter
-            const probe = [{ name: p.name, aliases }];
-            const matched = matchCharacter(text, probe);
+            const matched = aliases.some(alias => {
+                const haystack = normalizeName(text);
+                const needle = normalizeName(alias);
+                let at = haystack.indexOf(needle);
+                while (needle && at >= 0) {
+                    const before = haystack[at - 1] ?? '';
+                    const after = haystack[at + needle.length] ?? '';
+                    if (!/[\p{L}\p{N}_]/u.test(before) && !/[\p{L}\p{N}_]/u.test(after)) return true;
+                    at = haystack.indexOf(needle, at + 1);
+                }
+                return false;
+            });
             if (matched) {
                 foundChars.push({ isPersona: true, persona: p, modifiers: [] });
                 alreadyMatchedIds.add(p.id);

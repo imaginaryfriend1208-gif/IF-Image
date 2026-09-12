@@ -77,9 +77,17 @@ export const defaultSettings = {
         systemPromptOverride: '',
         // Phase CP: chat image placement (LLM plans N images across the chat).
         chatPlace: {
+            // together: one LLM plan spanning the selected chat window.
+            // separate: chronological per-message scenes/markers.
+            planningMode: 'together',
             count: 3,
             onlyCharacter: true,
             maxChatWindow: 40,
+            includeCharacterMessages: true,
+            includeUserMessages: true,
+            includeFirstMessage: false,
+            includeCharacterCard: false,
+            includeExtensionPrompts: false,
             // Second LLM pass: rewrite each planned prompt against the chat
             // text around its anchor, so the prompt matches what actually
             // happens there instead of the roster defaults. One extra call
@@ -127,26 +135,11 @@ export const defaultSettings = {
         },
     },
     // Per-user roster sync through SillyTavern's own file storage
-    // (/api/files/*, <dataRoot>/<handle>/user/files). IndexedDB is per
-    // browser, so a device change or a cleared site-data loses every
-    // character/outfit/style/persona. This is the opt-in remedy.
-    //
-    // Disabled by default: syncing is a data-moving operation and the user
-    // has to choose it. `path` is filled in by the first successful upload;
-    // `migratedAt` makes the one-time IndexedDB -> server migration
-    // idempotent, and `lastSyncedAt` is shown in the UI status line.
-    rosterSync: {
-        enabled: false,
-        path: '',
-        migratedAt: null,
-        lastSyncedAt: null,
-        // Embed prompt/seed/params into generated PNGs as a tEXt chunk, so a
-        // downloaded image can still explain itself on another machine.
-        // Independent of roster sync; costs nothing when no PNG is produced.
-        embedPngMetadata: true,
-    },
     // Phase D6: image-store housekeeping (0 = off per knob).
     cache: {
+        // Keep portable prompt metadata in downloaded PNG files. This is not
+        // roster synchronization and does not store presets in the browser.
+        embedPngMetadata: true,
         ttlDays: 0,
         maxMB: 0,
         jpegQuality: 0,

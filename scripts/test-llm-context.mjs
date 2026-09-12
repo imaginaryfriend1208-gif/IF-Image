@@ -212,3 +212,23 @@ test('substituteParams is applied', () => {
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
+
+// Regression: ST card prose caused fixed gaze/clothing to override live RP.
+test('character-card prose is opt-in and live chat remains the default context', () => {
+    const host = { characterId: 0, characters: [{
+        description: 'Rosario always stares directly into the camera and wears a uniform.',
+        first_mes: 'Rosario enters in his old uniform.',
+    }] };
+    const args = {
+        chat: [{ role: 'character', mes: 'Rosario turns away and changes into a blue robe.', is_system: false }],
+        settings: { generation: { sceneWindow: 4 } },
+        contextProfile: { includeCharacterCard: false, includeFirstMessage: false },
+        host,
+    };
+    const normal = buildContext(args);
+    assert.match(normal.sceneText, /turns away and changes into a blue robe/);
+    assert.doesNotMatch(normal.sceneText, /stares directly|old uniform/);
+    const optedIn = buildContext({ ...args, contextProfile: { includeCharacterCard: true, includeFirstMessage: true } });
+    assert.match(optedIn.sceneText, /stares directly/);
+    assert.match(optedIn.sceneText, /old uniform/);
+});

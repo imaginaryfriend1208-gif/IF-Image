@@ -342,10 +342,23 @@ export function createEngine({
         const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
         const chatPlaceSettings = settings.llm?.chatPlace ?? {};
         const onlyCharacter = chatPlaceSettings.onlyCharacter !== false;
-        const maxWindow = Math.min(40, Math.max(2, Number(chatPlaceSettings.maxChatWindow) || 40));
+        const planningMode = chatPlaceSettings.planningMode === 'separate' ? 'separate' : 'together';
+        const configuredWindow = Number(chatPlaceSettings.maxChatWindow);
+        const maxWindow = configuredWindow === 0 ? 0 : Math.min(200, Math.max(1, configuredWindow || 40));
         const contextResult = subjectContext({
             chat,
-            contextProfile: { sceneWindow: maxWindow, maxSceneWindow: 40, scope: 'scene' },
+            contextProfile: {
+                sceneWindow: maxWindow,
+                maxSceneWindow: 200,
+                scope: 'scene',
+                includeCharCard: true,
+                includePersona: true,
+                includeCharacterMessages: chatPlaceSettings.includeCharacterMessages !== false,
+                includeUserMessages: chatPlaceSettings.includeUserMessages !== false,
+                includeFirstMessage: chatPlaceSettings.includeFirstMessage === true,
+                includeCharacterCard: chatPlaceSettings.includeCharacterCard === true,
+                includeExtensionPrompts: chatPlaceSettings.includeExtensionPrompts === true,
+            },
             maxSubjects: 12,
         });
         const gen = generationContext();
@@ -353,6 +366,7 @@ export function createEngine({
         const forbiddenFragments = forbiddenStyleFragments(gen);
         const systemPrompt = renderChatPlacePrompt({
             count,
+            planning_mode: planningMode,
             dialect_rules: dialectRules,
             subject_catalog: contextResult.subjectBlock,
         });
@@ -398,6 +412,8 @@ export function createEngine({
                 item.errors.some(error => !/anchor did not resolve|duplicate message anchor|prompt is empty/i.test(error)));
             if (placements.length >= count || attempt === 1 || !correctable) break;
         }
+
+        if (planningMode === 'separate') placements.sort((a, b) => a.messageId - b.messageId);
 
         if (!placements.length || chatPlaceSettings.rewrite === false) {
             return {

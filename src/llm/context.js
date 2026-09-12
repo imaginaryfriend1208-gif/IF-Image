@@ -59,13 +59,17 @@ export function renderSpeakerLabel(message, { catalog = [], host = {} } = {}) {
     return character ? `[${character.token} — ${character.name}, character]` : `[${name} — character]`;
 }
 
-function cleanMessageWindow(messages, sceneWindow, scope) {
+function cleanMessageWindow(messages, sceneWindow, scope, profile = {}) {
     if (scope === 'raw') return [];
+    const allowed = message => message && !message.is_system
+        && (profile.includeUserMessages !== false || !messageIsUser(message))
+        && (profile.includeCharacterMessages !== false || messageIsUser(message));
     if (scope === 'last') {
-        const last = [...messages].reverse().find(message => message && !message.is_system && !messageIsUser(message));
+        const last = [...messages].reverse().find(allowed);
         return last ? [last] : [];
     }
-    return messages.slice(-sceneWindow).filter(message => message && !message.is_system);
+    const eligible = messages.filter(allowed);
+    return sceneWindow === 0 ? eligible : eligible.slice(-sceneWindow);
 }
 
 /**
@@ -82,11 +86,11 @@ export function buildContext({
     const profile = contextProfile ?? {};
     const rawWindow = Number(profile.sceneWindow ?? settings?.generation?.sceneWindow ?? 4);
     const rawCap = Number(profile.maxSceneWindow ?? 8);
-    const windowCap = Number.isFinite(rawCap) ? Math.min(40, Math.max(2, Math.floor(rawCap))) : 8;
-    const sceneWindow = Number.isFinite(rawWindow) ? Math.min(windowCap, Math.max(2, Math.floor(rawWindow))) : 4;
+    const windowCap = Number.isFinite(rawCap) ? Math.min(200, Math.max(1, Math.floor(rawCap))) : 8;
+    const sceneWindow = Number.isFinite(rawWindow) ? (rawWindow === 0 ? 0 : Math.min(windowCap, Math.max(1, Math.floor(rawWindow)))) : 4;
     const scope = profile.scope ?? 'scene';
     const messages = Array.isArray(chat) ? chat : [];
-    const selectedMessages = cleanMessageWindow(messages, sceneWindow, scope);
+    const selectedMessages = cleanMessageWindow(messages, sceneWindow, scope, profile);
     const relevanceText = [
         ...selectedMessages.map(message => stripRenderedArtifacts(message.mes ?? message.content ?? '')),
         stripRenderedArtifacts(additionalRelevanceText),
@@ -112,6 +116,24 @@ export function buildContext({
         return body ? `${renderSpeakerLabel(message, { catalog: subjectCatalog, host })}: ${body}` : '';
     }).filter(Boolean).join('\n');
     let subjectBlock = renderSubjectCatalog(subjectCatalog);
+
+    const optionalSections = [];
+    const active = host?.characters?.[host?.characterId ?? host?.character_id] ?? null;
+    if (profile.includeFirstMessage === true && active) {
+        const first = stripRenderedArtifacts(active.first_mes ?? active.data?.first_mes ?? '');
+        if (first) optionalSections.push(`OPTIONAL CHARACTER FIRST MESSAGE (context only; current chat overrides conflicts):
+${first}`);
+    }
+    if (profile.includeCharacterCard === true && active) {
+        const card = [active.description ?? active.data?.description, active.personality ?? active.data?.personality, active.scenario ?? active.data?.scenario]
+            .map(stripRenderedArtifacts).filter(Boolean).join('\n');
+        if (card) optionalSections.push(`OPTIONAL CHARACTER CARD (context only; current chat overrides conflicts):\n${card}`);
+    }
+    if (profile.includeExtensionPrompts === true && host?.extensionPrompts) {
+        const injected = Object.values(host.extensionPrompts).map(item => stripRenderedArtifacts(item?.value ?? item)).filter(Boolean).join('\n');
+        if (injected) optionalSections.push(`OPTIONAL EXTENSION INJECTIONS (context only):\n${injected}`);
+    }
+    if (optionalSections.length) sceneText = `${optionalSections.join('\n\n')}\n\n${sceneText}`.trim();
 
     if (typeof substituteParams === 'function') {
         sceneText = substituteParams(sceneText);
