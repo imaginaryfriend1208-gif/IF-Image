@@ -71,6 +71,7 @@ const a1111 = new A1111Client({
 });
 
 function notify(kind, message) {
+    if (settings?.notifications === false) return;
     if (typeof toastr !== 'undefined' && typeof toastr[kind] === 'function') toastr[kind](message, 'IF Image');
 }
 
@@ -112,10 +113,14 @@ jQuery(async () => {
         }
     }
     const initialRosterLoad = refreshRoster();
+    // Storage writes announce themselves so generation sees edits immediately;
+    // no page refresh or manual sync action is required.
+    const onRosterDataChanged = () => refreshRoster();
+    globalThis.addEventListener?.('if-image:data-changed', onRosterDataChanged);
 
     // ------------------------------------------------------------------
-    // Per-user roster sync. IndexedDB stays the read path (fast, offline);
-    // the server file is the portable copy that survives a device change.
+    // Optional legacy roster-file backup. Canonical preset reads now come from
+    // SillyTavern extension_settings; generated image blobs stay in IndexedDB.
     //
     // Nothing here runs unless settings.rosterSync.enabled is true, and no
     // write is ever made without the roster-sync policy allowing it.
@@ -421,6 +426,9 @@ jQuery(async () => {
             rating: isNsfw ? 'nsfw' : 'sfw',
         });
         envelope = applyReplaceRules(envelope, rules, 'final', ruleCtx);
+        if (envelope.prompt !== assembled.prompt || envelope.negative !== assembled.negative) {
+            notify('info', 'Prompt filters applied.');
+        }
 
         // Final stage, deliberately last: a prefix-head replace rule inserts
         // at index 0 and would otherwise displace a leading LoRA.
@@ -643,6 +651,8 @@ jQuery(async () => {
         timeoutMs: 300000,
         onStateChange: (snapshot) => {
             pipeline.onTaskStateChange(snapshot);
+            if (snapshot.status === 'running') notify('info', 'Generating image…');
+            else if (snapshot.status === 'succeeded') notify('success', 'Image generated.');
             const waiter = regenWaiters.get(snapshot.id);
             if (!waiter) return;
             if (snapshot.status === 'succeeded') {
@@ -972,6 +982,7 @@ jQuery(async () => {
     for (const type of restoreEvents) eventSource.on(type, onRendered);
 
     $(window).on('beforeunload.if_image', () => {
+        globalThis.removeEventListener?.('if-image:data-changed', onRosterDataChanged);
         for (const type of restoreEvents) eventSource.removeListener(type, onRendered);
         if (receivedType) eventSource.removeListener(receivedType, onMessageReceived);
         runtime.unregister();

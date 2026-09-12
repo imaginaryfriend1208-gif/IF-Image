@@ -5,7 +5,15 @@
 // fields normalize to `explicit`, so merely upgrading never enables auto-match.
 // The `outfits` IndexedDB store already exists at DB version 1 — no bump.
 
-import { STORES, getAllItems, getItem, putItem, deleteItem } from './idb.js';
+import { STORES } from './idb.js';
+
+// Loaded only when persistence is used, keeping the pure schema/normalization
+// helpers usable in non-SillyTavern tooling and tests.
+const configStore = () => import('./config-store.js');
+const getAllItems = async store => (await configStore()).getAllConfigItems(store);
+const getItem = async (store, id) => (await configStore()).getConfigItem(store, id);
+const putItem = async (store, item) => (await configStore()).putConfigItem(store, item);
+const deleteItem = async (store, id) => (await configStore()).deleteConfigItem(store, id);
 import { getCharacter, saveCharacter } from './chars.js';
 
 export const OUTFIT_TRIGGER_MODES = Object.freeze({

@@ -321,6 +321,15 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
 
         <!-- ============ ADVANCED TAB: log section ============ -->
         <div class="if-image-panel" data-if-panel="advanced" style="display:none;">
+            <h3>Notifications</h3>
+            <div class="if-image-row">
+                <label class="if-image-check">
+                    <input type="checkbox" id="if_notifications"> Notify when prompts are filtered and images are generated
+                </label>
+            </div>
+            <div class="if-image-note">Turn this off to suppress IF Image progress toasts.</div>
+
+            <hr class="if-image-sep"/>
             <h3>Generation Log</h3>
             <div class="if-image-row">
                 <label for="if_log_limit">Log limit</label>
@@ -576,10 +585,10 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             <div id="if_preset_status" class="if-image-result"></div>
             <div class="if-image-row">
                 <label class="if-image-check">
-                    <input type="checkbox" id="if_roster_sync_enabled"> Sync presets to this SillyTavern account
+                    <input type="checkbox" id="if_roster_sync_enabled"> Create an optional separate roster backup
                 </label>
             </div>
-            <div class="if-image-note">Characters, outfits, styles, personas and replace rules normally live in this browser only, so a new device or a cleared cache loses them. With this on they are also stored in your account's server files and follow you between devices. Images stay local.</div>
+            <div class="if-image-note">Characters, outfits, styles, personas and replace rules are saved automatically in SillyTavern settings and follow the account without using this control. This legacy sync creates a separate server-file backup. Generated images stay local.</div>
             <div class="if-image-row">
                 <button id="if_roster_sync_now" class="menu_button">Sync now</button>
                 <select id="if_roster_sync_mode" class="text_pole" title="How to resolve a record that exists on both sides">
@@ -1036,6 +1045,15 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     const mainBackend = $('if_main_backend');
     const mainProfile = $('if_main_profile');
     const mainMode = $('if_main_mode');
+
+    const notifications = $('if_notifications');
+    if (notifications) {
+        notifications.checked = settings.notifications !== false;
+        notifications.addEventListener('change', () => {
+            settings.notifications = notifications.checked;
+            save();
+        });
+    }
 
     mainEnabled.checked = settings.enabled !== false;
     mainGenEnabled.checked = settings.generation.enabled !== false;
@@ -2274,7 +2292,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         if (!rosterSyncStatus) return;
         const sync = settings.rosterSync ?? {};
         if (!sync.enabled) {
-            rosterSyncStatus.textContent = 'Sync is off — presets live in this browser only.';
+            rosterSyncStatus.textContent = 'Optional roster-file backup is off. Automatic SillyTavern settings persistence remains on.';
             return;
         }
         rosterSyncStatus.textContent = sync.lastSyncedAt

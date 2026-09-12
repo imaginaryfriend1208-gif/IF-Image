@@ -1,6 +1,6 @@
 // IF Image - IndexedDB storage abstraction.
-// Manages local persistence for chars, outfits, styles, personas, images.
-// Does NOT touch extension_settings (kept lightweight for configuration).
+// Retains the legacy preset stores for one-time migration and manages image
+// blobs. Current characters/outfits/styles/personas use extension_settings.
 
 const DB_NAME = 'IF_Image_DB';
 const DB_VERSION = 1;

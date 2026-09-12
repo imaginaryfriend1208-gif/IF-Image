@@ -10,6 +10,19 @@ export const SETTINGS_KEY = 'IF_Image';
 export const defaultSettings = {
     settingsVersion: CURRENT_VERSION,
     enabled: true,
+    notifications: true,
+    // Canonical SillyTavern-persisted user data. Kept JSON-only so it follows
+    // the account through /api/settings/save and remains exportable.
+    data: {
+        characters: [],
+        outfits: [],
+        styles: [],
+        personas: [],
+    },
+    dataMigration: {
+        indexedDbImported: false,
+        importedAt: null,
+    },
     backends: {
         nai: {
             apiKey: '',
