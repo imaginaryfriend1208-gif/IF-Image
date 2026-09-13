@@ -792,6 +792,23 @@ export function renderDrawer({ settings, save, imageBackend, llmClient, genLog, 
     // Element helpers
     const $ = id => el.querySelector('#' + id);
 
+    // P5a: mount the connection-first UI before wiring the remaining drawer
+    // controls. The module owns its subtree and reads only connection.*.
+    const connectionMount = $('if_connection_mount');
+    if (connectionMount) {
+        mountConnectionTab({
+            mount: connectionMount,
+            settings,
+            save,
+            imageBackend,
+            llmClient,
+            listStProfiles,
+            notify: typeof globalThis.toastr?.error === 'function'
+                ? (kind, message) => globalThis.toastr[kind]?.(message)
+                : undefined,
+        });
+    }
+
     // Log/prompt/name text is user- or LLM-controlled: always escape before
     // interpolating into innerHTML.
     function escapeHtml(value) {
