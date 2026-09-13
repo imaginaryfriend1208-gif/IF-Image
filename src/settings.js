@@ -23,6 +23,46 @@ export const defaultSettings = {
         indexedDbImported: false,
         importedAt: null,
     },
+    // V2 canonical connection-first configuration. Legacy backends/llm/
+    // generation keys remain during the staged rollout and are migrated into
+    // these sections without overwriting values already saved here.
+    connection: {
+        imageBackend: 'comfy',
+        comfy: {
+            url: '',
+            auth: '',
+            model: '',
+            modelList: [],
+            lastFetchedAt: 0,
+            transport: 'st-relay',
+        },
+        nai: {
+            apiKey: '',
+            model: 'nai-diffusion-4-5-full',
+        },
+        llm: {
+            mode: 'st_profile',
+            stProfileId: '',
+            custom: {
+                baseUrl: '',
+                apiKey: '',
+                model: '',
+            },
+        },
+    },
+    generate: {
+        imagesPerResponse: 1,
+        contextResponses: 2,
+        activePromptPresetId: '',
+        overrides: {
+            width: null,
+            height: null,
+            steps: null,
+            cfg: null,
+            sampler: '',
+            seed: null,
+        },
+    },
     backends: {
         nai: {
             apiKey: '',
@@ -77,10 +117,6 @@ export const defaultSettings = {
         systemPromptOverride: '',
         // Phase CP: chat image placement (LLM plans N images across the chat).
         chatPlace: {
-            // together: one LLM plan spanning the selected chat window.
-            // separate: chronological per-message scenes/markers.
-            planningMode: 'together',
-            count: 3,
             onlyCharacter: true,
             maxChatWindow: 40,
             includeCharacterMessages: true,

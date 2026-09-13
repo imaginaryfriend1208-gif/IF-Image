@@ -231,6 +231,119 @@ export const migrators = [
         a1111.checkpointProfiles = next;
         a1111.activeProfileId = activeProfileId;
     },
+    // 10 -> 11 (V2 P1): establish the connection-first settings model.
+    // Legacy backend/profile data remains readable during the staged rollout.
+    // Obsolete multi-message placement controls are retained under `_legacy`.
+    (s) => {
+        const isObject = value => value && typeof value === 'object' && !Array.isArray(value);
+        const string = value => typeof value === 'string' ? value : '';
+        const setMissing = (target, key, value) => {
+            if (target[key] === undefined) target[key] = value;
+        };
+        const clampInt = (value, fallback, min, max) => {
+            const number = Number(value);
+            return Number.isFinite(number)
+                ? Math.min(max, Math.max(min, Math.round(number)))
+                : fallback;
+        };
+
+        const backends = isObject(s.backends) ? s.backends : {};
+        const legacyA1111 = isObject(backends.a1111) ? backends.a1111 : {};
+        const legacyComfy = isObject(backends.comfy) ? backends.comfy : {};
+        const legacyNai = isObject(backends.nai) ? backends.nai : {};
+        const legacyGeneration = isObject(s.generation) ? s.generation : {};
+        const legacyLlm = isObject(s.llm) ? s.llm : {};
+        const legacyChatPlace = isObject(legacyLlm.chatPlace) ? legacyLlm.chatPlace : {};
+
+        if (!isObject(s.connection)) s.connection = {};
+        const connection = s.connection;
+        setMissing(connection, 'imageBackend', legacyGeneration.backend === 'nai' ? 'nai' : 'comfy');
+
+        if (!isObject(connection.comfy)) connection.comfy = {};
+        const comfy = connection.comfy;
+        const selectedA1111 = legacyGeneration.backend === 'a1111'
+            || legacyComfy.connection === 'a1111';
+        const a1111Url = string(legacyA1111.baseUrl);
+        const comfyUrl = string(legacyComfy.baseUrl);
+        const useA1111 = selectedA1111
+            ? Boolean(a1111Url || !comfyUrl)
+            : Boolean(a1111Url && !comfyUrl);
+        const sourceUrl = useA1111 ? a1111Url : comfyUrl;
+        const sourceAuth = useA1111
+            ? string(legacyA1111.auth)
+            : (string(legacyComfy.username) || string(legacyComfy.password)
+                ? `${string(legacyComfy.username)}:${string(legacyComfy.password)}`
+                : '');
+        const sourceModel = useA1111
+            ? string(legacyA1111.checkpoint || legacyGeneration.checkpoint)
+            : string(legacyComfy.proxyModel);
+        const discovery = isObject(legacyA1111.discovery) ? legacyA1111.discovery : {};
+        const discoveredModels = Array.isArray(discovery.models)
+            ? discovery.models.map(item => typeof item === 'string'
+                ? item : string(item?.title || item?.model_name)).filter(Boolean)
+            : [];
+        setMissing(comfy, 'url', sourceUrl);
+        setMissing(comfy, 'auth', sourceAuth);
+        setMissing(comfy, 'model', sourceModel);
+        setMissing(comfy, 'modelList', useA1111 ? discoveredModels : []);
+        setMissing(comfy, 'lastFetchedAt', useA1111 ? (Number(discovery.at) || 0) : 0);
+        setMissing(comfy, 'transport', useA1111 && legacyA1111.transport === 'direct'
+            ? 'direct' : useA1111 ? 'st-relay' : 'direct');
+
+        if (!isObject(connection.nai)) connection.nai = {};
+        setMissing(connection.nai, 'apiKey', string(legacyNai.apiKey));
+        setMissing(connection.nai, 'model', string(legacyNai.model) || 'nai-diffusion-4-5-full');
+
+        if (!isObject(connection.llm)) connection.llm = {};
+        const llmConnection = connection.llm;
+        const apiProfiles = Array.isArray(legacyLlm.apiProfiles) ? legacyLlm.apiProfiles : [];
+        const mappedId = string(legacyLlm.requestMapping?.image_gen?.apiProfileId);
+        const selectedProfileId = mappedId || string(legacyLlm.defaultApiProfileId);
+        const selectedProfile = apiProfiles.find(profile => profile?.id === selectedProfileId) ?? null;
+        const method = selectedProfile?.method ?? legacyLlm.defaultMethod ?? 'generateRaw';
+        const connectionManager = ['connection_manager', 'st_connection_manager'].includes(method);
+        const directFetch = method === 'direct_fetch';
+        setMissing(llmConnection, 'mode', directFetch ? 'custom' : 'st_profile');
+        setMissing(llmConnection, 'stProfileId', connectionManager ? string(selectedProfile?.stProfileId) : '');
+        if (!isObject(llmConnection.custom)) llmConnection.custom = {};
+        setMissing(llmConnection.custom, 'baseUrl', directFetch ? string(selectedProfile?.baseUrl) : '');
+        setMissing(llmConnection.custom, 'apiKey', directFetch ? string(selectedProfile?.apiKey) : '');
+        setMissing(llmConnection.custom, 'model', directFetch ? string(selectedProfile?.model) : '');
+
+        if (!isObject(s.generate)) s.generate = {};
+        const generate = s.generate;
+        setMissing(generate, 'imagesPerResponse', 1);
+        setMissing(generate, 'contextResponses', clampInt(legacyGeneration.sceneWindow, 2, 1, 5));
+        setMissing(generate, 'activePromptPresetId', '');
+        if (!isObject(generate.overrides)) generate.overrides = {};
+        const profileKey = string(legacyGeneration.profile) || string(legacyComfy.profile) || 'anima';
+        const oldOverrides = isObject(legacyGeneration.params?.[profileKey])
+            ? legacyGeneration.params[profileKey] : {};
+        for (const [key, fallback] of Object.entries({
+            width: null, height: null, steps: null, cfg: null, sampler: '', seed: null,
+        })) {
+            setMissing(generate.overrides, key, oldOverrides[key] ?? fallback);
+        }
+
+        const obsoletePlacement = {};
+        if (Object.hasOwn(legacyChatPlace, 'planningMode')) {
+            obsoletePlacement.planningMode = legacyChatPlace.planningMode;
+            delete legacyChatPlace.planningMode;
+        }
+        if (Object.hasOwn(legacyChatPlace, 'count')) {
+            obsoletePlacement.count = legacyChatPlace.count;
+            delete legacyChatPlace.count;
+        }
+        if (Object.keys(obsoletePlacement).length) {
+            if (!isObject(s._legacy)) s._legacy = {};
+            if (!isObject(s._legacy.llm)) s._legacy.llm = {};
+            if (!isObject(s._legacy.llm.chatPlace)) s._legacy.llm.chatPlace = {};
+            for (const [key, value] of Object.entries(obsoletePlacement)) {
+                setMissing(s._legacy.llm.chatPlace, key, value);
+            }
+        }
+    },
+
 ];
 
 /** Current schema version = number of migrators applied from zero. */

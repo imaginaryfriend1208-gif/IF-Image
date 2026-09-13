@@ -527,6 +527,131 @@ test('v9 → v10 with no checkpoint match leaves activeProfileId empty; tolerate
     assert.equal(runMigrations(bare), false);
 });
 
+// --- Tests 31-35 (v10 -> v11): connection-first settings. ---
+test('v10 A1111 relay migrates to connection.comfy and archives placement controls', () => {
+    const v10 = {
+        settingsVersion: 10,
+        backends: {
+            a1111: {
+                baseUrl: 'https://images.example', auth: 'configured-credential',
+                transport: 'st-relay', checkpoint: 'Model A',
+                discovery: { at: 123, models: [{ title: 'Model A' }], samplers: [], schedulers: [] },
+            },
+            comfy: { connection: 'a1111', baseUrl: 'https://old-proxy.example' },
+            nai: { apiKey: '', model: 'nai-diffusion-4-5-full' },
+        },
+        generation: {
+            backend: 'comfy', profile: 'anima', sceneWindow: 4,
+            params: { anima: { width: 1024, height: 1536, steps: 24, cfg: 5, sampler: 'Euler' } },
+        },
+        llm: { chatPlace: { planningMode: 'separate', count: 3, rewrite: true } },
+    };
+    runMigrations(v10);
+    assert.equal(v10.settingsVersion, CURRENT_VERSION);
+    assert.deepEqual(v10.connection.comfy, {
+        url: 'https://images.example', auth: 'configured-credential', model: 'Model A',
+        modelList: ['Model A'], lastFetchedAt: 123, transport: 'st-relay',
+    });
+    assert.equal(v10.connection.imageBackend, 'comfy');
+    assert.deepEqual(v10.generate, {
+        imagesPerResponse: 1,
+        contextResponses: 4,
+        activePromptPresetId: '',
+        overrides: { width: 1024, height: 1536, steps: 24, cfg: 5, sampler: 'Euler', seed: null },
+    });
+    assert.equal('planningMode' in v10.llm.chatPlace, false);
+    assert.equal('count' in v10.llm.chatPlace, false);
+    assert.deepEqual(v10._legacy.llm.chatPlace, { planningMode: 'separate', count: 3 });
+});
+
+test('v10 NAI settings migrate to connection.nai and select the NAI image backend', () => {
+    const v10 = {
+        settingsVersion: 10,
+        backends: {
+            nai: { apiKey: 'configured-credential', model: 'nai-diffusion-4-full' },
+            comfy: {}, a1111: {},
+        },
+        generation: { backend: 'nai' },
+    };
+    runMigrations(v10);
+    assert.equal(v10.connection.imageBackend, 'nai');
+    assert.deepEqual(v10.connection.nai, {
+        apiKey: 'configured-credential', model: 'nai-diffusion-4-full',
+    });
+});
+
+test('v10 connection_manager profile migrates to one ST profile target', () => {
+    const v10 = {
+        settingsVersion: 10,
+        llm: {
+            apiProfiles: [
+                { id: 'fallback', method: 'generateRaw' },
+                { id: 'mapped', method: 'connection_manager', stProfileId: 'st-profile-7' },
+            ],
+            defaultApiProfileId: 'fallback',
+            requestMapping: { image_gen: { apiProfileId: 'mapped' } },
+        },
+    };
+    runMigrations(v10);
+    assert.deepEqual(v10.connection.llm, {
+        mode: 'st_profile', stProfileId: 'st-profile-7',
+        custom: { baseUrl: '', apiKey: '', model: '' },
+    });
+});
+
+test('v10 direct_fetch migrates to custom while generateRaw requires ST profile selection', () => {
+    const custom = {
+        settingsVersion: 10,
+        llm: {
+            apiProfiles: [{
+                id: 'direct', method: 'direct_fetch', baseUrl: 'https://llm.example',
+                apiKey: 'configured-credential', model: 'model-x',
+            }],
+            defaultApiProfileId: 'direct',
+        },
+    };
+    runMigrations(custom);
+    assert.deepEqual(custom.connection.llm, {
+        mode: 'custom', stProfileId: '',
+        custom: {
+            baseUrl: 'https://llm.example', apiKey: 'configured-credential', model: 'model-x',
+        },
+    });
+
+    const raw = { settingsVersion: 10, llm: { defaultMethod: 'generateRaw' } };
+    runMigrations(raw);
+    assert.equal(raw.connection.llm.mode, 'st_profile');
+    assert.equal(raw.connection.llm.stProfileId, '');
+});
+
+test('v11 migration preserves existing connection values and is idempotent', () => {
+    const v10 = {
+        settingsVersion: 10,
+        connection: {
+            imageBackend: 'nai',
+            comfy: { url: 'https://kept.example', model: 'Kept Model' },
+            llm: { mode: 'custom', custom: { model: 'kept-llm' } },
+        },
+        generate: { imagesPerResponse: 4, overrides: { width: 768 } },
+        backends: { a1111: { baseUrl: 'https://ignored.example' }, nai: {} },
+        generation: { backend: 'comfy', sceneWindow: 8 },
+        llm: { chatPlace: { count: 6 } },
+    };
+    runMigrations(v10);
+    assert.equal(v10.connection.imageBackend, 'nai');
+    assert.equal(v10.connection.comfy.url, 'https://kept.example');
+    assert.equal(v10.connection.comfy.model, 'Kept Model');
+    assert.equal(v10.connection.llm.mode, 'custom');
+    assert.equal(v10.connection.llm.custom.model, 'kept-llm');
+    assert.equal(v10.generate.imagesPerResponse, 4);
+    assert.equal(v10.generate.overrides.width, 768);
+    assert.equal(v10.generate.contextResponses, 5);
+    assert.equal(v10._legacy.llm.chatPlace.count, 6);
+    const snapshot = JSON.stringify(v10);
+    assert.equal(runMigrations(v10), false);
+    assert.equal(JSON.stringify(v10), snapshot);
+});
+
 // --- Summary ---
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
