@@ -797,3 +797,19 @@
         flex-basis: 100% !important;
     }
 }
+
+/* v2 P5-UI-1: identity + binding blocks */
+.if-entity-identity {
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 8px;
+    padding: 8px 10px;
+    margin-bottom: 10px;
+    background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 60%, transparent);
+}
+.if-entity-identity label { font-weight: 600; }
+.if-entity-bind {
+    display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+    margin-bottom: 10px;
+}
+.if-entity-bind-title { opacity: 0.8; font-size: 0.9em; }
+.if-entity-activestate { font-weight: 600; }

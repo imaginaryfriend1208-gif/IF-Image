@@ -18,6 +18,8 @@ import { buildTriggerContext } from './prompt/binding.js';
 import { undoPlacements } from './llm/inject.js';
 import { buildApiProfileExport, importApiProfiles } from './llm/profiles.js';
 import { formatLlmError, resolveLlmTarget, listStProfiles } from './llm/client.js';
+import { normalizeKeyword, normalizeAliases, claimUniqueKeyword } from './storage/entity-shape.js';
+import { buildEntityExport, prepareEntityImport } from './storage/transfer.js';
 import { mountConnectionTab, connectionTabMarkup } from './ui/connection-tab.js';
 import { makeHelpers } from './ui/shared.js';
 import { isValidLora, collectLoraGroups, parseLoraLines, renderLoraToken } from './prompt/ordering.js';
@@ -372,13 +374,29 @@ export function renderDrawer({ settings, save, imageBackend, llmClient, genLog, 
                     <button id="if_char_new" class="menu_button">+ New</button>
                 </div>
             </div>
-            <div class="if-image-row">
-                <label for="if_char_name">Name (display only — not a trigger)</label>
-                <input id="if_char_name" type="text" class="text_pole" placeholder="e.g. Lyna">
+            <!-- v2 binding block -->
+            <div class="if-entity-bind">
+                <span class="if-entity-bind-title">Bind (active only where ticked — unbound characters never trigger)</span>
+                <label class="if-image-check"><input id="if_char_bind_chat" type="checkbox"> <span>this chat</span></label>
+                <label class="if-image-check"><input id="if_char_bind_card" type="checkbox"> <span>this card</span></label>
+                <label class="if-image-check"><input id="if_char_bind_global" type="checkbox"> <span>everywhere (global)</span></label>
+                <span id="if_char_active_state" class="if-entity-activestate"></span>
             </div>
-            <div class="if-image-row">
-                <label for="if_char_aliases">Aliases (comma separated)</label>
-                <input id="if_char_aliases" type="text" class="text_pole" placeholder="e.g. lyna, dark elf">
+            <!-- v2 identity block: name is display-only; keyword + aliases trigger -->
+            <div class="if-entity-identity">
+                <div class="if-image-row">
+    <label for="if_char_name">Name (display only — not a trigger)</label>
+    <input id="if_char_name" type="text" class="text_pole" placeholder="e.g. Lyna">
+    </div>
+                <div class="if-image-row">
+                    <label for="if_char_keyword">Keyword (required, one word — the $keyword trigger)</label>
+                    <input id="if_char_keyword" type="text" class="text_pole" maxlength="32" placeholder="e.g. lyna" autocomplete="off">
+                    <div class="if-image-note" id="if_char_keyword_note"></div>
+                </div>
+                <div class="if-image-row">
+    <label for="if_char_aliases">Aliases (comma separated)</label>
+    <input id="if_char_aliases" type="text" class="text_pole" placeholder="e.g. lyna, dark elf">
+    </div>
             </div>
             <div class="if-image-row">
                 <label for="if_char_count">Count Tag</label>
@@ -455,6 +473,9 @@ export function renderDrawer({ settings, save, imageBackend, llmClient, genLog, 
 
             <div style="display:flex; gap:6px; margin-top:4px;">
                 <button id="if_char_save" class="menu_button" style="flex:1;">Save Character</button>
+                    <button id="if_char_export" class="menu_button">Export</button>
+                    <button id="if_char_import" class="menu_button">Import</button>
+                    <input id="if_char_import_file" type="file" accept="application/json" style="display:none">
                 <button id="if_char_del" class="menu_button if-image-btn-danger">Delete</button>
             </div>
             <div id="if_char_status" class="if-image-result"></div>
@@ -1294,6 +1315,48 @@ export function renderDrawer({ settings, save, imageBackend, llmClient, genLog, 
     const charNewBtn = $('if_char_new');
     const charName = $('if_char_name');
     const charAliases = $('if_char_aliases');
+    const charKeyword = $('if_char_keyword');
+    if (charKeyword) {
+        charKeyword.addEventListener("input", () => { refreshKeywordState(); });
+    }
+    const charKeywordNote = $('if_char_keyword_note');
+    const charBindChat = $('if_char_bind_chat');
+    const charBindCard = $('if_char_bind_card');
+    const charBindGlobal = $('if_char_bind_global');
+    const charActiveState = $('if_char_active_state');
+    const charExportBtn = $('if_char_export');
+    if (charExportBtn) charExportBtn.addEventListener('click', () => {
+        const rec = currentChars.find(c => c.id === activeCharId);
+        if (!rec) { showResult(charStatus, "Nothing selected to export", true); return; }
+        try {
+            const doc = buildEntityExport("character", rec);
+            const fname = `if-character-${(rec.keyword || rec.name || "entity").replace(/[^a-z0-9_-]+/gi, "_")}.json`;
+            downloadJson(doc, fname);
+        } catch (err) { showResult(charStatus, err.message, true); }
+    });
+    const charImportBtn = $('if_char_import');
+    const charImportFile = $('if_char_import_file');
+    if (charImportBtn) charImportBtn.addEventListener('click', () => charImportFile?.click());
+    if (charImportFile) charImportFile.addEventListener('change', async () => {
+        const file = charImportFile.files?.[0];
+        charImportFile.value = "";
+        if (!file) return;
+        try {
+            const text = await file.text();
+            const imported = prepareEntityImport(JSON.parse(text), {
+                existingIds: new Set(currentChars.map(c => c.id)),
+                existingKeywords: usedKeywordsExcluding(null),
+            });
+            await saveCharacter(imported);
+            await loadCharactersList();
+            populateCharForm(imported);
+            if (imported.keyword && imported.keyword !== imported.name) {
+                showResult(charStatus, `Imported as "${imported.name}" (keyword: ${imported.keyword})`);
+            } else {
+                showResult(charStatus, `Imported "${imported.name}"`);
+            }
+        } catch (err) { showResult(charStatus, err.message, true); }
+    });
     const charCount = $('if_char_count');
     const charBooru = $('if_char_booru');
     const charNatural = $('if_char_natural');
@@ -1505,8 +1568,89 @@ export function renderDrawer({ settings, save, imageBackend, llmClient, genLog, 
         }
     });
 
-    function populateCharForm(char) {
-        if (!char) {
+        function usedKeywordsExcluding(id) {
+        const used = new Set();
+        for (const c of currentChars) {
+            if (c.id !== id && c.keyword) used.add(String(c.keyword).toLowerCase());
+        }
+        return used;
+    }
+    function isEntityActive(rec) {
+        if (!rec?.binding) return false;
+        if (rec.binding.global) return true;
+        const chatId = typeof getCurrentChatId === "function" ? getCurrentChatId() : null;
+        const cardId = typeof currentCardId === "function" ? currentCardId() : null;
+        if (chatId && Array.isArray(rec.binding.chatIds) && rec.binding.chatIds.includes(chatId)) return true;
+        if (cardId && Array.isArray(rec.binding.cardIds) && rec.binding.cardIds.includes(cardId)) return true;
+        return false;
+    }
+    function refreshKeywordState() {
+        const kw = (charKeyword?.value || "").trim().toLowerCase();
+        let dup = null;
+        if (kw) dup = currentChars.find(c => c.id !== activeCharId && String(c.keyword||"").toLowerCase() === kw) || null;
+        if (charKeywordNote) {
+            if (dup) {
+                charKeywordNote.textContent = `Keyword already used by "${dup.name}"`;
+                charKeywordNote.classList.add("error");
+            } else {
+                charKeywordNote.textContent = "";
+                charKeywordNote.classList.remove("error");
+            }
+        }
+        if (charSaveBtn) charSaveBtn.disabled = Boolean(dup) || !kw;
+        return !dup && Boolean(kw);
+    }
+        function currentBindingDraft(base) {
+        const binding = { ...(base || {}) };
+        binding.chatIds = Array.isArray(binding.chatIds) ? binding.chatIds.slice() : [];
+        binding.cardIds = Array.isArray(binding.cardIds) ? binding.cardIds.slice() : [];
+        binding.global = Boolean(binding.global);
+        const chatId = typeof getCurrentChatId === "function" ? getCurrentChatId() : null;
+        const cardId = typeof currentCardId === "function" ? currentCardId() : null;
+        const inChat = chatId ? binding.chatIds.includes(chatId) : false;
+        const inCard = cardId ? binding.cardIds.includes(cardId) : false;
+        if (charBindChat) {
+            if (charBindChat.checked && chatId && !inChat) binding.chatIds.push(chatId);
+            if (!charBindChat.checked && chatId) binding.chatIds = binding.chatIds.filter(x => x !== chatId);
+        }
+        if (charBindCard) {
+            if (charBindCard.checked && cardId && !inCard) binding.cardIds.push(cardId);
+            if (!charBindCard.checked && cardId) binding.cardIds = binding.cardIds.filter(x => x !== cardId);
+        }
+        if (charBindGlobal) binding.global = Boolean(charBindGlobal?.checked);
+        return binding;
+    }
+    [charBindChat, charBindCard, charBindGlobal].forEach(cb => {
+        if (!cb) return;
+        cb.addEventListener("change", async () => {
+            const rec = currentChars.find(c => c.id === activeCharId);
+            if (!rec) return; // nothing selected: choices apply on Save
+            rec.binding = currentBindingDraft(rec.binding);
+            try {
+                await saveCharacter(rec);
+                await loadCharactersList();
+                refreshBindState();
+            } catch (err) { showResult(charStatus, err.message, true); }
+        });
+    });
+function refreshBindState() {
+        const rec = currentChars.find(c => c.id === activeCharId) || null;
+        if (charActiveState) {
+            if (!rec) { charActiveState.textContent = ""; }
+            else {
+                const on = isEntityActive(rec);
+                charActiveState.textContent = on ? "Active now: yes" : "Active now: no";
+                charActiveState.classList.toggle("on", on);
+            }
+        }
+    }
+function populateCharForm(char) {
+        if (charKeyword) charKeyword.value = char?.keyword || "";
+        if (charKeywordNote) { charKeywordNote.textContent = ""; charKeywordNote.classList.remove("error"); }
+        if (charBindChat) charBindChat.checked = Boolean(char?.binding?.chatIds?.length);
+        if (charBindCard) charBindCard.checked = Boolean(char?.binding?.cardIds?.length);
+        if (charBindGlobal) charBindGlobal.checked = Boolean(char?.binding?.global);
+        queueMicrotask(() => { refreshKeywordState(); refreshBindState(); });        if (!char) {
             activeCharId = null;
             charName.value = '';
             charAliases.value = '';
@@ -1542,6 +1686,7 @@ export function renderDrawer({ settings, save, imageBackend, llmClient, genLog, 
     }
 
     charSelect.addEventListener('change', () => {
+        queueMicrotask(refreshBindState);
         const found = currentChars.find(c => c.id === charSelect.value);
         populateCharForm(found);
     });
@@ -1552,7 +1697,10 @@ export function renderDrawer({ settings, save, imageBackend, llmClient, genLog, 
     });
 
     charSaveBtn.addEventListener('click', async () => {
-        const name = charName.value.trim();
+        if (!refreshKeywordState()) {
+            showResult(charStatus, charKeyword?.value?.trim() ? "Keyword already used by another character" : "Keyword is required", true);
+            return;
+        }        const name = charName.value.trim();
         if (!name) {
             showResult(charStatus, 'Character name cannot be empty', true);
             return;
@@ -1584,8 +1732,12 @@ export function renderDrawer({ settings, save, imageBackend, llmClient, genLog, 
         target.lock = { seed: charLockSeed.checked && Number.isFinite(seedValue) ? seedValue : -1, params: target.lock?.params ?? null };
         target.booruDetail = readMatrix();
 
+                    if (charKeyword) target.keyword = normalizeKeyword(charKeyword.value) || target.keyword;
+        target.aliases = normalizeAliases(charAliases?.value || "");
+        target.binding = currentBindingDraft(target.binding);
         try {
             await saveCharacter(target);
+        await saveCharacter(target);
             activeCharId = target.id;
             await loadCharactersList();
             await loadOutfitsForActiveChar();
