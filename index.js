@@ -4,7 +4,6 @@
 
 import { getSettings, saveSettings } from './src/settings.js';
 import { createImageBackend } from './src/backends/image-backend.js';
-import { ComfyProxyClient } from './src/backends/comfy.js';
 import { renderDrawer, createEditDialog } from './src/ui.js';
 import { createMarkerRuntime } from './src/runtime/events.js';
 import { createTaskQueue } from './src/runtime/tasks.js';
@@ -47,15 +46,6 @@ const imageBackend = createImageBackend(
     () => settings.connection,
     { getRequestHeaders: () => getContext().getRequestHeaders() },
 );
-// Temporary UI adapters. Runtime generation uses imageBackend exclusively;
-// P5 replaces these legacy controls with the connection-first UI.
-const nai = imageBackend.getClient('nai');
-const a1111 = imageBackend.getClient('comfy');
-const comfy = new ComfyProxyClient({
-    getBaseUrl: () => settings.backends.comfy.baseUrl,
-    getUsername: () => settings.backends.comfy.username,
-    getPassword: () => settings.backends.comfy.password,
-});
 
 function notify(kind, message) {
     if (settings?.notifications === false) return;
@@ -127,6 +117,9 @@ jQuery(async () => {
         if (typeof blob.arrayBuffer !== 'function') return blob;
         try {
             const bytes = new Uint8Array(await blob.arrayBuffer());
+
+// V2: single LLM target for every request type (Connection tab).
+const llmClient = createLlmClient({ getSettings: () => settings, getContext });
             if (!isPng(bytes)) return blob; // JPEG/WebP: nothing to embed into
             const out = writeMetadata(bytes, record);
             return new Blob([out], { type: 'image/png' });
@@ -589,7 +582,7 @@ jQuery(async () => {
     // Drawer UI (mounted after queue/genLog/engine exist)
     // ------------------------------------------------------------------
     const drawer = renderDrawer({
-        settings, save: saveSettings, nai, comfy, a1111, genLog, getQueue: () => queue,
+        settings, save: saveSettings, imageBackend, llmClient, genLog, getQueue: () => queue,
         regenerateImage: regenerateImageRecord,
         getCurrentChatId: () => getContext().getCurrentChatId(),
         getChatContext: () => getContext(),

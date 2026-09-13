@@ -17,7 +17,9 @@ import { resolveActiveStyle, readChatStyleId, writeChatStyleId } from './prompt/
 import { buildTriggerContext } from './prompt/binding.js';
 import { undoPlacements } from './llm/inject.js';
 import { buildApiProfileExport, importApiProfiles } from './llm/profiles.js';
-import { formatLlmError } from './llm/client.js';
+import { formatLlmError, resolveLlmTarget, listStProfiles } from './llm/client.js';
+import { mountConnectionTab, connectionTabMarkup } from './ui/connection-tab.js';
+import { makeHelpers } from './ui/shared.js';
 import { isValidLora, collectLoraGroups, parseLoraLines, renderLoraToken } from './prompt/ordering.js';
 import { renderDefaultSystemPrompt } from './llm/prompts.js';
 import { assemblePrompt, resolveProfileKey } from './prompt/render.js';
@@ -49,7 +51,7 @@ export const EXTENSION_VERSION = '0.3.0';
  * @param {() => (void|Promise<void>)} [args.refreshRoster] - refresh the
  *   runtime roster after the UI has persisted an imported/synced record.
  */
-export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQueue, regenerateImage, getCurrentChatId, planChatImages, applyPlacements, getChatContext, eventSource, event_types, importPersonaNameFromSt, refreshRoster }) {
+export function renderDrawer({ settings, save, imageBackend, llmClient, genLog, getQueue, regenerateImage, getCurrentChatId, planChatImages, applyPlacements, getChatContext, eventSource, event_types, importPersonaNameFromSt, refreshRoster }) {
     const html = `
     <div class="if-image-settings">
         <div class="if-image-title">
@@ -58,11 +60,10 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         </div>
 
         <div class="if-image-tabs">
-            <button class="if-image-tab menu_button active" data-if-tab="settings">Settings</button>
+            <button class="if-image-tab menu_button active" data-if-tab="connection">Connection</button>
             <button class="if-image-tab menu_button" data-if-tab="main">Generation</button>
             <button class="if-image-tab menu_button" data-if-tab="chars">Characters</button>
             <button class="if-image-tab menu_button" data-if-tab="presets">Persona & Style</button>
-            <button class="if-image-tab menu_button" data-if-tab="llm">LLM</button>
             <button class="if-image-tab menu_button" data-if-tab="gallery">Gallery</button>
             <button class="if-image-tab menu_button" data-if-tab="advanced">Advanced</button>
         </div>
@@ -201,135 +202,108 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 <button id="if_plan_undo" class="menu_button" title="Undo last placement">Undo</button>
             </div>
             <div class="if-image-result" id="if_plan_result"></div>
-        </div>
-
-        <!-- ============ LLM TAB ============ -->
-        <div class="if-image-panel" data-if-panel="llm" style="display:none;">
-            <h3>LLM API Profiles</h3>
-            <div class="if-image-row">
-                <label for="if_llm_default_method">Default method</label>
-                <select id="if_llm_default_method" class="text_pole">
-                    <option value="direct">ST generateRaw (current connection)</option>
-                    <option value="st_connection_manager">ST Connection Manager profile</option>
-                    <option value="direct_fetch">Direct OpenAI-compatible endpoint</option>
-                </select>
-            </div>
-            <div class="if-image-row">
-                <label for="if_llm_default_profile">Default API profile</label>
-                <select id="if_llm_default_profile" class="text_pole">
-                    <option value="">-- none --</option>
-                </select>
-            </div>
-            <div class="if-image-row">
-                <label for="if_llm_system_prompt">Image prompt instructions (system prompt)</label>
-                <div class="if-image-note" id="if_llm_system_state"></div>
-                <textarea id="if_llm_system_prompt" class="text_pole textarea_compact" rows="10" spellcheck="false"></textarea>
-            </div>
-            <div class="if-image-row">
-                <button id="if_llm_system_load" class="menu_button">Load built-in for editing</button>
-                <button id="if_llm_system_reset" class="menu_button">Back to built-in</button>
-            </div>
-            <div class="if-image-note">Sent ahead of the dialect rules, character cards, and scene window, which are always built from live state and are never part of this box. If you write your own, keep the $Name character rules — the compiler relies on them.</div>
-
-            <div class="if-image-row">
-                <label for="if_llm_injection">Character injection style</label>
-                <select id="if_llm_injection" class="text_pole">
-                    <option value="compact">Compact (one line per char)</option>
-                    <option value="xml">XML (structured tags)</option>
-                    <option value="full">Full (multi-line sheet)</option>
-                </select>
-            </div>
-
-            <hr class="if-image-sep"/>
-
-            <h3>API Profile Editor</h3>
-            <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:8px;">
-                <button id="if_llm_profiles_export" class="menu_button">Export profiles</button>
-                <button id="if_llm_profiles_import" class="menu_button">Import profiles</button>
-                <select id="if_llm_profiles_conflict" class="text_pole" title="How to handle an imported profile whose id already exists">
-                    <option value="copy" selected>Conflicts: import as copy</option>
-                    <option value="replace">Conflicts: replace local</option>
-                    <option value="skip">Conflicts: skip</option>
-                </select>
-                <input id="if_llm_profiles_file" type="file" accept=".json,application/json" style="display:none;">
-            </div>
-            <div class="if-image-note">Portable profile files never contain API keys. Imported Direct fetch profiles require you to enter their key locally.</div>
-            <div class="if-image-row">
-                <label for="if_llm_profile_select">Profile</label>
-                <div style="display:flex; gap:6px;">
-                    <select id="if_llm_profile_select" class="text_pole" style="flex:1;">
-                        <option value="">-- New Profile --</option>
-                    </select>
-                    <button id="if_llm_profile_new" class="menu_button">+ New</button>
-                    <button id="if_llm_profile_del" class="menu_button if-image-btn-danger">Delete</button>
+            <details class="if-image-advanced">
+                <summary>Advanced · Test Generate</summary>
+                <div id="if_testgen_mount">
+                    <div class="if-image-row">
+                        <label for="if_active_profile">Checkpoint profile (active — used for all generation)</label>
+                        <select id="if_active_profile" class="text_pole">
+                            <option value="">-- no saved profiles yet --</option>
+                        </select>
+                    </div>
+                    <div class="if-image-row">
+                        <button id="if_cp_editor_toggle" class="menu_button" style="display:none;">Create / edit profile…</button>
+                    </div>
+                    <div class="if-image-note" id="if_cp_status"></div>
+                    <div class="if-image-row">
+                        <label for="if_cp_name">Profile name</label>
+                        <input id="if_cp_name" type="text" class="text_pole" placeholder="defaults to the checkpoint title">
+                    </div>
+                        </div>
+                        <div class="if-image-row">
+                            <label for="if_cp_profile">Prompt style</label>
+                            <select id="if_cp_profile" class="text_pole">
+                                ${PROFILE_KEYS.map(k => `<option value="${k}">${PROFILES[k].label}</option>`).join('')}
+                            </select>
+                        </div>
+                        <div class="if-image-row">
+                            <label for="if_cp_size">Size</label>
+                            <select id="if_cp_size" class="text_pole">
+                                ${SIZE_PRESETS.map(p => `<option value="${p.key}">${p.label}</option>`).join('')}
+                                <option value="custom">Custom…</option>
+                            </select>
+                        </div>
+                        <div class="if-image-grid">
+                            <div class="if-image-row">
+                                <label for="if_cp_width">Width</label>
+                                <input id="if_cp_width" type="number" min="256" max="2048" step="64" class="text_pole">
+                            </div>
+                            <div class="if-image-row">
+                                <label for="if_cp_height">Height</label>
+                                <input id="if_cp_height" type="number" min="256" max="2048" step="64" class="text_pole">
+                            </div>
+                            <div class="if-image-row">
+                                <label for="if_cp_steps">Steps</label>
+                                <input id="if_cp_steps" type="number" min="1" max="150" class="text_pole">
+                            </div>
+                            <div class="if-image-row">
+                                <label for="if_cp_cfg">CFG</label>
+                                <input id="if_cp_cfg" type="number" min="0" max="30" step="0.5" class="text_pole">
+                            </div>
+                            <div class="if-image-row">
+                                <label for="if_cp_sampler">Sampler</label>
+                                <select id="if_cp_sampler" class="text_pole"></select>
+                            </div>
+                            <div class="if-image-row">
+                                <label for="if_cp_scheduler">Scheduler</label>
+                                <select id="if_cp_scheduler" class="text_pole"></select>
+                            </div>
+                        </div>
+                        <div class="if-image-row">
+                            <div style="display:flex; gap:6px;">
+                                <button id="if_cp_save" class="menu_button">Save profile</button>
+                                <button id="if_cp_delete" class="menu_button if-image-btn-danger" style="display:none;">Delete profile</button>
+                            </div>
+                        </div>
+                        <div class="if-image-note">A saved profile ties this checkpoint to a prompt style and generation params. Chat markers using the checkpoint pick them up automatically (marker JSON and LLM hints still override). Without a saved profile the default profile and its Generation Params apply.</div>
+                    </div>
+                    <div id="if_a1111_cp_list" class="if-image-cp-list"></div>
+                </div>
+                </div>
+    
+                <hr class="if-image-sep"/>
+                <h3>Test Generate</h3>
+                <div class="if-image-note" id="if_test_using">Uses the active profile above (or the fallback prompt style when none is saved).</div>
+                <div class="if-image-note" id="if_test_triggers" style="display:none;"></div>
+                <div class="if-image-row">
+                    <label for="if_test_prompt">Prompt</label>
+                    <textarea id="if_test_prompt" class="text_pole textarea_compact" rows="3"></textarea>
+                </div>
+                <div class="if-image-row">
+                    <label for="if_test_seed">Seed (-1 random)</label>
+                    <input id="if_test_seed" type="number" min="-1" class="text_pole" style="max-width:160px;">
+                </div>
+                <div class="if-image-row">
+                    <div style="display:flex; gap:6px;">
+                        <button id="if_test_generate" class="menu_button">Generate</button>
+                        <button id="if_test_cancel" class="menu_button" style="display:none;">Cancel</button>
+                    </div>
+                </div>
+                <div class="if-image-result" id="if_test_error" style="display:none;"></div>
+                <div class="if-image-output" id="if_test_output" style="display:none;">
+                    <img id="if_test_image" alt="Generated image"/>
+                    <div class="if-image-caption" id="if_test_caption"></div>
+                    <div class="if-image-actions">
+                        <a id="if_test_download" class="menu_button" download="if-image.png">Download</a>
+                        <span id="if_test_elapsed"></span>
+                    </div>
                 </div>
             </div>
-            <div class="if-image-row">
-                <label for="if_llm_profile_name">Name</label>
-                <input id="if_llm_profile_name" type="text" class="text_pole">
-            </div>
-            <div class="if-image-row">
-                <label for="if_llm_profile_method">Method</label>
-                <select id="if_llm_profile_method" class="text_pole">
-                    <option value="generateRaw">ST generateRaw</option>
-                    <option value="connection_manager">ST Connection Manager</option>
-                    <option value="direct_fetch">Direct fetch</option>
-                </select>
-            </div>
-            <div class="if-image-row" data-if-llm-cm>
-                <label for="if_llm_profile_stprofile">SillyTavern connection profile</label>
-                <div style="display:flex; gap:6px;">
-                    <select id="if_llm_profile_stprofile" class="text_pole" style="flex:1;">
-                        <option value="">-- none --</option>
-                    </select>
-                    <button id="if_llm_profile_strefresh" class="menu_button" title="Reload the list from SillyTavern">Refresh</button>
+    
                 </div>
-            </div>
-            <div class="if-image-note" data-if-llm-cm>Reads the profiles saved in SillyTavern's Connection Manager. No URL or key is copied here — the request is handed to SillyTavern, which uses its own stored credentials.</div>
-            <div class="if-image-result" id="if_llm_stprofile_hint" data-if-llm-cm style="display:none;"></div>
-            <div class="if-image-row" data-if-llm-fetch>
-                <label for="if_llm_profile_baseurl">Base URL</label>
-                <input id="if_llm_profile_baseurl" type="text" class="text_pole" placeholder="https://api.example.com">
-            </div>
-            <div class="if-image-row" data-if-llm-fetch>
-                <label for="if_llm_profile_key">API key</label>
-                <input id="if_llm_profile_key" type="password" class="text_pole" autocomplete="off">
-            </div>
-            <div class="if-image-row" data-if-llm-fetch>
-                <label for="if_llm_profile_model">Model</label>
-                <input id="if_llm_profile_model" type="text" class="text_pole" placeholder="gpt-4o-mini">
-            </div>
-            <div class="if-image-row" data-if-llm-fetch>
-                <label for="if_llm_profile_temp">Temperature</label>
-                <input id="if_llm_profile_temp" type="number" min="0" max="2" step="0.1" class="text_pole">
-            </div>
-            <div class="if-image-row" data-if-llm-fetch>
-                <label for="if_llm_profile_maxtokens">Max tokens</label>
-                <input id="if_llm_profile_maxtokens" type="number" min="1" max="32768" class="text_pole">
-            </div>
-            <div style="display:flex; gap:6px; margin-top:4px;">
-                <button id="if_llm_profile_save" class="menu_button" style="flex:1;">Save Profile</button>
-                <button id="if_llm_test" class="menu_button">Test call</button>
-            </div>
-            <div class="if-image-result" id="if_llm_result"></div>
-
-            <hr class="if-image-sep"/>
-
-            <h3>Request Mapping</h3>
-            <div class="if-image-row">
-                <label for="if_llm_map_api">image_gen → API profile</label>
-                <select id="if_llm_map_api" class="text_pole">
-                    <option value="">-- none --</option>
-                </select>
-            </div>
-            <div class="if-image-row">
-                <label for="if_llm_map_ctx">image_gen → Context profile</label>
-                <select id="if_llm_map_ctx" class="text_pole">
-                    <option value="">-- none --</option>
-                </select>
-            </div>
-            <div class="if-image-note">Context profiles control the scene window and roster injection. More request types arrive in Phase C.</div>
+            </details>
         </div>
+
 
         <!-- ============ ADVANCED TAB: log section ============ -->
         <div class="if-image-panel" data-if-panel="advanced" style="display:none;">
@@ -362,217 +336,11 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             <div id="if_log_tasks" class="if-image-log"></div>
         </div>
 
-        <!-- ============ SETTINGS TAB (connections + profiles + test) ============ -->
-        <div class="if-image-panel" data-if-panel="settings">
-            <div class="if-image-subtabs">
-                <button class="if-image-subtab menu_button active" data-if-subtab="sd">Stable Diffusion</button>
-                <button class="if-image-subtab menu_button" data-if-subtab="nai">NovelAI</button>
-            </div>
-
-            <div data-if-settings="nai" style="display:none;">
-            <h3>NovelAI</h3>
-            <div class="if-image-row">
-                <label for="if_nai_key">API token (pst-...)</label>
-                <input id="if_nai_key" type="password" class="text_pole textarea_compact" autocomplete="off" placeholder="pst-..." value="">
-            </div>
-            <div class="if-image-row">
-                <label for="if_nai_model">Model</label>
-                <select id="if_nai_model" class="text_pole">
-                    ${NAI_MODELS.map(m => `<option value="${m.value}">${m.text}</option>`).join('')}
-                </select>
-            </div>
-            <div class="if-image-row">
-                <label for="if_nai_variety" class="checkbox_label">
-                    <input id="if_nai_variety" type="checkbox">
-                    <span>Variety+ (skip CFG above sigma — more varied compositions)</span>
-                </label>
-            </div>
-            <div class="if-image-row">
-                <button id="if_nai_test" class="menu_button">Test connection</button>
-            </div>
-            <div class="if-image-result" id="if_nai_result"></div>
-            </div>
-
-            <div data-if-settings="sd">
-            <h3>Stable Diffusion backend</h3>
-            <div class="if-image-row">
-                <label for="if_active_profile">Checkpoint profile (active — used for all generation)</label>
-                <select id="if_active_profile" class="text_pole">
-                    <option value="">-- no saved profiles yet --</option>
-                </select>
-            </div>
-            <div class="if-image-note">Save a profile below to add entries here. The selected profile's checkpoint, prompt style, and params drive chat markers, /ifimg, and Test Generate.</div>
-            <div class="if-image-row">
-                <label for="if_sd_connection">Connection type</label>
-                <select id="if_sd_connection" class="text_pole">
-                    <option value="legacy_proxy">Comfy Cloud Proxy (Legacy)</option>
-                    <option value="a1111">AUTOMATIC1111-compatible API</option>
-                </select>
-            </div>
-
-            <!-- Legacy comfy-cloud-forge-proxy block -->
-            <div data-if-conn="legacy_proxy">
-                <div class="if-image-row">
-                    <label for="if_comfy_url">Proxy URL</label>
-                    <input id="if_comfy_url" type="text" class="text_pole textarea_compact" placeholder="http://localhost:7861" value="">
-                </div>
-                <div class="if-image-row">
-                    <label for="if_comfy_user">Username</label>
-                    <input id="if_comfy_user" type="text" class="text_pole textarea_compact" autocomplete="off" value="">
-                </div>
-                <div class="if-image-row">
-                    <label for="if_comfy_pass">Password</label>
-                    <input id="if_comfy_pass" type="password" class="text_pole textarea_compact" autocomplete="off" value="">
-                </div>
-                <div class="if-image-row">
-                    <label for="if_comfy_profile">Default profile</label>
-                    <select id="if_comfy_profile" class="text_pole">
-                        ${PROFILE_KEYS.map(k => `<option value="${k}">${PROFILES[k].label}</option>`).join('')}
-                    </select>
-                </div>
-                <div class="if-image-row">
-                    <div style="display:flex; gap:6px;">
-                        <button id="if_comfy_test" class="menu_button">Test connection</button>
-                        <button id="if_comfy_models" class="menu_button">Refresh Models</button>
-                    </div>
-                </div>
-                <div class="if-image-row">
-                    <label for="if_comfy_checkpoint">Checkpoint (proxy model)</label>
-                    <select id="if_comfy_checkpoint" class="text_pole">
-                        <option value="">-- Refresh Models to load --</option>
-                    </select>
-                </div>
-                <div class="if-image-result" id="if_comfy_result"></div>
-            </div>
-
-            <!-- AUTOMATIC1111-compatible hosted API block -->
-            <div data-if-conn="a1111" style="display:none;">
-                <div class="if-image-row">
-                    <label for="if_a1111_transport">Connect through</label>
-                    <select id="if_a1111_transport" class="text_pole">
-                        <option value="st-relay">SillyTavern server (recommended — no CORS needed)</option>
-                        <option value="direct">Browser directly (backend must allow CORS)</option>
-                    </select>
-                </div>
-                <div class="if-image-note">"SillyTavern server" uses the same /api/sd relay as SillyTavern's built-in Image Generation, so the backend only needs to accept the key. Enter the final https:// URL — a redirect drops the credentials.</div>
-                <div class="if-image-row">
-                    <label for="if_a1111_url">API base URL</label>
-                    <input id="if_a1111_url" type="text" class="text_pole textarea_compact" placeholder="https://your-host.example" value="">
-                </div>
-                <div class="if-image-note error" id="if_a1111_url_hint" style="display:none;"></div>
-                <div class="if-image-row">
-                    <label for="if_a1111_auth">Authentication (as provided by the service)</label>
-                    <input id="if_a1111_auth" type="password" class="text_pole textarea_compact" autocomplete="off" placeholder="user:password or the raw key string" value="">
-                </div>
-                <div class="if-image-row">
-                    <div style="display:flex; gap:6px;">
-                        <button id="if_a1111_test" class="menu_button">Test Connection</button>
-                        <button id="if_a1111_models" class="menu_button">Refresh Models</button>
-                    </div>
-                </div>
-                <div class="if-image-row">
-                    <label for="if_a1111_checkpoint">Checkpoint</label>
-                    <select id="if_a1111_checkpoint" class="text_pole">
-                        <option value="">-- Refresh Models to load --</option>
-                    </select>
-                </div>
-                <div class="if-image-result" id="if_a1111_result"></div>
-
-                <!-- D14: the profile editor is rarely used, so it stays
-                     collapsed behind this toggle. Editing from the saved
-                     list below also expands it. -->
-                <div class="if-image-row">
-                    <button id="if_cp_editor_toggle" class="menu_button" style="display:none;">Create / edit profile…</button>
-                </div>
-
-                <!-- D9: per-checkpoint profile editor. Expanded via the toggle
-                     above; nothing is stored until "Save profile". -->
-                <div id="if_a1111_cp_editor" class="if-image-cp-editor" style="display:none;">
-                    <h3>Checkpoint profile</h3>
-                    <div class="if-image-note" id="if_cp_status"></div>
-                    <div class="if-image-row">
-                        <label for="if_cp_name">Profile name</label>
-                        <input id="if_cp_name" type="text" class="text_pole" placeholder="defaults to the checkpoint title">
-                    </div>
-                    <div class="if-image-row">
-                        <label for="if_cp_profile">Prompt style</label>
-                        <select id="if_cp_profile" class="text_pole">
-                            ${PROFILE_KEYS.map(k => `<option value="${k}">${PROFILES[k].label}</option>`).join('')}
-                        </select>
-                    </div>
-                    <div class="if-image-row">
-                        <label for="if_cp_size">Size</label>
-                        <select id="if_cp_size" class="text_pole">
-                            ${SIZE_PRESETS.map(p => `<option value="${p.key}">${p.label}</option>`).join('')}
-                            <option value="custom">Custom…</option>
-                        </select>
-                    </div>
-                    <div class="if-image-grid">
-                        <div class="if-image-row">
-                            <label for="if_cp_width">Width</label>
-                            <input id="if_cp_width" type="number" min="256" max="2048" step="64" class="text_pole">
-                        </div>
-                        <div class="if-image-row">
-                            <label for="if_cp_height">Height</label>
-                            <input id="if_cp_height" type="number" min="256" max="2048" step="64" class="text_pole">
-                        </div>
-                        <div class="if-image-row">
-                            <label for="if_cp_steps">Steps</label>
-                            <input id="if_cp_steps" type="number" min="1" max="150" class="text_pole">
-                        </div>
-                        <div class="if-image-row">
-                            <label for="if_cp_cfg">CFG</label>
-                            <input id="if_cp_cfg" type="number" min="0" max="30" step="0.5" class="text_pole">
-                        </div>
-                        <div class="if-image-row">
-                            <label for="if_cp_sampler">Sampler</label>
-                            <select id="if_cp_sampler" class="text_pole"></select>
-                        </div>
-                        <div class="if-image-row">
-                            <label for="if_cp_scheduler">Scheduler</label>
-                            <select id="if_cp_scheduler" class="text_pole"></select>
-                        </div>
-                    </div>
-                    <div class="if-image-row">
-                        <div style="display:flex; gap:6px;">
-                            <button id="if_cp_save" class="menu_button">Save profile</button>
-                            <button id="if_cp_delete" class="menu_button if-image-btn-danger" style="display:none;">Delete profile</button>
-                        </div>
-                    </div>
-                    <div class="if-image-note">A saved profile ties this checkpoint to a prompt style and generation params. Chat markers using the checkpoint pick them up automatically (marker JSON and LLM hints still override). Without a saved profile the default profile and its Generation Params apply.</div>
-                </div>
-                <div id="if_a1111_cp_list" class="if-image-cp-list"></div>
-            </div>
-            </div>
-
-            <hr class="if-image-sep"/>
-            <h3>Test Generate</h3>
-            <div class="if-image-note" id="if_test_using">Uses the active profile above (or the fallback prompt style when none is saved).</div>
-            <div class="if-image-note" id="if_test_triggers" style="display:none;"></div>
-            <div class="if-image-row">
-                <label for="if_test_prompt">Prompt</label>
-                <textarea id="if_test_prompt" class="text_pole textarea_compact" rows="3"></textarea>
-            </div>
-            <div class="if-image-row">
-                <label for="if_test_seed">Seed (-1 random)</label>
-                <input id="if_test_seed" type="number" min="-1" class="text_pole" style="max-width:160px;">
-            </div>
-            <div class="if-image-row">
-                <div style="display:flex; gap:6px;">
-                    <button id="if_test_generate" class="menu_button">Generate</button>
-                    <button id="if_test_cancel" class="menu_button" style="display:none;">Cancel</button>
-                </div>
-            </div>
-            <div class="if-image-result" id="if_test_error" style="display:none;"></div>
-            <div class="if-image-output" id="if_test_output" style="display:none;">
-                <img id="if_test_image" alt="Generated image"/>
-                <div class="if-image-caption" id="if_test_caption"></div>
-                <div class="if-image-actions">
-                    <a id="if_test_download" class="menu_button" download="if-image.png">Download</a>
-                    <span id="if_test_elapsed"></span>
-                </div>
-            </div>
+        <!-- ============ CONNECTION TAB ============ -->
+        <div class="if-image-panel" data-if-panel="connection">
+            <div id="if_connection_mount"></div>
         </div>
+
 
         <!-- ============ CHARACTERS TAB ============ -->
         <div class="if-image-panel" data-if-panel="chars" style="display:none;">
@@ -1056,7 +824,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     mainStart.value = settings.generation.startTag || 'image###';
     mainEnd.value = settings.generation.endTag || '###';
     mainBackend.value = settings.generation.backend || 'comfy';
-    mainProfile.value = settings.generation.profile || settings.backends.comfy.profile || 'anima';
+    mainProfile.value = settings.generation.profile || 'anima';
     mainMode.value = settings.generation.mode || 'direct';
 
     mainEnabled.addEventListener('change', () => { settings.enabled = mainEnabled.checked; save(); });
@@ -1155,8 +923,10 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     }
     if (planRun) {
         planRun.addEventListener('click', async () => {
-            const hasProfile = (settings.llm?.apiProfiles?.length > 0)
-                || Boolean(settings.llm?.defaultApiProfileId);
+            // V2: single LLM target from Connection tab (P3 resolveLlmTarget).
+            let llmOk = false;
+            try { resolveLlmTarget(settings); llmOk = true; } catch { /* no target yet */ }
+            const hasProfile = llmOk;
             let hostContext = null;
             try { hostContext = getChatContext?.() ?? null; } catch { /* host context unavailable */ }
             const hasGenerateRaw = typeof hostContext?.generateRaw === 'function';
@@ -1277,747 +1047,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         });
     }
 
-    // ================= Backends Tab Wiring =================
-    const naiKey = $('if_nai_key');
-    const naiModel = $('if_nai_model');
-    const naiTest = $('if_nai_test');
-    const naiResult = $('if_nai_result');
-    const sdConnection = $('if_sd_connection');
-    const comfyBlock = el.querySelector('[data-if-conn="legacy_proxy"]');
-    const a1111Block = el.querySelector('[data-if-conn="a1111"]');
-    const comfyUrl = $('if_comfy_url');
-    const comfyUser = $('if_comfy_user');
-    const comfyPass = $('if_comfy_pass');
-    const comfyProfile = $('if_comfy_profile');
-    const comfyTest = $('if_comfy_test');
-    const comfyModelsBtn = $('if_comfy_models');
-    const comfyCheckpoint = $('if_comfy_checkpoint');
-    const comfyResult = $('if_comfy_result');
-    const a1111Url = $('if_a1111_url');
-    const a1111Auth = $('if_a1111_auth');
-    const a1111Test = $('if_a1111_test');
-    const a1111ModelsBtn = $('if_a1111_models');
-    const a1111Checkpoint = $('if_a1111_checkpoint');
-    const a1111Result = $('if_a1111_result');
-
-    naiKey.value = settings.backends.nai.apiKey;
-    naiModel.value = settings.backends.nai.model;
-    // D5: Variety+ toggle (migrator v7 default: false).
-    const naiVariety = $('if_nai_variety');
-    if (naiVariety) {
-        naiVariety.checked = settings.backends.nai.variety === true;
-        naiVariety.addEventListener('change', () => {
-            settings.backends.nai.variety = naiVariety.checked;
-            save();
-        });
-    }
-    comfyUrl.value = settings.backends.comfy.baseUrl;
-    comfyUser.value = settings.backends.comfy.username;
-    comfyPass.value = settings.backends.comfy.password;
-    comfyProfile.value = settings.backends.comfy.profile;
-    a1111Url.value = settings.backends.a1111.baseUrl;
-    a1111Auth.value = settings.backends.a1111.auth;
-
-    naiKey.addEventListener('change', () => { settings.backends.nai.apiKey = naiKey.value.trim(); save(); });
-    naiModel.addEventListener('change', () => { settings.backends.nai.model = naiModel.value; save(); });
-    comfyUrl.addEventListener('change', () => {
-        settings.backends.comfy.baseUrl = comfyUrl.value.trim();
-        // New endpoint: previously discovered models are no longer known to
-        // belong to this server. Invalidate + abort in-flight discovery.
-        invalidateComfyDiscovery('Base URL changed — model list invalidated. Click Refresh Models.');
-        save();
-        syncTestGenVisibility();
-    });
-    comfyUser.addEventListener('change', () => {
-        settings.backends.comfy.username = comfyUser.value;
-        invalidateComfyDiscovery('Credentials changed — model list invalidated. Click Refresh Models.');
-        save();
-        syncTestGenVisibility();
-    });
-    comfyPass.addEventListener('change', () => {
-        settings.backends.comfy.password = comfyPass.value;
-        invalidateComfyDiscovery('Credentials changed — model list invalidated. Click Refresh Models.');
-        save();
-        syncTestGenVisibility();
-    });
-    comfyProfile.addEventListener('change', () => { settings.backends.comfy.profile = comfyProfile.value; save(); });
-    // The Authentication string is kept exactly as typed: no trim, no colon
-    // insertion (ST getBasicAuthHeader encodes the raw string). Any URL or
-    // auth change invalidates the discovered checkpoint list: a stale list
-    // from the old endpoint must never drive generation on the new one.
-    // Transport (st-relay | direct). Changing it does not change the endpoint
-    // or the credentials, so the persisted discovery stays valid; only
-    // in-flight requests are dropped.
-    const a1111Transport = $('if_a1111_transport');
-    const a1111UrlHint = $('if_a1111_url_hint');
-    function syncA1111UrlHint() {
-        if (!a1111UrlHint) return;
-        const url = settings.backends.a1111.baseUrl || '';
-        const relay = settings.backends.a1111.transport !== 'direct';
-        const plainHttp = /^http:\/\//i.test(url) && !/^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/i.test(url);
-        if (plainHttp) {
-            a1111UrlHint.textContent = relay
-                ? 'This URL is http://. If the service redirects to https, the SillyTavern relay drops the credentials and the request fails with HTTP 500 — enter the https:// URL directly.'
-                : 'This URL is http://. If the service redirects to https, the browser blocks the redirected request — enter the https:// URL directly.';
-            a1111UrlHint.style.display = '';
-        } else {
-            a1111UrlHint.textContent = '';
-            a1111UrlHint.style.display = 'none';
-        }
-    }
-    if (a1111Transport) {
-        a1111Transport.value = settings.backends.a1111.transport === 'direct' ? 'direct' : 'st-relay';
-        a1111Transport.addEventListener('change', () => {
-            settings.backends.a1111.transport = a1111Transport.value === 'direct' ? 'direct' : 'st-relay';
-            invalidateA1111Discovery('Connection path changed — click Test Connection to verify.', { clearPersisted: false });
-            save();
-            syncA1111UrlHint();
-        });
-    }
-    a1111Url.addEventListener('change', () => {
-        settings.backends.a1111.baseUrl = a1111Url.value.trim();
-        invalidateA1111Discovery('Base URL changed — model list invalidated. Click Refresh Models.');
-        save();
-        syncA1111UrlHint();
-        syncTestGenVisibility();
-    });
-    syncA1111UrlHint();
-    a1111Auth.addEventListener('change', () => {
-        settings.backends.a1111.auth = a1111Auth.value;
-        invalidateA1111Discovery('Authentication changed — model list invalidated. Click Refresh Models.');
-        save();
-        syncTestGenVisibility();
-    });
-
-    function showResult(node, text, isError) {
-        node.textContent = text;
-        node.classList.toggle('error', Boolean(isError));
-    }
-
-    naiTest.addEventListener('click', async () => {
-        naiTest.disabled = true;
-        naiResult.textContent = 'Checking...';
-        naiResult.classList.remove('error');
-        try {
-            const info = await nai.ping();
-            showResult(naiResult, `Tier: ${info.tier} · active: ${info.active ? 'yes' : 'no'} · Anlas: ${info.anlas}`, false);
-        } catch (error) {
-            showResult(naiResult, error.message, true);
-        } finally {
-            naiTest.disabled = false;
-        }
-    });
-
-    // ---- Connection-source switching -------------------------------------
-    // Discovered model lists and in-flight requests are per-source: switching
-    // clears the other source's UI state so stale models/checkpoints can
-    // never leak into the new configuration.
-    let comfyModels = [];
-    // R4: seed the A1111 model list from the last persisted discovery
-    // (settings.backends.a1111.discovery, migrator v6) so selects are usable
-    // right after a reload without hitting the server. Generation still
-    // re-validates against fresh /sdapi/v1/sd-models in the executor.
-    /** In-memory model list shape from the persisted discovery cache. */
-    function a1111ModelsFromPersisted() {
-        const models = settings.backends.a1111.discovery?.models;
-        return Array.isArray(models)
-            ? models.map(m => ({ title: m.title, model_name: m.modelName ?? m.title, filename: null }))
-            : [];
-    }
-    let a1111Models = a1111ModelsFromPersisted();
-
-    // Epoch guards: bumping invalidates every in-flight discovery request,
-    // so a late response from an old source/URL/auth can never populate the
-    // UI of the current configuration. The browser request itself is also
-    // aborted where a signal was passed.
-    let comfyDiscoveryEpoch = 0;
-    let a1111DiscoveryEpoch = 0;
-    let comfyDiscoveryController = null;
-    let a1111DiscoveryController = null;
-
-    function invalidateComfyDiscovery(reason) {
-        comfyDiscoveryEpoch += 1;
-        comfyDiscoveryController?.abort();
-        comfyDiscoveryController = null;
-        comfyModels = [];
-        fillCheckpointSelect(comfyCheckpoint, [], '', '-- Refresh Models to load --');
-        if (reason) showResult(comfyResult, reason, false);
-        abortInFlightGeneration('Proxy URL or credentials changed — generation aborted (browser request only; a started proxy job may still finish).');
-    }
-
-    /**
-     * @param {string} reason
-     * @param {{clearPersisted?: boolean}} [opts] clearPersisted=true (URL/auth
-     *   change): the stored discovery belongs to the old endpoint — wipe it.
-     *   false (connection-source switch): keep it; only in-flight requests and
-     *   the in-memory list are invalidated. checkpointProfiles are user data
-     *   keyed by title and are NEVER cleared here; re-discovery only ADDs
-     *   missing titles (seed semantics).
-     */
-    function invalidateA1111Discovery(reason, { clearPersisted = true } = {}) {
-        a1111DiscoveryEpoch += 1;
-        a1111DiscoveryController?.abort();
-        a1111DiscoveryController = null;
-        if (clearPersisted) {
-            a1111Models = [];
-            settings.backends.a1111.discovery = { at: 0, models: [], samplers: [], schedulers: [] };
-            syncActiveProfileSelect();
-            fillCheckpointSelect(a1111Checkpoint, [], '', '-- Refresh Models to load --');
-            syncCheckpointProfileEditor();
-        } else {
-            // Source switch: the persisted cache is still valid for this
-            // URL/auth, so the in-memory list is re-seeded from it (same as
-            // on load) instead of forcing another Refresh Models click.
-            a1111Models = a1111ModelsFromPersisted();
-            fillCheckpointSelect(a1111Checkpoint, a1111Models, settings.backends.a1111.checkpoint,
-                a1111Models.length ? '-- select a checkpoint --' : '-- Refresh Models to load --');
-        }
-        if (reason) showResult(a1111Result, reason, false);
-        abortInFlightGeneration('A1111 base URL or Authentication changed — generation aborted (browser request only; a started server job may still finish).');
-    }
-
-    function fillCheckpointSelect(select, models, selectedTitle, emptyLabel) {
-        // R4: titles come from a remote server — escape before innerHTML.
-        select.innerHTML = `<option value="">${escapeHtml(emptyLabel)}</option>` +
-            models.map(m => `<option value="${escapeHtml(m.title)}">${escapeHtml(m.title)}</option>`).join('');
-        select.value = models.some(m => m.title === selectedTitle) ? selectedTitle : '';
-    }
-
-    function syncConnectionBlocks() {
-        const conn = settings.backends.comfy.connection === 'a1111' ? 'a1111' : 'legacy_proxy';
-        comfyBlock.style.display = conn === 'legacy_proxy' ? '' : 'none';
-        a1111Block.style.display = conn === 'a1111' ? '' : 'none';
-    }
-
-    sdConnection.addEventListener('change', () => {
-        settings.backends.comfy.connection = sdConnection.value;
-        // Invalidate the OTHER source's discovered state; its stored
-        // checkpoint stays in settings but must be re-discovered. In-flight
-        // discovery from either source is aborted + epoch-bumped so results
-        // from the old source can never land in the new configuration.
-        if (sdConnection.value === 'a1111') {
-            invalidateComfyDiscovery('');
-        } else {
-            // Source switch only: URL/auth unchanged, so the persisted
-            // discovery stays valid for when the user switches back.
-            invalidateA1111Discovery('', { clearPersisted: false });
-        }
-        // A generation running against the previous source must not land
-        // here either: abort it (browser request only).
-        abortInFlightGeneration('Connection source changed — generation aborted (browser request only; a started server job may still finish).');
-        showResult(comfyResult, '', false);
-        showResult(a1111Result, '', false);
-        save();
-        syncConnectionBlocks();
-        syncTestGenVisibility();
-    });
-    sdConnection.value = settings.backends.comfy.connection === 'a1111' ? 'a1111' : 'legacy_proxy';
-    syncConnectionBlocks();
-
-    // ---- Legacy proxy: test + refresh models + checkpoint ----------------
-    comfyTest.addEventListener('click', async () => {
-        comfyTest.disabled = true;
-        comfyResult.textContent = 'Checking...';
-        comfyResult.classList.remove('error');
-        try {
-            const ping = await comfy.ping();
-            showResult(comfyResult, `Proxy OK (${ping.service ?? 'ready'})`, false);
-        } catch (error) {
-            showResult(comfyResult, error.message, true);
-        } finally {
-            comfyTest.disabled = false;
-        }
-    });
-
-    // Abort any in-flight test generation: its result belongs to a
-    // configuration that is about to change (source/URL/auth). Only the
-    // browser request is aborted — the server/proxy may still finish the job.
-    function abortInFlightGeneration(reason) {
-        if (generateController) {
-            generateController.abort();
-            errorBox.textContent = reason;
-            errorBox.style.display = '';
-        }
-    }
-
-    comfyModelsBtn.addEventListener('click', async () => {
-        comfyModelsBtn.disabled = true;
-        comfyResult.textContent = 'Loading models...';
-        comfyResult.classList.remove('error');
-        // New epoch for this click; any older in-flight request is dead.
-        comfyDiscoveryEpoch += 1;
-        const epoch = comfyDiscoveryEpoch;
-        comfyDiscoveryController = new AbortController();
-        try {
-            const list = await comfy.models({ signal: comfyDiscoveryController.signal });
-            if (epoch !== comfyDiscoveryEpoch) return; // stale: source/URL/auth changed meanwhile
-            comfyModels = Array.isArray(list)
-                ? list.map(m => ({ title: m.title ?? m.model_name, model_name: m.model_name }))
-                : [];
-            fillCheckpointSelect(comfyCheckpoint, comfyModels, settings.backends.comfy.proxyModel ?? '', '-- select a model --');
-            comfyCheckpoint.value = comfyModels.some(m => m.title === settings.backends.comfy.proxyModel) ? settings.backends.comfy.proxyModel : '';
-            showResult(comfyResult, `${comfyModels.length} model(s) available.`, false);
-            syncTestGenVisibility();
-        } catch (error) {
-            if (epoch !== comfyDiscoveryEpoch) return; // stale error: swallow
-            comfyModels = [];
-            fillCheckpointSelect(comfyCheckpoint, [], '', '-- Refresh Models to load --');
-            showResult(comfyResult, error.message, true);
-            syncTestGenVisibility();
-        } finally {
-            if (epoch === comfyDiscoveryEpoch) {
-                comfyDiscoveryController = null;
-                comfyModelsBtn.disabled = false;
-            }
-        }
-    });
-
-    comfyCheckpoint.addEventListener('change', () => {
-        settings.backends.comfy.proxyModel = comfyCheckpoint.value;
-        save();
-        syncTestGenVisibility();
-    });
-
-    // ---- A1111: test + refresh models + checkpoint ------------------------
-    // R4/D9: both buttons run the composite discover() (models required;
-    // samplers/schedulers/-/internal/models optional) and persist the result
-    // in settings.backends.a1111.discovery with a timestamp. Discovery never
-    // writes checkpointProfiles — rows come only from "Save profile".
-    function persistA1111Discovery(discovery) {
-        settings.backends.a1111.discovery = {
-            at: Date.now(),
-            models: discovery.models,
-            samplers: discovery.samplers,
-            schedulers: discovery.schedulers,
-        };
-        a1111Models = discovery.models.map(m => ({ title: m.title, model_name: m.modelName ?? m.title, filename: null }));
-        fillCheckpointSelect(a1111Checkpoint, a1111Models, settings.backends.a1111.checkpoint, '-- select a checkpoint --');
-        if (!resolveCheckpoint(a1111Models, settings.backends.a1111.checkpoint)) {
-            // D11: both keys are one selection — clear them together.
-            settings.backends.a1111.checkpoint = '';
-            settings.generation.checkpoint = '';
-            a1111Checkpoint.value = '';
-        }
-        save();
-        syncActiveProfileSelect();
-        syncCheckpointProfileEditor();
-        syncTestGenVisibility();
-    }
-
-    a1111Test.addEventListener('click', async () => {
-        a1111Test.disabled = true;
-        a1111Result.textContent = 'Testing (GET options + discovery; nothing is written to the server)...';
-        a1111Result.classList.remove('error');
-        a1111DiscoveryEpoch += 1;
-        const epoch = a1111DiscoveryEpoch;
-        a1111DiscoveryController = new AbortController();
-        try {
-            const signal = a1111DiscoveryController.signal;
-            const options = await a1111.options({ signal }); // auth/connectivity check
-            const discovery = await a1111.discover({ signal });
-            if (epoch !== a1111DiscoveryEpoch) return; // stale: URL/auth/source changed meanwhile
-            persistA1111Discovery(discovery);
-            const current = typeof options.sd_model_checkpoint === 'string' && options.sd_model_checkpoint
-                ? options.sd_model_checkpoint : '(none reported)';
-            const parts = [`Connected. ${discovery.models.length} checkpoint(s).`];
-            parts.push(`Server default: ${current}`);
-            parts.push(`${discovery.samplers.length} sampler(s), ${discovery.schedulers.length} scheduler(s).`);
-            if (discovery.enrichment === 'internal') parts.push('Enriched via /internal/models.');
-            showResult(a1111Result, parts.join(' · '), false);
-        } catch (error) {
-            if (epoch !== a1111DiscoveryEpoch) return; // stale error: swallow
-            showResult(a1111Result, error.message, true);
-            syncTestGenVisibility();
-        } finally {
-            if (epoch === a1111DiscoveryEpoch) {
-                a1111DiscoveryController = null;
-                a1111Test.disabled = false;
-            }
-        }
-    });
-
-    a1111ModelsBtn.addEventListener('click', async () => {
-        a1111ModelsBtn.disabled = true;
-        a1111Result.textContent = 'Loading models...';
-        a1111Result.classList.remove('error');
-        a1111DiscoveryEpoch += 1;
-        const epoch = a1111DiscoveryEpoch;
-        a1111DiscoveryController = new AbortController();
-        try {
-            const discovery = await a1111.discover({ signal: a1111DiscoveryController.signal });
-            if (epoch !== a1111DiscoveryEpoch) return; // stale: URL/auth/source changed meanwhile
-            persistA1111Discovery(discovery);
-            showResult(a1111Result, `${discovery.models.length} checkpoint(s), ${discovery.samplers.length} sampler(s), ${discovery.schedulers.length} scheduler(s).`, false);
-        } catch (error) {
-            if (epoch !== a1111DiscoveryEpoch) return; // stale error: swallow
-            a1111Models = [];
-            fillCheckpointSelect(a1111Checkpoint, [], '', '-- Refresh Models to load --');
-            showResult(a1111Result, error.message, true);
-            syncTestGenVisibility();
-        } finally {
-            if (epoch === a1111DiscoveryEpoch) {
-                a1111DiscoveryController = null;
-                a1111ModelsBtn.disabled = false;
-            }
-        }
-    });
-
-    a1111Checkpoint.addEventListener('change', () => setA1111Checkpoint(a1111Checkpoint.value));
-
-    // ---- D14: active checkpoint profile select ------------------------------
-    // One entry per SAVED profile (checkpointProfiles rows, keyed by unique
-    // profile id — one checkpoint may hold several profiles). The selected
-    // row is the one profile driving all generation (compile/executor/Test
-    // Generate). Selecting it also stamps the legacy checkpoint keys so
-    // every older consumer keeps working.
-    const activeProfileSelect = $('if_active_profile');
-    function cpRows() {
-        const profiles = settings.backends.a1111.checkpointProfiles ?? {};
-        return Object.entries(profiles).filter(([, e]) => e && typeof e === 'object');
-    }
-    function cpRowLabel(id, e) {
-        return e.name && e.name !== e.checkpoint ? `${e.name} — ${e.checkpoint}` : (e.name || e.checkpoint || id);
-    }
-    function syncActiveProfileSelect() {
-        if (!activeProfileSelect) return;
-        const rows = cpRows();
-        const activeId = settings.backends.a1111.activeProfileId || '';
-        const options = rows.map(([id, e]) =>
-            `<option value="${escapeHtml(id)}">${escapeHtml(cpRowLabel(id, e))}</option>`);
-        activeProfileSelect.innerHTML = options.length
-            ? '<option value="">-- none active --</option>' + options.join('')
-            : '<option value="">-- no saved profiles yet --</option>';
-        activeProfileSelect.value = rows.some(([id]) => id === activeId) ? activeId : '';
-    }
-    if (activeProfileSelect) {
-        activeProfileSelect.addEventListener('change', () => setActiveProfile(activeProfileSelect.value));
-    }
-    syncActiveProfileSelect();
-    // Seed the Backends checkpoint select from the persisted discovery too.
-    if (a1111Models.length) {
-        fillCheckpointSelect(a1111Checkpoint, a1111Models, settings.backends.a1111.checkpoint, '-- select a checkpoint --');
-    }
-
-    // ---- D14 single writer: which saved profile drives generation ----------
-    // Also keeps the legacy checkpoint keys (D11 unification; executor
-    // fallback) in step with the active row's checkpoint.
-    function setActiveProfile(id) {
-        const profiles = settings.backends.a1111.checkpointProfiles ?? {};
-        const row = profiles[id] && typeof profiles[id] === 'object' ? profiles[id] : null;
-        settings.backends.a1111.activeProfileId = row ? id : '';
-        const title = row?.checkpoint || settings.backends.a1111.checkpoint || '';
-        settings.backends.a1111.checkpoint = title;
-        settings.generation.checkpoint = title;
-        if (row) cpEditingId = id; // editor follows the active profile
-        save();
-        syncActiveProfileSelect();
-        fillCheckpointSelect(a1111Checkpoint, a1111Models, title,
-            a1111Models.length ? '-- select a checkpoint --' : '-- Refresh Models to load --');
-        syncCheckpointProfileEditor();
-        syncTestGenVisibility();
-    }
-
-    // ---- D11: single writer for the raw A1111 checkpoint selection --------
-    // Picking a checkpoint in the discovery select chooses which checkpoint
-    // the EDITOR below targets (and the legacy keys). It starts a NEW
-    // profile draft; an active profile pointing at another checkpoint is
-    // deselected so compile() never silently uses a different model.
-    function setA1111Checkpoint(title) {
-        settings.backends.a1111.checkpoint = title;
-        settings.generation.checkpoint = title;
-        const activeRow = settings.backends.a1111.checkpointProfiles?.[settings.backends.a1111.activeProfileId || ''];
-        if (activeRow && activeRow.checkpoint !== title) settings.backends.a1111.activeProfileId = '';
-        cpEditingId = null; // editor shows a fresh draft for this checkpoint
-        save();
-        syncActiveProfileSelect();
-        fillCheckpointSelect(a1111Checkpoint, a1111Models, title,
-            a1111Models.length ? '-- select a checkpoint --' : '-- Refresh Models to load --');
-        syncCheckpointProfileEditor();
-        syncTestGenVisibility();
-    }
-
-    // ---- D9: per-checkpoint profile editor ---------------------------------
-    // Shown for the checkpoint selected in the A1111 block. The form starts
-    // from the saved row when one exists, otherwise from a suggestion
-    // (server per-model defaults when /internal/models enrichment ran, else
-    // the inferred prompt profile's numbers). Nothing is persisted until
-    // "Save profile"; rows are keyed by checkpoint title and used by
-    // compile()/mergeParams exactly as before.
-    const cpEditor = $('if_a1111_cp_editor');
-    const cpEditorToggle = $('if_cp_editor_toggle');
-    const cpStatus = $('if_cp_status');
-    const cpName = $('if_cp_name');
-    const cpProfile = $('if_cp_profile');
-    const cpSize = $('if_cp_size');
-    const cpWidth = $('if_cp_width');
-    const cpHeight = $('if_cp_height');
-    const cpSteps = $('if_cp_steps');
-    const cpCfg = $('if_cp_cfg');
-    const cpSampler = $('if_cp_sampler');
-    const cpScheduler = $('if_cp_scheduler');
-    const cpSave = $('if_cp_save');
-    const cpDelete = $('if_cp_delete');
-    const cpList = $('if_a1111_cp_list');
-
-    function cpOptionList(values, selected) {
-        const list = Array.isArray(values) ? values.filter(v => typeof v === 'string' && v) : [];
-        const missing = selected && !list.includes(selected);
-        return '<option value="">(server default)</option>'
-            + list.map(v => `<option value="${escapeHtml(v)}"${v === selected ? ' selected' : ''}>${escapeHtml(v)}</option>`).join('')
-            + (missing ? `<option value="${escapeHtml(selected)}" selected>${escapeHtml(selected)} (not discovered)</option>` : '');
-    }
-
-    /** Fill the editor form from a row-shaped object. */
-    function cpFillForm(values) {
-        if (!cpEditor) return;
-        if (cpName) cpName.value = typeof values.name === 'string' ? values.name : '';
-        cpProfile.value = PROFILES[values.profile] ? values.profile : PROFILE_KEYS[0];
-        cpWidth.value = values.width ?? '';
-        cpHeight.value = values.height ?? '';
-        cpSteps.value = values.steps ?? '';
-        cpCfg.value = values.cfg ?? '';
-        const disc = settings.backends.a1111.discovery ?? {};
-        cpSampler.innerHTML = cpOptionList(disc.samplers, values.sampler ?? '');
-        cpScheduler.innerHTML = cpOptionList(disc.schedulers, values.scheduler ?? '');
-        cpSyncSizePreset();
-    }
-
-    /** Keep the size preset select in step with the numeric fields. */
-    function cpSyncSizePreset() {
-        if (!cpSize) return;
-        cpSize.value = matchSizePreset(cpWidth.value, cpHeight.value);
-    }
-
-    // D14: which saved profile the editor form currently edits. null = a new
-    // draft for the selected checkpoint ("Save profile" creates a new row).
-    let cpEditingId = settings.backends.a1111.activeProfileId || null;
-    // The editor is rarely used, so it stays collapsed until the user asks
-    // for it (toggle button). Not persisted.
-    let cpEditorOpen = false;
-    // D14: which saved row shows the INLINE editor (small fields right under
-    // the row in the list). null = none. Not persisted.
-    let cpInlineEditId = null;
-
-    /** Re-render editor + saved-profile list. The editor shows the row being
-     *  edited (cpEditingId) or a fresh suggestion for the selected checkpoint,
-     *  and only while cpEditorOpen (collapsed behind the toggle otherwise). */
-    function syncCheckpointProfileEditor() {
-        if (!cpEditor) return;
-        const profiles = settings.backends.a1111.checkpointProfiles ?? {};
-        const editing = cpEditingId && profiles[cpEditingId] && typeof profiles[cpEditingId] === 'object'
-            ? profiles[cpEditingId] : null;
-        if (!editing) cpEditingId = null;
-        const title = editing?.checkpoint || settings.backends.a1111.checkpoint || '';
-        if (cpEditorToggle) {
-            cpEditorToggle.style.display = title ? '' : 'none';
-            cpEditorToggle.textContent = cpEditorOpen ? 'Hide profile editor' : 'Create / edit profile…';
-        }
-        if (!title || !cpEditorOpen) {
-            cpEditor.style.display = 'none';
-        } else {
-            cpEditor.style.display = '';
-            if (editing && PROFILES[editing.profile]) {
-                cpFillForm(editing);
-                cpStatus.textContent = `Editing "${cpRowLabel(cpEditingId, editing)}" — Save updates it; change the name to keep both.`;
-                cpDelete.style.display = '';
-            } else {
-                const disc = settings.backends.a1111.discovery ?? {};
-                const model = (disc.models ?? []).find(m => m?.title === title) ?? { title };
-                const fallbackKey = settings.generation.profile || settings.backends.comfy.profile || 'anima';
-                const suggestion = suggestCheckpointProfile(model, fallbackKey, { samplers: disc.samplers, schedulers: disc.schedulers });
-                cpFillForm({ ...suggestion, name: '' });
-                cpStatus.textContent = suggestion.source === 'server'
-                    ? `New profile for "${title}" — values below are the server's suggestion for this checkpoint.`
-                    : `New profile for "${title}" — values below come from the ${PROFILES[suggestion.profile].label} defaults.`;
-                cpDelete.style.display = 'none';
-            }
-        }
-        renderCheckpointProfileList();
-    }
-
-    /** Small inline editor rendered under a saved row: numeric fields plus
-     *  sampler/scheduler, saved in place (same id, name/checkpoint kept). */
-    function cpInlineEditorHtml(e) {
-        const disc = settings.backends.a1111.discovery ?? {};
-        const numField = (key, label, value, min, max, step) =>
-            `<label class="if-image-cp-inline-field">${label}
-                <input data-cpi="${key}" type="number" class="text_pole" min="${min}" max="${max}" step="${step}" value="${value ?? ''}">
-            </label>`;
-        const selField = (key, label, values, selected) =>
-            `<label class="if-image-cp-inline-field">${label}
-                <select data-cpi="${key}" class="text_pole">${cpOptionList(values, selected ?? '')}</select>
-            </label>`;
-        return `<div class="if-image-cp-inline" data-cp-inline>
-            ${numField('width', 'W', e.width, 256, 2048, 64)}
-            ${numField('height', 'H', e.height, 256, 2048, 64)}
-            ${numField('steps', 'Steps', e.steps, 1, 150, 1)}
-            ${numField('cfg', 'CFG', e.cfg, 0, 30, 0.5)}
-            ${selField('sampler', 'Sampler', disc.samplers, e.sampler)}
-            ${selField('scheduler', 'Sched', disc.schedulers, e.scheduler)}
-            <button data-cp-inline-save class="menu_button">Save</button>
-        </div>`;
-    }
-
-    /** List of every saved profile with Use (activate) / Edit / Delete.
-     *  Edit opens a compact inline editor right under the row. */
-    function renderCheckpointProfileList() {
-        if (!cpList) return;
-        const rows = cpRows();
-        if (!rows.length) {
-            cpList.innerHTML = '';
-            return;
-        }
-        if (cpInlineEditId && !rows.some(([id]) => id === cpInlineEditId)) cpInlineEditId = null;
-        const discovered = new Set((settings.backends.a1111.discovery?.models ?? []).map(m => m?.title).filter(Boolean));
-        const activeId = settings.backends.a1111.activeProfileId || '';
-        cpList.innerHTML = '<h3>Saved checkpoint profiles</h3>' + rows.map(([id, e]) => {
-            const style = PROFILES[e.profile]?.label ?? e.profile;
-            const size = e.width && e.height ? `${e.width}×${e.height}` : 'size: inherit';
-            const bits = [style, size];
-            if (e.steps !== undefined) bits.push(`${e.steps} steps`);
-            if (e.cfg !== undefined) bits.push(`cfg ${e.cfg}`);
-            if (e.sampler) bits.push(e.sampler);
-            if (e.scheduler) bits.push(e.scheduler);
-            const stale = discovered.size > 0 && !discovered.has(e.checkpoint);
-            const active = id === activeId;
-            const editing = id === cpInlineEditId;
-            return `<div class="if-image-cp-item${active ? ' active' : ''}${editing ? ' editing' : ''}" data-cp-item="${escapeHtml(id)}">
-                <div class="if-image-cp-item-row">
-                    <div class="if-image-cp-item-main">
-                        <div class="if-image-cp-item-title">${escapeHtml(cpRowLabel(id, e))}${stale ? ' <span class="if-image-cp-badge">not on server</span>' : ''}</div>
-                        <div class="if-image-cp-item-sub">${escapeHtml(bits.join(' · '))}</div>
-                    </div>
-                    <div class="if-image-cp-item-actions">
-                        ${stale ? '' : '<button data-cp-use class="menu_button" title="Make this the active profile">Use</button>'}
-                        <button data-cp-edit class="menu_button" title="Edit this profile's params right here">${editing ? 'Close' : 'Edit'}</button>
-                        <button data-cp-del class="menu_button if-image-btn-danger" title="Delete this profile">Delete</button>
-                    </div>
-                </div>
-                ${editing ? cpInlineEditorHtml(e) : ''}
-            </div>`;
-        }).join('');
-        cpList.querySelectorAll('[data-cp-item]').forEach(item => {
-            const id = item.dataset.cpItem;
-            item.querySelector('[data-cp-use]')?.addEventListener('click', () => setActiveProfile(id));
-            item.querySelector('[data-cp-edit]')?.addEventListener('click', () => {
-                cpInlineEditId = cpInlineEditId === id ? null : id; // toggle
-                renderCheckpointProfileList();
-            });
-            item.querySelector('[data-cp-del]')?.addEventListener('click', () => deleteCheckpointProfile(id));
-            item.querySelector('[data-cp-inline-save]')?.addEventListener('click', () => {
-                const e = settings.backends.a1111.checkpointProfiles?.[id];
-                if (!e || typeof e !== 'object') return;
-                const get = (key) => item.querySelector(`[data-cpi="${key}"]`)?.value ?? '';
-                const row = normalizeCheckpointProfile({
-                    profile: e.profile,
-                    checkpoint: e.checkpoint,
-                    name: e.name ?? '',
-                    width: get('width'),
-                    height: get('height'),
-                    steps: get('steps'),
-                    cfg: get('cfg'),
-                    sampler: get('sampler'),
-                    scheduler: get('scheduler'),
-                });
-                if (!row) return;
-                settings.backends.a1111.checkpointProfiles[id] = row;
-                cpInlineEditId = null;
-                save();
-                syncActiveProfileSelect();
-                syncCheckpointProfileEditor();
-                syncTestGenVisibility();
-                showResult(a1111Result, `Profile "${row.name}" updated.`, false);
-            });
-        });
-    }
-
-    function deleteCheckpointProfile(id) {
-        delete settings.backends.a1111.checkpointProfiles[id];
-        if (settings.backends.a1111.activeProfileId === id) settings.backends.a1111.activeProfileId = '';
-        if (cpEditingId === id) { cpEditingId = null; cpEditorOpen = false; }
-        save();
-        syncActiveProfileSelect();
-        syncCheckpointProfileEditor();
-        syncTestGenVisibility();
-    }
-
-    /** Unique row id: cp<n> above every existing numeric suffix. */
-    function nextProfileId(profiles) {
-        let max = 0;
-        for (const key of Object.keys(profiles)) {
-            const m = /^cp(\d+)$/.exec(key);
-            if (m) max = Math.max(max, Number(m[1]));
-        }
-        return `cp${max + 1}`;
-    }
-
-    if (cpEditorToggle) {
-        cpEditorToggle.addEventListener('click', () => {
-            cpEditorOpen = !cpEditorOpen;
-            syncCheckpointProfileEditor();
-        });
-    }
-
-    if (cpEditor) {
-        cpSize.addEventListener('change', () => {
-            const preset = SIZE_PRESETS.find(p => p.key === cpSize.value);
-            if (!preset) return; // custom: leave the numbers alone
-            cpWidth.value = preset.width;
-            cpHeight.value = preset.height;
-        });
-        cpWidth.addEventListener('input', cpSyncSizePreset);
-        cpHeight.addEventListener('input', cpSyncSizePreset);
-        cpSave.addEventListener('click', () => {
-            if (!settings.backends.a1111.checkpointProfiles || typeof settings.backends.a1111.checkpointProfiles !== 'object') {
-                settings.backends.a1111.checkpointProfiles = {};
-            }
-            const profiles = settings.backends.a1111.checkpointProfiles;
-            const editing = cpEditingId ? profiles[cpEditingId] : null;
-            const title = editing?.checkpoint || settings.backends.a1111.checkpoint || '';
-            if (!title) return;
-            const row = normalizeCheckpointProfile({
-                profile: cpProfile.value,
-                checkpoint: title,
-                name: cpName?.value ?? '',
-                width: cpWidth.value,
-                height: cpHeight.value,
-                steps: cpSteps.value,
-                cfg: cpCfg.value,
-                sampler: cpSampler.value,
-                scheduler: cpScheduler.value,
-            });
-            if (!row) {
-                showResult(a1111Result, 'Pick a prompt style before saving the profile.', true);
-                return;
-            }
-            // Same id + same name = update in place. A CHANGED name on an
-            // existing row saves a NEW profile instead of overwriting, so
-            // one checkpoint accumulates as many variants as needed.
-            let id = cpEditingId;
-            if (!id || !profiles[id] || profiles[id].name !== row.name) {
-                id = nextProfileId(profiles);
-            }
-            profiles[id] = row;
-            cpEditingId = id;
-            // First saved profile (or re-save of the active one) becomes /
-            // stays active so "save then generate" just works.
-            if (!settings.backends.a1111.activeProfileId || settings.backends.a1111.activeProfileId === id) {
-                settings.backends.a1111.activeProfileId = id;
-            }
-            save();
-            cpEditorOpen = false; // collapse after a successful save
-            syncActiveProfileSelect();
-            syncCheckpointProfileEditor();
-            syncTestGenVisibility();
-            showResult(a1111Result, `Profile "${row.name}" saved for "${title}".`, false);
-        });
-        cpDelete.addEventListener('click', () => {
-            if (cpEditingId) deleteCheckpointProfile(cpEditingId);
-        });
-    }
-    syncCheckpointProfileEditor();
-
-    // ================= Test Generate Wiring (Settings tab) =================
+    // ================= Test Generate Wiring (Generation tab, Advanced details) =================
     // The old Test Gen tab's own backend/profile/checkpoint/size controls are
     // gone: a test generation uses exactly what marker generation would use —
     // the default backend, the active checkpoint (profile) and mergeParams.
@@ -2038,14 +1068,16 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     testSeed.value = settings.test.seed;
 
     function currentSdConnection() {
-        return settings.backends.comfy.connection === 'a1111' ? 'a1111' : 'legacy_proxy';
+        // V2: the Connection tab decides the backend kind (comfy|nai).
+        return settings.connection?.imageBackend === 'nai' ? 'nai' : 'comfy';
     }
 
-    /** Active discovered checkpoint for the active SD connection. */
+    /** Active discovered checkpoint for the comfy connection. */
     function activeCheckpointOptions() {
-        return currentSdConnection() === 'a1111'
-            ? { models: a1111Models, stored: settings.backends.a1111.checkpoint }
-            : { models: comfyModels, stored: settings.backends.comfy.proxyModel ?? '' };
+        return {
+            models: imageBackend.getDiscoveredModels?.() ?? [],
+            stored: settings.connection?.comfy?.model ?? '',
+        };
     }
 
     /**
@@ -2054,17 +1086,17 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
      * Mirrors compile() in index.js minus marker/LLM overrides.
      */
     function effectiveTestSetup() {
-        if (settings.generation.backend === 'nai') {
+        if (settings.connection?.imageBackend === 'nai') {
             const profileKey = settings.generation.profile || 'anima';
             return { backend: 'nai', profileKey, params: mergeParams({ profileKey, settings }) };
         }
         const conn = currentSdConnection();
-        if (conn === 'a1111') {
+        if (conn === 'comfy') {
             // D14: the ACTIVE saved profile decides checkpoint + style +
             // params; without one, the raw checkpoint selection + fallback
             // style apply. Mirrors compile() in index.js.
             const active = getActiveProfile(settings);
-            const title = active?.entry.checkpoint || settings.backends.a1111.checkpoint || '';
+            const title = active?.entry.checkpoint || settings.connection?.comfy?.model || '';
             const profileKey = active?.entry.profile || settings.generation.profile || 'anima';
             return {
                 backend: 'comfy', conn, profileKey, checkpointTitle: title,
@@ -2072,7 +1104,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 params: mergeParams({ profileKey, checkpointTitle: title || undefined, profileId: active?.id, settings }),
             };
         }
-        const profileKey = settings.generation.profile || settings.backends.comfy.profile || 'anima';
+        const profileKey = settings.generation.profile || 'anima';
         return { backend: 'comfy', conn, profileKey, params: mergeParams({ profileKey, settings }) };
     }
 
@@ -2095,7 +1127,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 ? `Uses ${label}${setup.hasActive ? '' : ' (no active profile — fallback style)'} · ${style} · ${p.width}×${p.height} · ${p.steps} steps · cfg ${p.cfg}.`
                 : 'No checkpoint selected — pick or save a checkpoint profile above first.';
         } else {
-            const model = settings.backends.comfy.proxyModel || '';
+            const model = settings.connection?.comfy?.model || '';
             testUsing.textContent = model
                 ? `Uses Comfy proxy · ${model} · ${style} · ${p.width}×${p.height} · ${p.steps} steps · cfg ${p.cfg}.`
                 : 'No proxy model selected — click Refresh Models and pick one above first.';
@@ -2200,9 +1232,9 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             const p = setup.params;
             const seed = settings.test.seed;
             if (setup.backend === 'nai') {
-                const blob = await nai.generate({
-                    model: settings.backends.nai.model,
-                    prompt: settings.test.prompt,
+                const blob = await imageBackend.generate({
+                    kind: 'nai',
+                    model: settings.connection?.nai?.model,                    prompt: settings.test.prompt,
                     negative,
                     width: p.width,
                     height: p.height,
@@ -2219,37 +1251,25 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 // source; dialect/profile names are never sent as a model.
                 const checkpoint = resolveCheckpoint(models, stored);
                 if (!checkpoint) {
-                    throw new Error(`No valid checkpoint for the "${setup.conn === 'a1111' ? 'AUTOMATIC1111-compatible API' : 'Comfy Cloud Proxy (Legacy)'}" connection. Click Refresh Models above and select a checkpoint (profile ≠ model: family names like anima/krea2/illustrious are not checkpoints).`);
+                    throw new Error(`No valid checkpoint for the "${'AUTOMATIC1111-compatible API (ComfyCloud)'}" connection. Click Refresh Models above and select a checkpoint (profile ≠ model: family names like anima/krea2/illustrious are not checkpoints).`);
                 }
-                if (setup.conn === 'a1111') {
-                    const body = {
-                        prompt: settings.test.prompt,
-                        negative_prompt: negative,
-                        checkpoint,
-                        seed,
-                        width: p.width,
-                        height: p.height,
-                        steps: p.steps,
-                        cfg_scale: p.cfg,
-                    };
-                    if (typeof p.sampler === 'string' && p.sampler) body.sampler_name = p.sampler;
-                    if (typeof p.scheduler === 'string' && p.scheduler) body.scheduler = p.scheduler;
-                    const result = await a1111.txt2img(body, { signal: generateController.signal });
-                    showImage(result.dataUrl);
-                    captionEl.textContent = `A1111 · ${checkpoint} · ${p.width}x${p.height}`;
-                } else {
-                    const result = await comfy.txt2img({
-                        prompt: settings.test.prompt,
-                        negative_prompt: negative,
+                if (setup.conn === 'comfy') {
+                    const result = await imageBackend.generate({
+                        kind: 'comfy',
                         model: checkpoint,
+                        prompt: settings.test.prompt,
+                        negative_prompt: negative,
                         seed,
                         width: p.width,
                         height: p.height,
                         steps: p.steps,
                         cfg_scale: p.cfg,
-                    }, { signal: generateController.signal });
+                        sampler: p.sampler,
+                        scheduler: p.scheduler,
+                        signal: generateController.signal,
+                    });
                     showImage(result.dataUrl);
-                    captionEl.textContent = `Comfy proxy · ${checkpoint} · ${p.width}x${p.height}`;
+                    captionEl.textContent = `ComfyCloud · ${checkpoint} · ${p.width}x${p.height}`;
                 }
             }
             elapsedEl.textContent = `${((performance.now() - startedAt) / 1000).toFixed(1)}s`;
@@ -2375,7 +1395,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 await saveReplaceRules(Array.from(byTrigger.values()));
             }
             if (plan.checkpointProfiles.add.length || plan.checkpointProfiles.overwrite.length) {
-                const target = ((settings.backends.a1111.checkpointProfiles ??= {}));
+                const target = ((settings.connection?.comfy?.modelProfiles ??= {}));
                 for (const { title, entry } of [...plan.checkpointProfiles.add, ...plan.checkpointProfiles.overwrite]) {
                     target[title] = entry;
                 }
@@ -3343,7 +2363,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             ];
             // The pipeline's dialectOverride wins over the configured default
             // profile; mark the dialect it resolves to as active.
-            const configured = settings.generation.profile || settings.backends.comfy.profile || 'anima';
+            const configured = settings.generation.profile || 'anima';
             const { profileKey: resolvedKey } = resolveProfileKey(parsed.dialectOverride, configured);
             const activeDialect = PROFILES[resolvedKey]?.dialect ?? 'anima';
             for (const d of dialects) {
@@ -3424,7 +2444,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                     ? `No active profile — using checkpoint ${setup.checkpointTitle} · ${paramsText}`
                     : 'No active profile — save one in Settings → Stable Diffusion.');
         } else {
-            const model = settings.backends.comfy.proxyModel || '';
+            const model = settings.connection?.comfy?.model || '';
             mainActiveProfile.textContent = model
                 ? `Comfy proxy · ${model} · ${paramsText}`
                 : 'No proxy model selected — pick one in Settings → Stable Diffusion.';
@@ -3557,368 +2577,6 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     if (eventSource && event_types?.CHAT_CHANGED) {
         eventSource.on(event_types.CHAT_CHANGED, () => refreshMainStyle());
     }
-
-    // ================= LLM Tab Wiring =================
-    const llmMethod = $('if_llm_default_method');
-    const llmProfileSelect = $('if_llm_default_profile');
-    const llmInjection = $('if_llm_injection');
-    const llmProfSel = $('if_llm_profile_select');
-    const llmProfNew = $('if_llm_profile_new');
-    const llmProfDel = $('if_llm_profile_del');
-    const llmProfilesExport = $('if_llm_profiles_export');
-    const llmProfilesImport = $('if_llm_profiles_import');
-    const llmProfilesFile = $('if_llm_profiles_file');
-    const llmProfilesConflict = $('if_llm_profiles_conflict');
-    const llmProfName = $('if_llm_profile_name');
-    const llmProfMethod = $('if_llm_profile_method');
-    const llmProfUrl = $('if_llm_profile_baseurl');
-    const llmProfKey = $('if_llm_profile_key');
-    const llmProfModel = $('if_llm_profile_model');
-    const llmProfTemp = $('if_llm_profile_temp');
-    const llmProfMaxTok = $('if_llm_profile_maxtokens');
-    const llmProfSave = $('if_llm_profile_save');
-    const llmTestBtn = $('if_llm_test');
-    const llmResult = $('if_llm_result');
-    const llmMapApi = $('if_llm_map_api');
-    const llmMapCtx = $('if_llm_map_ctx');
-    const llmFetchRows = el.querySelectorAll('[data-if-llm-fetch]');
-    const llmProfStProfile = $('if_llm_profile_stprofile');
-    const llmProfStRefresh = $('if_llm_profile_strefresh');
-    const llmStProfileHint = $('if_llm_stprofile_hint');
-    const llmCmRows = el.querySelectorAll('[data-if-llm-cm]');
-
-    if (llmMethod) llmMethod.value = settings.llm?.defaultMethod ?? 'direct';
-    if (llmInjection) llmInjection.value = settings.llm?.injectionStyle ?? 'compact';
-
-    function refreshLlmProfileSelects() {
-        const profiles = settings.llm?.apiProfiles ?? [];
-        const options = profiles.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`).join('');
-        if (llmProfileSelect) llmProfileSelect.innerHTML = '<option value="">-- none --</option>' + options;
-        if (llmProfSel) llmProfSel.innerHTML = '<option value="">-- New Profile --</option>' + options;
-        if (llmMapApi) llmMapApi.innerHTML = '<option value="">-- none --</option>' + options;
-        if (llmProfileSelect) llmProfileSelect.value = settings.llm?.defaultApiProfileId ?? '';
-        if (llmMapApi) llmMapApi.value = settings.llm?.requestMapping?.image_gen?.apiProfileId ?? '';
-    }
-
-    function refreshContextProfileSelect() {
-        const profiles = settings.llm?.contextProfiles ?? [];
-        const options = profiles.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`).join('');
-        if (llmMapCtx) {
-            llmMapCtx.innerHTML = '<option value="">-- none --</option>' + options;
-            llmMapCtx.value = settings.llm?.requestMapping?.image_gen?.contextProfileId ?? '';
-        }
-    }
-
-    // Connection profiles saved in SillyTavern's own Connection Manager.
-    // Only id and name are read; credentials stay on the host, which is the
-    // point of this method — ST performs the request with its own settings.
-    function readStConnectionProfiles() {
-        try {
-            const ctx = getChatContext?.() ?? null;
-            const list = ctx?.extensionSettings?.connectionManager?.profiles;
-            return Array.isArray(list) ? list : null;
-        } catch {
-            return null;
-        }
-    }
-
-    function refreshStConnectionProfiles(selectedId) {
-        if (!llmProfStProfile) return;
-        const wanted = selectedId ?? llmProfStProfile.value ?? '';
-        const profiles = readStConnectionProfiles();
-
-        if (profiles === null) {
-            llmProfStProfile.innerHTML = '<option value="">-- unavailable --</option>';
-            if (llmStProfileHint) {
-                showResult(llmStProfileHint, 'SillyTavern did not expose its Connection Manager profiles. Use ST generateRaw or Direct fetch instead.', true);
-            }
-            return;
-        }
-
-        const options = profiles
-            .filter(p => p && p.id)
-            .map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name || p.id)}</option>`)
-            .join('');
-        llmProfStProfile.innerHTML = '<option value="">-- none --</option>' + options;
-        // Keep a stored id selected even if it is gone, so saving does not
-        // silently repoint the profile at someone else's connection.
-        const stillThere = profiles.some(p => p?.id === wanted);
-        llmProfStProfile.value = stillThere ? wanted : '';
-
-        if (llmStProfileHint) {
-            if (!profiles.length) {
-                showResult(llmStProfileHint, 'No connection profiles saved in SillyTavern yet. Create one in its Connection Manager first.', true);
-            } else if (wanted && !stillThere) {
-                showResult(llmStProfileHint, 'The connection profile this API profile pointed at no longer exists — pick another one.', true);
-            } else {
-                llmStProfileHint.style.display = 'none';
-            }
-        }
-    }
-
-    function syncLlmFetchRows() {
-        const method = llmProfMethod?.value;
-        const showFetch = method === 'direct_fetch';
-        llmFetchRows.forEach(row => row.style.display = showFetch ? '' : 'none');
-        const showCm = method === 'connection_manager';
-        llmCmRows.forEach(row => {
-            // The hint line manages its own visibility via showResult.
-            if (row.id === 'if_llm_stprofile_hint') {
-                if (!showCm) row.style.display = 'none';
-                return;
-            }
-            row.style.display = showCm ? '' : 'none';
-        });
-        if (showCm) refreshStConnectionProfiles();
-    }
-
-    // ---- Editable image_gen system prompt --------------------------------
-    // Empty stored value means "use the built-in", so an update ships an
-    // improved default to anyone who never edited it. Reset shows the
-    // built-in text rather than blanking the box, so it can be used as a
-    // starting point for edits.
-    const llmSystemPrompt = $('if_llm_system_prompt');
-    const llmSystemReset = $('if_llm_system_reset');
-    const llmSystemLoad = $('if_llm_system_load');
-    const llmSystemState = $('if_llm_system_state');
-
-    // An empty box shows the built-in text as a placeholder, which reads as
-    // if the box were full. Without this line the user cannot tell whether
-    // typing ADDS to those instructions or REPLACES them — it replaces them
-    // wholesale, and losing the character-token rules silently breaks the
-    // compiler contract.
-    function syncSystemPromptState() {
-        if (!llmSystemState) return;
-        const custom = (settings.llm?.systemPromptOverride ?? '').trim();
-        if (custom) {
-            llmSystemState.textContent = 'Using YOUR text below. It replaces the built-in instructions entirely — the built-in rules are not added on top. Clear the box to go back to the built-in version.';
-            llmSystemState.classList.add('if-image-state-custom');
-        } else {
-            llmSystemState.textContent = 'Using the BUILT-IN instructions (shown greyed out below). Anything you type replaces them completely, so click "Load built-in for editing" first if you only want to adjust a few lines.';
-            llmSystemState.classList.remove('if-image-state-custom');
-        }
-    }
-
-    if (llmSystemPrompt) {
-        llmSystemPrompt.value = settings.llm?.systemPromptOverride ?? '';
-        llmSystemPrompt.placeholder = renderDefaultSystemPrompt();
-        llmSystemPrompt.addEventListener('input', () => {
-            if (!settings.llm) settings.llm = {};
-            settings.llm.systemPromptOverride = llmSystemPrompt.value;
-            syncSystemPromptState();
-            save();
-        });
-    }
-    syncSystemPromptState();
-
-    // Copies the built-in text into the box so it can be edited a line at a
-    // time instead of rewritten from nothing.
-    if (llmSystemLoad) llmSystemLoad.addEventListener('click', () => {
-        if (!llmSystemPrompt) return;
-        const builtIn = renderDefaultSystemPrompt();
-        llmSystemPrompt.value = builtIn;
-        if (!settings.llm) settings.llm = {};
-        settings.llm.systemPromptOverride = builtIn;
-        syncSystemPromptState();
-        save();
-        showResult(llmResult, 'Built-in instructions loaded into the box — edit freely. Note that they no longer track updates until you clear the box.', false);
-    });
-
-    // Clears the override. Confirmed first: the edited text is not recoverable
-    // afterwards, and the button sits next to one that fills the same box.
-    if (llmSystemReset) llmSystemReset.addEventListener('click', () => {
-        if (!llmSystemPrompt) return;
-        const hadCustom = (settings.llm?.systemPromptOverride ?? '').trim().length > 0;
-        if (hadCustom && !confirm('Discard your custom instructions and go back to the built-in version?')) return;
-        llmSystemPrompt.value = '';
-        if (!settings.llm) settings.llm = {};
-        settings.llm.systemPromptOverride = '';
-        syncSystemPromptState();
-        save();
-        showResult(llmResult, 'Back to the built-in instructions.', false);
-    });
-
-    if (llmMethod) llmMethod.addEventListener('change', () => { settings.llm.defaultMethod = llmMethod.value; save(); });
-    if (llmProfileSelect) llmProfileSelect.addEventListener('change', () => { settings.llm.defaultApiProfileId = llmProfileSelect.value; save(); });
-    if (llmInjection) llmInjection.addEventListener('change', () => { settings.llm.injectionStyle = llmInjection.value; save(); });
-
-    let activeLlmProfileId = null;
-    function populateLlmProfileForm(profile) {
-        activeLlmProfileId = profile?.id ?? null;
-        if (!profile) {
-            if (llmProfName) llmProfName.value = '';
-            if (llmProfMethod) llmProfMethod.value = 'generateRaw';
-            if (llmProfUrl) llmProfUrl.value = '';
-            if (llmProfKey) llmProfKey.value = '';
-            if (llmProfModel) llmProfModel.value = '';
-            if (llmProfTemp) llmProfTemp.value = '0.7';
-            if (llmProfMaxTok) llmProfMaxTok.value = '4096';
-            if (llmProfStProfile) llmProfStProfile.value = '';
-            syncLlmFetchRows();
-            return;
-        }
-        if (llmProfName) llmProfName.value = profile.name ?? '';
-        if (llmProfMethod) llmProfMethod.value = profile.method ?? 'generateRaw';
-        if (llmProfUrl) llmProfUrl.value = profile.baseUrl ?? '';
-        if (llmProfKey) llmProfKey.value = profile.apiKey ?? '';
-        if (llmProfModel) llmProfModel.value = profile.model ?? '';
-        if (llmProfTemp) llmProfTemp.value = String(profile.temperature ?? 0.7);
-        if (llmProfMaxTok) llmProfMaxTok.value = String(profile.maxTokens ?? 4096);
-        // Populate before syncLlmFetchRows so the refresh keeps this id.
-        if (llmProfStProfile && profile.method === 'connection_manager') {
-            refreshStConnectionProfiles(profile.stProfileId ?? '');
-        } else if (llmProfStProfile) {
-            llmProfStProfile.value = profile.stProfileId ?? '';
-        }
-        syncLlmFetchRows();
-    }
-
-    if (llmProfilesExport) llmProfilesExport.addEventListener('click', () => {
-        try {
-            const count = settings.llm?.apiProfiles?.length ?? 0;
-            if (!count) { showResult(llmResult, 'No LLM profiles to export.', true); return; }
-            const portableDocument = buildApiProfileExport(settings);
-            const blob = new Blob([JSON.stringify(portableDocument, null, 2)], { type: 'application/json' });
-            const url = URL.createObjectURL(blob);
-            const link = document.createElement('a');
-            link.href = url;
-            link.download = `if-image-llm-profiles-${new Date().toISOString().slice(0, 10)}.json`;
-            link.click();
-            setTimeout(() => URL.revokeObjectURL(url), 0);
-            showResult(llmResult, `Exported ${count} profile${count === 1 ? '' : 's'} without API keys.`, false);
-        } catch (err) {
-            showResult(llmResult, `Profile export failed: ${err?.message ?? String(err)}`, true);
-        }
-    });
-    if (llmProfilesImport) llmProfilesImport.addEventListener('click', () => llmProfilesFile?.click());
-    if (llmProfilesFile) llmProfilesFile.addEventListener('change', async () => {
-        const file = llmProfilesFile.files?.[0];
-        if (!file) return;
-        try {
-            const portableDocument = JSON.parse(await file.text());
-            const result = importApiProfiles(settings, portableDocument, { conflict: llmProfilesConflict?.value ?? 'copy' });
-            save();
-            refreshLlmProfileSelects();
-            const selected = result.profiles.at(-1) ?? null;
-            if (selected) {
-                activeLlmProfileId = selected.id;
-                llmProfSel.value = selected.id;
-                populateLlmProfileForm(selected);
-            }
-            showResult(llmResult, `Import complete: ${result.added} added, ${result.replaced} replaced, ${result.skipped} skipped. API keys were not imported.`, false);
-        } catch (err) {
-            showResult(llmResult, `Profile import failed: ${err?.message ?? String(err)}`, true);
-        } finally {
-            llmProfilesFile.value = '';
-        }
-    });
-
-    if (llmProfSel) llmProfSel.addEventListener('change', () => {
-        const profiles = settings.llm?.apiProfiles ?? [];
-        const found = profiles.find(p => p.id === llmProfSel.value);
-        populateLlmProfileForm(found);
-    });
-    if (llmProfNew) llmProfNew.addEventListener('click', () => { llmProfSel.value = ''; populateLlmProfileForm(null); });
-    if (llmProfMethod) llmProfMethod.addEventListener('change', syncLlmFetchRows);
-    if (llmProfStRefresh) llmProfStRefresh.addEventListener('click', () => refreshStConnectionProfiles());
-
-    if (llmProfDel) llmProfDel.addEventListener('click', () => {
-        if (!activeLlmProfileId) return;
-        const deletedId = activeLlmProfileId;
-        const profiles = settings.llm?.apiProfiles ?? [];
-        settings.llm.apiProfiles = profiles.filter(p => p.id !== deletedId);
-        activeLlmProfileId = null;
-        // Clean up mapping and default references
-        for (const key of Object.keys(settings.llm.requestMapping ?? {})) {
-            if (settings.llm.requestMapping[key]?.apiProfileId === deletedId) {
-                settings.llm.requestMapping[key].apiProfileId = '';
-            }
-        }
-        if (settings.llm.defaultApiProfileId === deletedId) settings.llm.defaultApiProfileId = '';
-        refreshLlmProfileSelects();
-        populateLlmProfileForm(null);
-        save();
-    });
-
-    if (llmProfSave) llmProfSave.addEventListener('click', () => {
-        if (!settings.llm) settings.llm = {};
-        if (!Array.isArray(settings.llm.apiProfiles)) settings.llm.apiProfiles = [];
-        const name = llmProfName?.value?.trim();
-        if (!name) { showResult(llmResult, 'Profile name is required', true); return; }
-        const method = llmProfMethod?.value ?? 'generateRaw';
-        const stProfileId = llmProfStProfile?.value ?? '';
-        // Saving Connection Manager without a target would fall back to
-        // generateRaw at request time, silently using a different model.
-        if (method === 'connection_manager' && !stProfileId) {
-            showResult(llmResult, 'Pick a SillyTavern connection profile, or switch the method to ST generateRaw.', true);
-            return;
-        }
-        const profile = {
-            id: activeLlmProfileId || (crypto.randomUUID ? crypto.randomUUID() : 'ap_' + Date.now()),
-            name,
-            method,
-            stProfileId,
-            baseUrl: llmProfUrl?.value?.trim() ?? '',
-            apiKey: llmProfKey?.value ?? '',
-            model: llmProfModel?.value?.trim() ?? '',
-            temperature: Number(llmProfTemp?.value) || 0.7,
-            maxTokens: Number(llmProfMaxTok?.value) || 4096,
-        };
-        const idx = settings.llm.apiProfiles.findIndex(p => p.id === profile.id);
-        if (idx >= 0) settings.llm.apiProfiles[idx] = profile;
-        else settings.llm.apiProfiles.push(profile);
-        activeLlmProfileId = profile.id;
-        refreshLlmProfileSelects();
-        save();
-        showResult(llmResult, `Profile "${name}" saved!`, false);
-    });
-
-    // Test the selected saved profile (or the default/current ST connection).
-    if (llmTestBtn) llmTestBtn.addEventListener('click', async () => {
-        const llmTarget = settings.connection?.llm ?? {};
-        const target = llmTarget.mode === 'custom'
-            ? `custom model ${llmTarget.custom?.model || '(not selected)'}`
-            : `SillyTavern profile ${llmTarget.stProfileId || '(not selected)'}`;
-        llmTestBtn.disabled = true;
-        showResult(llmResult, `Testing ${target} with a fixed, credential-free prompt…`, false);
-        try {
-            const { createLlmClient } = await import('./llm/client.js');
-            const client = createLlmClient({
-                getSettings: () => settings,
-                getContext: () => getChatContext?.() ?? {},
-            });
-            const result = await client.request({
-                type: 'image_gen',
-                systemPrompt: 'Reply with exactly one line: OK.',
-                userPrompt: 'Reply with: OK',
-                signal: AbortSignal.timeout(30000),
-            });
-            const response = result.text.replace(/\s+/g, ' ').trim().slice(0, 200);
-            showResult(llmResult, `Test OK — target: ${target}; method: ${result.method}; elapsed: ${result.elapsedMs.toFixed(0)}ms; response: ${response}`, false);
-        } catch (err) {
-            showResult(llmResult, formatLlmError(err, 'Profile test'), true);
-        } finally {
-            llmTestBtn.disabled = false;
-        }
-    });
-
-    // Request mapping
-    if (llmMapApi) llmMapApi.addEventListener('change', () => {
-        if (!settings.llm.requestMapping) settings.llm.requestMapping = {};
-        if (!settings.llm.requestMapping.image_gen) settings.llm.requestMapping.image_gen = {};
-        settings.llm.requestMapping.image_gen.apiProfileId = llmMapApi.value;
-        save();
-    });
-    if (llmMapCtx) llmMapCtx.addEventListener('change', () => {
-        if (!settings.llm.requestMapping) settings.llm.requestMapping = {};
-        if (!settings.llm.requestMapping.image_gen) settings.llm.requestMapping.image_gen = {};
-        settings.llm.requestMapping.image_gen.contextProfileId = llmMapCtx.value;
-        save();
-    });
-
-    refreshLlmProfileSelects();
-    refreshContextProfileSelect();
-    syncLlmFetchRows();
 
     // ================= Log Tab Wiring =================
     const logLimit = $('if_log_limit');

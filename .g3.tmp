@@ -1,0 +1,80 @@
+--anchors--
+74: <!-- ============ GENERATION TAB (formerly Main) ============ -->
+210: <!-- ============ LLM TAB ============ -->
+338: <!-- ============ ADVANCED TAB: log section ============ -->
+369: <!-- ============ SETTINGS TAB (connections + profiles + test) ============ -->
+581: <!-- ============ CHARACTERS TAB ============ -->
+699: <!-- ============ PERSONA & STYLES TAB ============ -->
+857: <!-- ============ ADVANCED TAB: replace-rules section ============ -->
+908: <!-- ============ GALLERY TAB ============ -->
+960: <!-- ============ ADVANCED TAB: 3-dialect preview section ============ -->
+75: <div class="if-image-panel" data-if-panel="main" style="display:none;">
+211: <div class="if-image-panel" data-if-panel="llm" style="display:none;">
+339: <div class="if-image-panel" data-if-panel="advanced" style="display:none;">
+370: <div class="if-image-panel" data-if-panel="settings">
+582: <div class="if-image-panel" data-if-panel="chars" style="display:none;">
+700: <div class="if-image-panel" data-if-panel="presets" style="display:none;">
+858: <div class="if-image-panel" data-if-panel="advanced" style="display:none;">
+909: <div class="if-image-panel" data-if-panel="gallery" style="display:none;">
+961: <div class="if-image-panel" data-if-panel="advanced" style="display:none;">
+1021: // Several sections share data-if-panel="advanced"; all of them
+65: <button class="if-image-tab menu_button active" data-if-tab="settings">Settings</button>
+66: <button class="if-image-tab menu_button" data-if-tab="main">Generation</button>
+67: <button class="if-image-tab menu_button" data-if-tab="chars">Characters</button>
+68: <button class="if-image-tab menu_button" data-if-tab="presets">Persona & Style</button>
+69: <button class="if-image-tab menu_button" data-if-tab="llm">LLM</button>
+70: <button class="if-image-tab menu_button" data-if-tab="gallery">Gallery</button>
+71: <button class="if-image-tab menu_button" data-if-tab="advanced">Advanced</button>
+3221: el.querySelector('[data-if-tab="gallery"]')?.addEventListener('click', () => {
+1016: // ================= Tabs Switching =================
+1040: // ================= Main Tab Wiring =================
+1096: // ================= Chat Placement Wiring =================
+1284: // ================= Backends Tab Wiring =================
+2024: // ================= Test Generate Wiring (Settings tab) =================
+2276: // ================= Characters Tab Wiring =================
+2595: // ================= Persona & Style Wiring =================
+2875: // ================= Replace Rules Wiring =================
+2964: // ================= Gallery Tab Wiring (C10) =================
+3227: // ================= 3-Dialect Preview: Character Picker (C9) =================
+3311: // ================= 3-Dialect Preview Wiring =================
+3366: // ================= Main Tab: dry-run toggle =================
+3400: // ================= Main Tab: D3 LLM size hint policy =================
+3565: // ================= LLM Tab Wiring =================
+3927: // ================= Log Tab Wiring =================
+--llmSystem--
+3684: const llmSystemPrompt = $('if_llm_system_prompt');
+3685: const llmSystemReset = $('if_llm_system_reset');
+3686: const llmSystemLoad = $('if_llm_system_load');
+3706: if (llmSystemPrompt) {
+3707: llmSystemPrompt.value = settings.llm?.systemPromptOverride ?? '';
+3708: llmSystemPrompt.placeholder = renderDefaultSystemPrompt();
+3709: llmSystemPrompt.addEventListener('input', () => {
+3711: settings.llm.systemPromptOverride = llmSystemPrompt.value;
+3720: if (llmSystemLoad) llmSystemLoad.addEventListener('click', () => {
+3721: if (!llmSystemPrompt) return;
+3723: llmSystemPrompt.value = builtIn;
+3733: if (llmSystemReset) llmSystemReset.addEventListener('click', () => {
+3734: if (!llmSystemPrompt) return;
+3737: llmSystemPrompt.value = '';
+--checkpointProfiles in settings.js--
+104: checkpointProfiles: {},
+--usage outside blocks--
+6: import { NAI_MODELS } from './backends/nai.js';
+7: import { resolveCheckpoint } from './backends/a1111.js';
+8: import { getActiveProfile, mergeParams, suggestCheckpointProfile, normalizeCheckpointProfile, SIZE_PRESETS, ma
+9: import { PROFILES, PROFILE_KEYS } from './profiles.js';
+20: import { formatLlmError, resolveLlmTarget } from './llm/client.js';
+21: import { formatLlmError as _fmtLlmErr } from './llm/client.js';
+106: ${PROFILE_KEYS.map(k => `<option value="${k}">${PROFILES[k].label}</option>`).join('')}
+385: ${NAI_MODELS.map(m => `<option value="${m.value}">${m.text}</option>`).join('')}
+434: ${PROFILE_KEYS.map(k => `<option value="${k}">${PROFILES[k].label}</option>`).join('')}
+504: ${PROFILE_KEYS.map(k => `<option value="${k}">${PROFILES[k].label}</option>`).join('')}
+510: ${SIZE_PRESETS.map(p => `<option value="${p.key}">${p.label}</option>`).join('')}
+1247: planResult.textContent = formatLlmError(err, 'Plan & Place');
+2740: const message = formatLlmError(err, 'Persona name import');
+2949: const profile = PROFILES[profileKey] ?? PROFILES.anima;
+3352: const activeDialect = PROFILES[resolvedKey]?.dialect ?? 'anima';
+3354: const output = assemblePrompt(parsed, d.key, PROFILES[d.profileKey]);
+3419: const style = PROFILES[setup.profileKey]?.label ?? setup.profileKey;
+3903: showResult(llmResult, formatLlmError(err, 'Profile test'), true);
+4011: * @param {object} deps.profiles - PROFILES map (for negativeDisabled).
