@@ -1,7 +1,0 @@
-const CONNECTION_REQUIRED = [
-    'if_conn_backend', 'if_conn_comfy_url', 'if_conn_comfy_auth', 'if_conn_comfy_connect',
-    'if_conn_nai_key', 'if_conn_nai_verify',
-    'if_conn_fetch_models', 'if_conn_model',
-    'if_conn_llm_mode', 'if_conn_llm_st_profile', 'if_conn_llm_custom_url', 'if_conn_llm_custom_key',
-    'if_conn_llm_custom_model', 'if_conn_llm_test',
-];
