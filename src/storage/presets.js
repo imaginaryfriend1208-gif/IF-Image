@@ -3,6 +3,8 @@
 
 import { STORES } from './idb.js';
 import { claimUniqueKeyword, normalizeAliases, normalizeBinding, normalizeKeyword } from './entity-shape.js';
+import { bindEntity, unbindEntity } from '../prompt/binding.js';
+import { parseLoraLines, renderLoraToken } from '../prompt/ordering.js';
 
 // Loaded only when persistence is used, keeping the pure schema/normalization
 // helpers usable in non-SillyTavern tooling and tests.
@@ -68,34 +70,53 @@ export function applyPersonaNameImport(persona, imported) {
 // Compatibility export for older UI integrations; it now imports name only.
 export const applyPersonaSync = applyPersonaNameImport;
 
+export const STYLE_MIGRATORS = [record => {
+    record.loras = parseLoraLines(record.lora);
+    record.loraPosition = 'prompt_start';
+    const binding = normalizeBinding(record.binding);
+    record.binding = { cardIds: binding.cardIds, chatIds: binding.chatIds };
+}];
+
+export const STYLE_CURRENT_VERSION = STYLE_MIGRATORS.length;
+
+export function applyStyleMigrations(record) {
+    if (!record || typeof record !== 'object' || record.kind === 'replace_rules') return record;
+    const from = Number.isInteger(record.presetVersion) && record.presetVersion >= 0
+        ? Math.min(record.presetVersion, STYLE_CURRENT_VERSION) : 0;
+    for (let version = from; version < STYLE_CURRENT_VERSION; version += 1) STYLE_MIGRATORS[version](record);
+    record.loras = Array.isArray(record.loras) ? record.loras : [];
+    record.loraPosition = ['prompt_start', 'prompt_end', 'style_end'].includes(record.loraPosition)
+        ? record.loraPosition : 'prompt_start';
+    const binding = normalizeBinding(record.binding);
+    record.binding = { cardIds: binding.cardIds, chatIds: binding.chatIds };
+    record.presetVersion = STYLE_CURRENT_VERSION;
+    return record;
+}
+
 export function createDefaultStyle(name = 'New Style') {
     return {
-        id: crypto.randomUUID ? crypto.randomUUID() : 'style_' + Date.now(),
+        id: globalThis.crypto?.randomUUID?.() ?? `style_${Date.now()}`,
         name,
-        // A1111 LoRA token. Style LoRAs lead the final prompt, ahead of
-        // character LoRAs (src/prompt/ordering.js: collectLoras).
         lora: '',
+        loras: [],
+        loraPosition: 'prompt_start',
+        binding: { cardIds: [], chatIds: [] },
         dialectHints: {
-            krea: {
-                stylePhrase: '',
-                lighting: '',
-                camera: '',
-            },
-            anima: {
-                booruTags: '',
-                artists: '',
-            },
-            illus: {
-                artists: '',
-                qualityPrefix: '',
-                negativeTags: '',
-            },
+            krea: { stylePhrase: '', lighting: '', camera: '' },
+            anima: { booruTags: '', artists: '' },
+            illus: { artists: '', qualityPrefix: '', negativeTags: '' },
         },
-        meta: {
-            version: 1,
-            updatedAt: Date.now(),
-        },
+        meta: { version: 1, updatedAt: Date.now() },
+        presetVersion: STYLE_CURRENT_VERSION,
     };
+}
+
+export function bindStyle(style, scope, id) {
+    return applyStyleMigrations(bindEntity(applyStyleMigrations({ ...style }), scope, id));
+}
+
+export function unbindStyle(style, scope, id) {
+    return applyStyleMigrations(unbindEntity(applyStyleMigrations({ ...style }), scope, id));
 }
 
 export async function getAllPersonas() {

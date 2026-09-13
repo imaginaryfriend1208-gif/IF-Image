@@ -17,7 +17,7 @@ export function resolveBackendKind(settings = {}) {
  * Marker directives remain authoritative when parsedTriggers is supplied.
  */
 export function resolveGenerationContext({
-    settings = {}, roster = {}, chatStyleId = '', parsedTriggers = null,
+    settings = {}, roster = {}, chatStyleId = '', cardId = '', chatId = '', parsedTriggers = null,
 } = {}) {
     const backendKind = resolveBackendKind(settings);
     const activeCheckpointProfile = backendKind === 'comfy' ? getActiveProfile(settings) : null;
@@ -33,7 +33,7 @@ export function resolveGenerationContext({
     const explicitStyles = Array.isArray(parsedTriggers?.styles) ? parsedTriggers.styles : [];
     const activeStyle = resolveActiveStyle({
         explicitStyles,
-        chatStyleId,
+        chatStyleId, cardId, chatId,
         defaultStyleId: settings.generation?.defaultStyleId,
         styles,
     });

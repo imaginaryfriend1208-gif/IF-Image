@@ -424,65 +424,67 @@ function tidyScene(text) {
  * @param {object} baseProfile - profile from PROFILES
  * @returns {object} { prompt: string, negative: string, params: object, characters: string[] }
  */
-export function assemblePrompt(parsedTriggers, dialectKey, baseProfile = {}) {
+export function assemblePrompt(parsedTriggers, dialectKey, baseProfile = {}, {
+    loraGroups = {}, loraPosition = 'prompt_start',
+} = {}) {
     const dialect = dialectKey || 'illus';
     const rendered = parsedTriggers.characters.map(c => renderCharacterForDialect(c, dialect));
     const charParts = rendered.filter(Boolean);
-    // Characters that stood somewhere in the sentence are substituted back at
-    // that spot; only the ones with no position (alias auto-detection) fall
-    // through to `leftoverParts` for the dialect blocks below to place.
     const placed = substituteCharSlots(parsedTriggers.residualPrompt || '', rendered, dialect);
     const scenePrompt = placed.text;
     const leftoverParts = placed.usedAll
         ? []
         : charParts.filter((_, i) => !placed.usedIndices.has(i));
-
-    let positiveParts = [];
+    const loras = [
+        ...(Array.isArray(loraGroups.style) ? loraGroups.style : []),
+        ...(Array.isArray(loraGroups.character) ? loraGroups.character : []),
+    ].filter(Boolean);
+    const placePositive = (sceneParts, styleParts) => {
+        if (!loras.length) return [...sceneParts, ...styleParts];
+        if (loraPosition === 'prompt_end') return [...sceneParts, ...loras, ...styleParts];
+        if (loraPosition === 'style_end') return [...sceneParts, ...styleParts, ...loras];
+        return [...loras, ...sceneParts, ...styleParts];
+    };
     let negativeParts = [];
 
     if (dialect === 'krea') {
-        // Krea 2: Prose only, no negative prompt at CFG 1
-        if (scenePrompt) positiveParts.push(scenePrompt);
-        if (leftoverParts.length) positiveParts.push(groupCharacterParts(leftoverParts, 'krea'));
-
+        const sceneParts = [];
+        const styleParts = [];
+        if (scenePrompt) sceneParts.push(scenePrompt);
+        if (leftoverParts.length) sceneParts.push(groupCharacterParts(leftoverParts, 'krea'));
         for (const style of parsedTriggers.styles || []) {
             const h = style.dialectHints?.krea;
-            if (h?.stylePhrase) positiveParts.push(h.stylePhrase);
-            if (h?.lighting) positiveParts.push(h.lighting);
-            if (h?.camera) positiveParts.push(h.camera);
+            if (h?.stylePhrase) styleParts.push(h.stylePhrase);
+            if (h?.lighting) styleParts.push(h.lighting);
+            if (h?.camera) styleParts.push(h.camera);
         }
-
-        const fullPrompt = positiveParts.filter(Boolean).join(', ');
         return {
-            prompt: fullPrompt,
+            prompt: placePositive(sceneParts, styleParts).filter(Boolean).join(', '),
             negative: '',
             characters: charParts,
             params: {
                 width: baseProfile.width || 1344,
                 height: baseProfile.height || 768,
                 steps: baseProfile.steps || 8,
-                cfg: baseProfile.cfg ?? 1, // 0 is a valid CFG override; only fall back on null/undefined
+                cfg: baseProfile.cfg ?? 1,
             },
         };
     }
 
     if (dialect === 'anima') {
-        // Anima: Prefix -> unplaced chars -> Scene (with chars substituted
-        // in place) -> Styles
-        if (baseProfile.prefix) positiveParts.push(baseProfile.prefix);
-        if (leftoverParts.length) positiveParts.push(groupCharacterParts(leftoverParts, 'anima'));
-        if (scenePrompt) positiveParts.push(scenePrompt);
-
+        const sceneParts = [];
+        const styleParts = [];
+        if (baseProfile.prefix) sceneParts.push(baseProfile.prefix);
+        if (leftoverParts.length) sceneParts.push(groupCharacterParts(leftoverParts, 'anima'));
+        if (scenePrompt) sceneParts.push(scenePrompt);
         for (const style of parsedTriggers.styles || []) {
             const h = style.dialectHints?.anima;
-            if (h?.booruTags) positiveParts.push(normalizeBooruTags(h.booruTags));
-            if (h?.artists) positiveParts.push(h.artists);
+            if (h?.booruTags) styleParts.push(normalizeBooruTags(h.booruTags));
+            if (h?.artists) styleParts.push(h.artists);
         }
-
         if (baseProfile.negative) negativeParts.push(baseProfile.negative);
-
         return {
-            prompt: deduplicateTags(positiveParts.filter(Boolean).join(', ')),
+            prompt: deduplicateTags(placePositive(sceneParts, styleParts).filter(Boolean).join(', ')),
             negative: deduplicateTags(negativeParts.filter(Boolean).join(', ')),
             characters: charParts,
             params: {
@@ -494,29 +496,25 @@ export function assemblePrompt(parsedTriggers, dialectKey, baseProfile = {}) {
         };
     }
 
-    // Default: 'illus' (Illustrious/NoobAI)
-    if (baseProfile.prefix) positiveParts.push(baseProfile.prefix);
-    if (leftoverParts.length) positiveParts.push(groupCharacterParts(leftoverParts, 'illus'));
-    if (scenePrompt) positiveParts.push(normalizeBooruTags(scenePrompt));
-
+    const sceneParts = [];
+    const styleParts = [];
+    if (baseProfile.prefix) sceneParts.push(baseProfile.prefix);
+    if (leftoverParts.length) sceneParts.push(groupCharacterParts(leftoverParts, 'illus'));
+    if (scenePrompt) sceneParts.push(normalizeBooruTags(scenePrompt));
     for (const style of parsedTriggers.styles || []) {
         const h = style.dialectHints?.illus;
-        if (h?.qualityPrefix) positiveParts.push(h.qualityPrefix);
-        if (h?.artists) positiveParts.push(h.artists);
+        if (h?.qualityPrefix) styleParts.push(h.qualityPrefix);
+        if (h?.artists) styleParts.push(h.artists);
         if (h?.negativeTags) negativeParts.push(h.negativeTags);
     }
-
-    // Persona illus negative tags (from persona.dialectHints.illus.negativeTags)
     for (const item of parsedTriggers.characters || []) {
         if (item.isPersona && item.persona?.dialectHints?.illus?.negativeTags) {
             negativeParts.push(item.persona.dialectHints.illus.negativeTags);
         }
     }
-
     if (baseProfile.negative) negativeParts.push(baseProfile.negative);
-
     return {
-        prompt: deduplicateTags(positiveParts.filter(Boolean).join(', ')),
+        prompt: deduplicateTags(placePositive(sceneParts, styleParts).filter(Boolean).join(', ')),
         negative: deduplicateTags(negativeParts.filter(Boolean).join(', ')),
         characters: charParts,
         params: {

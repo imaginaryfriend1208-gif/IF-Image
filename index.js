@@ -22,7 +22,7 @@ import { assemblePrompt, mergeProfileParams, resolveLockedSeed, resolveSizeKeywo
 import { mergeParams } from './src/backends/checkpoint-profiles.js';
 import { cleanupEnvelope } from './src/prompt/cleanup.js';
 import { applyReplaceRules } from './src/prompt/replace.js';
-import { maskLoras, unmaskLoras, reorderPrompt, collectLoras } from './src/prompt/ordering.js';
+import { maskLoras, unmaskLoras, reorderPrompt, collectLoraGroups } from './src/prompt/ordering.js';
 import { readChatStyleId, writeChatStyleId } from './src/prompt/active-style.js';
 import { resolveBackendKind, resolveGenerationContext } from './src/prompt/generation-context.js';
 import { buildSubjectCatalog, extractSubjectTokens, repairBareSubjectNames, resolveDeclaredSubjects, styleLeakFragments, validateScenePrompt } from './src/llm/subjects.js';
@@ -197,7 +197,10 @@ jQuery(async () => {
 
     function effectiveGenerationContext(source = null) {
         const parsedTriggers = typeof source === 'string' ? parseContent(source) : source;
-        return resolveGenerationContext({ settings, roster, chatStyleId: readChatStyleId(getContext()), parsedTriggers });
+        return resolveGenerationContext({
+            settings, roster, chatStyleId: readChatStyleId(getContext()),
+            cardId: currentCardId(), chatId: getContext()?.getCurrentChatId?.() ?? null, parsedTriggers,
+        });
     }
 
     function fullSubjectCatalog() {
@@ -234,7 +237,10 @@ jQuery(async () => {
         const baseProfile = generation.profile;
         const legacyProfile = mergeProfileParams(baseProfile, settings.generation?.params?.[profileKey]);
         const effectiveProfile = mergeProfileParams(legacyProfile, settings.generate?.overrides);
-        const assembled = assemblePrompt(parsed, baseProfile.dialect, effectiveProfile);
+        const loraGroups = collectLoraGroups(parsed);
+        const assembled = assemblePrompt(parsed, baseProfile.dialect, effectiveProfile, {
+            loraGroups, loraPosition: activeStyle.style?.loraPosition ?? 'prompt_start',
+        });
 
         // LoRA tokens must not reach the tag pipeline: normalizeBooruTags and
         // the anima cleanup branch replace every underscore, turning
@@ -269,7 +275,7 @@ jQuery(async () => {
                 ...envelope,
                 prompt: reorderPrompt(envelope.prompt, {
                     loras: masked.loras,
-                    extraLoras: collectLoras(parsed),
+                    extraLoras: [],
                     keepLoraPosition: order.keepLoraPosition === true,
                 }),
             };

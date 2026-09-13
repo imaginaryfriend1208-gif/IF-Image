@@ -14,7 +14,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     isValidLora, extractLoras, maskLoras, unmaskLoras,
-    stripPlaceholders, reorderPrompt, collectLoras,
+    stripPlaceholders, reorderPrompt, collectLoras, parseLoraLines, renderLoraToken, collectLoraGroups,
 } from '../src/prompt/ordering.js';
 import { parseTriggers, charSlotToken } from '../src/prompt/triggers.js';
 import { assemblePrompt } from '../src/prompt/render.js';
@@ -24,6 +24,29 @@ import { PROFILES } from '../src/profiles.js';
 
 const LORA = '<lora:WinxclubKrea2pack:1>';
 const LORA_UNDERSCORE = '<lora:my_cool_lora:0.8>';
+
+test('P6 parses, dedupes, clamps and renders structured LoRAs', () => {
+    assert.deepEqual(parseLoraLines('A\nB:0.5, <lora:C:9>, <lora:D>'), [
+        { name: 'A', weight: 1 }, { name: 'B', weight: 0.5 }, { name: 'C', weight: 5 }, { name: 'D', weight: 1 },
+    ]);
+    assert.deepEqual(parseLoraLines('A:1, A:0.2'), [{ name: 'A', weight: 1 }]);
+    assert.equal(renderLoraToken({ name: 'Style', weight: 0.75 }), '<lora:Style:0.75>');
+});
+
+test('P6 groups style before character with cross-group dedupe', () => {
+    assert.deepEqual(collectLoraGroups({
+        styles: [{ loras: [{ name: 'S1', weight: 1 }, { name: 'Shared', weight: 0.5 }] }],
+        characters: [{ char: { lora: '<lora:Shared:1>, <lora:C1:1>' } }],
+    }), { style: ['<lora:S1:1>', '<lora:Shared:0.5>'], character: ['<lora:C1:1>'] });
+});
+
+test('P6 assemblePrompt supports all three LoRA positions', () => {
+    const parsed = { characters: [], styles: [{ dialectHints: { illus: { qualityPrefix: 'quality' } } }], residualPrompt: 'city', paramOverrides: {} };
+    const groups = { style: ['<lora:S:1>'], character: ['<lora:C:1>'] };
+    assert.equal(assemblePrompt(parsed, 'illus', {}, { loraGroups: groups, loraPosition: 'prompt_start' }).prompt, '<lora:S:1>, <lora:C:1>, city, quality');
+    assert.equal(assemblePrompt(parsed, 'illus', {}, { loraGroups: groups, loraPosition: 'prompt_end' }).prompt, 'city, <lora:S:1>, <lora:C:1>, quality');
+    assert.equal(assemblePrompt(parsed, 'illus', {}, { loraGroups: groups, loraPosition: 'style_end' }).prompt, 'city, quality, <lora:S:1>, <lora:C:1>');
+});
 
 // ------------------------------------------------------------------
 // isValidLora

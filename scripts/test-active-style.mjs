@@ -193,4 +193,18 @@ const styles = [style1, style2, style3];
     assert.deepStrictEqual(result.style, style1);
 }
 
-console.log('PASS (18 cases)');
+
+// 19-23. P6 binding precedence.
+{
+    const styles = [
+        { id: 'chat-bind', binding: { chatIds: ['chat-1'], cardIds: [] } },
+        { id: 'card-bind', binding: { chatIds: [], cardIds: ['card-1'] } },
+        { id: 'default', binding: { chatIds: [], cardIds: [] } },
+    ];
+    assert.equal(resolveActiveStyle({ styles, chatId: 'chat-1', cardId: 'card-1', defaultStyleId: 'default' }).style.id, 'chat-bind');
+    assert.equal(resolveActiveStyle({ styles, chatId: 'other', cardId: 'card-1', defaultStyleId: 'default' }).style.id, 'card-bind');
+    assert.equal(resolveActiveStyle({ styles, chatId: 'other', cardId: 'other', defaultStyleId: 'default' }).style.id, 'default');
+    assert.equal(resolveActiveStyle({ styles, explicitStyles: [{ id: 'marker' }], chatId: 'chat-1' }).style.id, 'marker');
+    assert.equal(resolveActiveStyle({ styles, chatStyleId: 'card-bind', chatId: 'chat-1' }).source, 'chat');
+}
+console.log('PASS (23 cases)');

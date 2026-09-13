@@ -34,34 +34,23 @@ export const CHAT_STYLE_KEY = 'IF_Image_style';
  * @returns {{ style: object|null, source: 'marker'|'chat'|'default'|'none', missingId?: string }}
  */
 export function resolveActiveStyle({
-    explicitStyles = [], chatStyleId = '', defaultStyleId = '', styles = [],
+    explicitStyles = [], chatStyleId = '', cardId = '', chatId = '', defaultStyleId = '', styles = [],
 } = {}) {
-    // 1. The marker named a style: it wins outright, and never reports a
-    // missing id — parseTriggers only ever puts resolved styles in this list.
-    if (Array.isArray(explicitStyles) && explicitStyles.length) {
-        return { style: explicitStyles[0], source: 'marker' };
-    }
-
-    const roster = Array.isArray(styles) ? styles : [];
-    const byId = (id) => (id ? roster.find(s => s?.id === id) ?? null : null);
-
-    // 2. This chat's own choice.
+    if (Array.isArray(explicitStyles) && explicitStyles.length) return { style: explicitStyles[0], source: 'marker' };
+    const find = id => id ? styles.find(style => style?.id === id) ?? null : null;
     if (chatStyleId) {
-        const found = byId(chatStyleId);
-        if (found) return { style: found, source: 'chat' };
-        // Deliberately does NOT fall through to the default: the user made a
-        // choice for this chat and it broke. Silently substituting a
-        // different style would hide that.
-        return { style: null, source: 'none', missingId: chatStyleId };
+        const style = find(chatStyleId);
+        return style ? { style, source: 'chat' } : { style: null, source: 'none', missingId: chatStyleId };
     }
-
-    // 3. The default for chats that have made no choice.
+    const newest = matches => matches.sort((a, b) => Number(b?.meta?.updatedAt ?? 0) - Number(a?.meta?.updatedAt ?? 0))[0] ?? null;
+    const chatBound = chatId ? newest(styles.filter(style => style?.binding?.chatIds?.includes(chatId))) : null;
+    if (chatBound) return { style: chatBound, source: 'chat-bind' };
+    const cardBound = cardId ? newest(styles.filter(style => style?.binding?.cardIds?.includes(cardId))) : null;
+    if (cardBound) return { style: cardBound, source: 'card-bind' };
     if (defaultStyleId) {
-        const found = byId(defaultStyleId);
-        if (found) return { style: found, source: 'default' };
-        return { style: null, source: 'none', missingId: defaultStyleId };
+        const style = find(defaultStyleId);
+        return style ? { style, source: 'default' } : { style: null, source: 'none', missingId: defaultStyleId };
     }
-
     return { style: null, source: 'none' };
 }
 

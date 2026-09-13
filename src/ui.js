@@ -18,7 +18,7 @@ import { buildTriggerContext } from './prompt/binding.js';
 import { undoPlacements } from './llm/inject.js';
 import { buildApiProfileExport, importApiProfiles } from './llm/profiles.js';
 import { formatLlmError } from './llm/client.js';
-import { isValidLora, collectLoras } from './prompt/ordering.js';
+import { isValidLora, collectLoraGroups, parseLoraLines, renderLoraToken } from './prompt/ordering.js';
 import { renderDefaultSystemPrompt } from './llm/prompts.js';
 import { assemblePrompt, resolveProfileKey } from './prompt/render.js';
 import { cleanupEnvelope } from './prompt/cleanup.js';
@@ -2617,6 +2617,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
     const styleDelBtn = $('if_style_del');
     const styleName = $('if_style_name');
     const styleLora = $('if_style_lora');
+    const styleLoraPosition = $('if_style_lora_position');
     const styleKrea = $('if_style_krea');
     const styleKreaLight = $('if_style_krea_light');
     const styleKreaCam = $('if_style_krea_cam');
@@ -3484,7 +3485,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             return;
         }
 
-        const origin = active.source === 'chat' ? 'this chat' : 'the default for new chats';
+        const origin = ({ chat: 'this chat', 'chat-bind': 'chat binding', 'card-bind': 'card binding', default: 'the default for new chats' })[active.source] || active.source;
         const lines = [`Style: ${active.style.name} (from ${origin})`];
 
         if (active.style.lora) lines.push(`LoRA: ${active.style.lora}`);
@@ -3506,9 +3507,10 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         }
 
         // The LoRAs that will lead the final prompt, in order.
-        const loras = collectLoras({ styles: [active.style] });
+        const groups = collectLoraGroups({ styles: [active.style] });
+        const loras = [...groups.style, ...groups.character];
         lines.push(loras.length
-            ? `Leading the prompt: ${loras.join(', ')}`
+            ? `LoRA (${active.style.loraPosition || 'prompt_start'}): ${loras.join(', ')}`
             : 'No LoRA from this style.');
 
         mainStyleStatus.textContent = lines.join('\n');

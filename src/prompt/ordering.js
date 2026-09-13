@@ -110,32 +110,74 @@ export function unmaskLoras(text, loras = []) {
     return tidySeparators(text.replace(PLACEHOLDER_PATTERN, (match, digits) => loras[Number(digits)] ?? ''));
 }
 
-/**
- * Collect the LoRAs contributed by styles and characters.
- *
- * Style LoRAs come first, in style order; character LoRAs follow, in the
- * order the characters appear in the prompt. Duplicates are dropped, keeping
- * the earliest occurrence, so the same LoRA attached to two characters is
- * applied once at its first position.
- *
- * @param {{ styles?: Array<object>, characters?: Array<object> }} parsedTriggers
- * @returns {string[]}
- */
-export function collectLoras({ styles = [], characters = [] } = {}) {
+/** Parse newline/comma-separated LoRA values into structured entries. */
+export function parseLoraLines(text) {
+    const source = String(text ?? '').replace(/>\s+(?=<lora:)/gi, '>,');
+    const parts = [];
+    let current = '';
+    let depth = 0;
+    for (const char of source) {
+        if (char === '<') depth += 1;
+        if (char === '>') depth = Math.max(0, depth - 1);
+        if ((char === '\n' || char === '\r' || char === ',') && depth === 0) {
+            if (current.trim()) parts.push(current.trim());
+            current = '';
+        } else current += char;
+    }
+    if (current.trim()) parts.push(current.trim());
     const out = [];
-    const push = (value) => {
-        if (typeof value !== 'string') return;
-        for (const token of value.match(LORA_PATTERN) ?? []) {
-            if (!out.includes(token)) out.push(token);
-        }
-    };
-    for (const style of styles) push(style?.lora);
-    for (const item of characters) {
-        // Persona and character are the same thing here, by design.
-        push(item?.char?.lora);
-        push(item?.persona?.lora);
+    const seen = new Set();
+    for (const part of parts) {
+        const wrapped = part.match(/^<lora:([^:>]+)(?::([^>]*))?>$/i);
+        const plain = wrapped ? null : part.match(/^([^:<>]+?)(?::([^:<>]*))?$/);
+        const name = (wrapped?.[1] ?? plain?.[1] ?? '').trim();
+        if (!name || seen.has(name)) continue;
+        const raw = wrapped?.[2] ?? plain?.[2];
+        const parsed = raw === undefined || raw === '' ? 1 : Number(raw);
+        seen.add(name);
+        out.push({ name, weight: Number.isFinite(parsed) ? Math.max(-5, Math.min(5, parsed)) : 1 });
     }
     return out;
+}
+
+export function renderLoraToken(entry) {
+    const name = typeof entry?.name === 'string' ? entry.name.trim() : '';
+    if (!name || /[<>\r\n]/.test(name)) return '';
+    const parsed = Number(entry?.weight);
+    const weight = Number.isFinite(parsed) ? Math.max(-5, Math.min(5, parsed)) : 1;
+    return `<lora:${name}:${Number(weight.toFixed(2))}>`;
+}
+
+/** Return grouped LoRAs, deduped with style winning over character. */
+export function collectLoraGroups({ styles = [], characters = [] } = {}) {
+    const result = { style: [], character: [] };
+    const seen = new Set();
+    const push = (group, tokens) => {
+        for (const token of tokens) {
+            const match = token.match(/^<lora:([^:>]+)/i);
+            const name = match?.[1] ?? token;
+            if (!token || seen.has(name)) continue;
+            seen.add(name);
+            result[group].push(token);
+        }
+    };
+    for (const style of styles) {
+        const tokens = Array.isArray(style?.loras) && style.loras.length
+            ? style.loras.map(renderLoraToken).filter(Boolean)
+            : (typeof style?.lora === 'string' ? (style.lora.match(LORA_PATTERN) ?? []) : []);
+        push('style', tokens);
+    }
+    for (const item of characters) {
+        const record = item?.char ?? item?.persona ?? item;
+        push('character', typeof record?.lora === 'string' ? (record.lora.match(LORA_PATTERN) ?? []) : []);
+    }
+    return result;
+}
+
+/** Flat compatibility view: style group first, then character group. */
+export function collectLoras(input = {}) {
+    const groups = collectLoraGroups(input);
+    return [...groups.style, ...groups.character];
 }
 
 /**
