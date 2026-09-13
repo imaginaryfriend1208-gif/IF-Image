@@ -13,10 +13,10 @@ import { createMarkerPipeline } from './src/runtime/marker-pipeline.js';
 import { replaceMarkers, createSlotElement, renderSlotState, renderImageFrame, renderRegenerateChip, renderIdleChip, openLightbox, contentHash } from './src/runtime/insert.js';
 import { saveImageRecord, getImagesForMessage, getImageRecord, deleteImageRecord, getStorageStats, pruneImages, toJpegBlob } from './src/storage/images.js';
 import { getAllCharacters, saveCharacter } from './src/storage/chars.js';
-import { getAllStyles, getAllPersonas, savePersona, saveStyle, createDefaultPersona, applyPersonaSync, getReplaceRules, saveReplaceRules } from './src/storage/presets.js';
+import { getAllStyles, getAllPersonas, savePersona, saveStyle, getReplaceRules, saveReplaceRules } from './src/storage/presets.js';
 import { getAllOutfits, saveOutfit } from './src/storage/outfits.js';
 import { writeMetadata, isPng } from './src/storage/png-metadata.js';
-import { resolveActiveCharacters } from './src/prompt/binding.js';
+import { buildTriggerContext } from './src/prompt/binding.js';
 import { parseTriggers } from './src/prompt/triggers.js';
 import { assemblePrompt, mergeProfileParams, resolveLockedSeed, resolveSizeKeyword } from './src/prompt/render.js';
 import { mergeParams } from './src/backends/checkpoint-profiles.js';
@@ -157,11 +157,8 @@ jQuery(async () => {
     }
 
     // ------------------------------------------------------------------
-    // C4: active character resolution. The current card id (avatar
-    // filename) and chat id gate which characters resolveActiveCharacters()
-    // returns as the "active" subset fed to parseTriggers; characters bound
-    // elsewhere remain resolvable through the fallback tiers (with a
-    // toastr warning) inside parseTriggers itself.
+    // V2 binding: buildTriggerContext() is the single place that decides
+    // which entities are active. Unbound entities do not trigger; no fallback.
     // ------------------------------------------------------------------
     function currentCardId() {
         try {
@@ -177,30 +174,43 @@ jQuery(async () => {
     // ------------------------------------------------------------------
     const execute = createExecutor({ imageBackend, getSettings: () => settings });
 
-    function parseContent(content, { warnFallback = true } = {}) {
-        const activeRoster = resolveActiveCharacters(roster.characters, currentCardId(), getContext().getCurrentChatId?.());
-        return parseTriggers(content, {
-            roster: activeRoster,
-            fullRoster: roster.characters,
-            styles: roster.styles,
-            defaultPersona: roster.persona,
-            personas: roster.personas,
-            outfits: roster.outfits,
-            onFallback: warnFallback
-                ? (tier, token) => notify('warning', `Character trigger "$${token}" resolved via ${tier} fallback (not active for this chat/card).`)
-                : undefined,
-        });
+    function activeEntities() {
+        const cardId = currentCardId();
+        const chatId = getContext().getCurrentChatId?.() ?? null;
+        return {
+            cardId,
+            chatId,
+            triggerContext: buildTriggerContext({
+                characters: roster.characters,
+                personas: roster.personas,
+                styles: roster.styles,
+                outfits: roster.outfits,
+                cardId,
+                chatId,
+            }),
+        };
+    }
+
+    function parseContent(content) {
+        return parseTriggers(content, activeEntities().triggerContext);
     }
 
     function effectiveGenerationContext(source = null) {
-        const parsedTriggers = typeof source === 'string' ? parseContent(source, { warnFallback: false }) : source;
+        const parsedTriggers = typeof source === 'string' ? parseContent(source) : source;
         return resolveGenerationContext({ settings, roster, chatStyleId: readChatStyleId(getContext()), parsedTriggers });
     }
 
     function fullSubjectCatalog() {
+        const active = activeEntities();
+        const triggerContext = active.triggerContext;
         return buildSubjectCatalog({
-            characters: roster.characters, personas: roster.personas, persona: roster.persona,
-            includeAll: true, maxSubjects: Number.MAX_SAFE_INTEGER,
+            characters: triggerContext.roster,
+            personas: triggerContext.personas,
+            persona: triggerContext.defaultPersona,
+            activeCardId: active.cardId,
+            chatId: active.chatId,
+            includeAll: true,
+            maxSubjects: Number.MAX_SAFE_INTEGER,
         });
     }
 
@@ -320,7 +330,15 @@ jQuery(async () => {
     const engine = createEngine({
         getSettings: () => settings,
         getContext: () => ({ ...getContext(), extensionPrompts: extension_prompts }),
-        roster: () => roster,
+        roster: () => {
+            const triggerContext = activeEntities().triggerContext;
+            return {
+                ...roster,
+                characters: triggerContext.roster,
+                personas: triggerContext.personas,
+                persona: triggerContext.defaultPersona,
+            };
+        },
         substituteParams: (s) => {
             try { return getContext().substituteParams?.(s) ?? s; } catch { return s; }
         },
@@ -347,66 +365,9 @@ jQuery(async () => {
         activeLlmAborts.clear();
     }
 
-    async function syncPersonaRequest({ signal } = {}) {
-        const controller = new AbortController();
-        const forwardAbort = () => controller.abort();
-        if (signal?.aborted) controller.abort();
-        else signal?.addEventListener('abort', forwardAbort, { once: true });
-        activeLlmAborts.add(controller);
-        try {
-            return await engine.syncPersonaFromSt({ signal: controller.signal });
-        } finally {
-            signal?.removeEventListener('abort', forwardAbort);
-            activeLlmAborts.delete(controller);
-        }
+    async function importPersonaName() {
+        return engine.importPersonaNameFromSt();
     }
-
-    // Fill an empty persona roster once per page load. This is deliberately
-    // silent and only runs when the selected transport is actually usable.
-    let initialPersonaSyncAttempted = false;
-    async function autoSyncInitialPersona() {
-        if (initialPersonaSyncAttempted) return false;
-        initialPersonaSyncAttempted = true;
-        await initialRosterLoad;
-        if ((roster.personas?.length ?? 0) > 0) return false;
-
-        let ctx;
-        try { ctx = getContext(); } catch { return false; }
-        const llmTarget = settings.connection?.llm ?? {};
-        const stProfiles = ctx?.extensionSettings?.connectionManager?.profiles;
-        const canUseStProfile = llmTarget.mode === 'st_profile'
-            && Boolean(llmTarget.stProfileId)
-            && Array.isArray(stProfiles)
-            && stProfiles.some(profile => profile?.id === llmTarget.stProfileId)
-            && typeof ctx?.ConnectionManagerRequestService?.sendRequest === 'function';
-        const canUseCustom = llmTarget.mode === 'custom'
-            && Boolean(llmTarget.custom?.baseUrl && llmTarget.custom?.model);
-        if (!canUseStProfile && !canUseCustom) return false;
-
-        try {
-            const result = await syncPersonaRequest();
-            if (!result?.persona || typeof result.persona !== 'object') return false;
-            // A user may have created/synced a persona while the LLM request
-            // was running. Re-check storage to avoid creating a duplicate.
-            if ((await getAllPersonas()).length > 0) {
-                await refreshRoster();
-                return false;
-            }
-            const persona = createDefaultPersona(result.persona.name || 'Default User');
-            applyPersonaSync(persona, result.persona, true);
-            await savePersona(persona);
-            await refreshRoster();
-            console.info('[IF Image] Initial SillyTavern persona sync completed.');
-            return true;
-        } catch (err) {
-            if (err?.code !== 'ABORTED' && err?.name !== 'AbortError') {
-                // Log only the error category; backend detail may contain secrets.
-                console.warn('[IF Image] Initial persona sync skipped:', err?.code ?? err?.name ?? 'ERROR');
-            }
-            return false;
-        }
-    }
-    const initialPersonaSync = autoSyncInitialPersona();
 
     // D4: edit-before-generate dialog. ui.js owns the DOM/popup; the LLM
     // assist goes through exactly one callback (engine.modifyTags) so ui.js
@@ -631,8 +592,7 @@ jQuery(async () => {
         // UI persistence happens before this refresh, so later LLM calls see
         // the newly imported/synced roster immediately.
         refreshRoster,
-        initialPersonaSync,
-        syncPersonaFromSt: ({ signal } = {}) => syncPersonaRequest({ signal }),
+        importPersonaNameFromSt: importPersonaName,
         planChatImages: async (count, { signal } = {}) => {
             const controller = new AbortController();
             activeLlmAborts.add(controller);

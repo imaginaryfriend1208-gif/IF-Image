@@ -1,9 +1,11 @@
 // IF Image - Canonical subject-token contract shared by LLM planning,
 // rewriting, and the marker compiler. Pure functions only; no ST/DOM/IDB deps.
-//
+
+import { resolveEntityKeyword } from '../storage/entity-shape.js';
+
 // Tokens emitted here must be understood by src/prompt/triggers.js:
-//   - $Name              simple character/persona name
-//   - ${char: "Name"}    character name with spaces / non-Latin letters
+//   - $keyword           canonical character/persona keyword
+//   - ${char: "keyword"} object form when needed
 //   - $me                the default persona
 // There is no ${persona: ...} trigger. A complex non-default persona therefore
 // has no safe compiler token and is omitted from the catalog.
@@ -47,14 +49,11 @@ function objectCharToken(name) {
  * this subject cannot be represented without colliding with another subject.
  */
 export function createSubjectToken(subject, { simpleUnavailable = false } = {}) {
-    const name = typeof subject?.name === 'string' ? subject.name.trim() : '';
-    if (!name) return '';
+    const keyword = typeof subject?.keyword === 'string' ? subject.keyword.trim() : '';
+    if (!keyword) return '';
     const kind = subject.kind === 'persona' ? 'persona' : 'character';
-    if (kind === 'persona') {
-        if (subject.isDefault) return '$me';
-        return !simpleUnavailable && isSimpleName(name) ? `$${name}` : '';
-    }
-    return !simpleUnavailable && isSimpleName(name) ? `$${name}` : objectCharToken(name);
+    if (kind === 'persona' && subject.isDefault) return '$me';
+    return !simpleUnavailable && isSimpleName(keyword) ? `$${keyword}` : objectCharToken(keyword);
 }
 
 function cleanAliases(record) {
@@ -76,10 +75,11 @@ function hasExactPhrase(text, phrase) {
 
 function characterPriority(character, options, relevanceText) {
     let priority = 99;
-    if (options.activeCardId && character?.binding?.cardId === options.activeCardId) priority = Math.min(priority, 0);
+    if (options.activeCardId && Array.isArray(character?.binding?.cardIds)
+        && character.binding.cardIds.includes(options.activeCardId)) priority = Math.min(priority, 0);
     if (options.chatId && Array.isArray(character?.binding?.chatIds)
         && character.binding.chatIds.includes(options.chatId)) priority = Math.min(priority, 1);
-    const names = [character?.name, ...cleanAliases(character)];
+    const names = [character?.name, resolveEntityKeyword(character), ...cleanAliases(character)];
     if (options.activeCharacterName
         && names.some(name => normalizeSubjectName(name) === normalizeSubjectName(options.activeCharacterName))) {
         priority = Math.min(priority, 2);
@@ -114,6 +114,8 @@ export function buildSubjectCatalog({
 
     const options = { activeCardId, chatId, activeCharacterName };
     const candidates = [];
+    // `characters` and `personas` are already active; binding is applied only
+    // by buildTriggerContext() at the production boundary.
     const chars = Array.isArray(characters) ? characters : [];
     chars.forEach((record, order) => {
         if (!record || typeof record !== 'object' || !String(record.name ?? '').trim()) return;
@@ -136,7 +138,7 @@ export function buildSubjectCatalog({
     const activePersonaKey = persona ? recordKey(persona, 'persona') : '';
     personaRecords.forEach((record, order) => {
         const isDefault = Boolean(record?.isDefault) || (activePersonaKey && recordKey(record, 'persona') === activePersonaKey);
-        const names = [record?.name, ...cleanAliases(record)];
+        const names = [record?.name, resolveEntityKeyword(record), ...cleanAliases(record)];
         const mentioned = relevanceText && names.some(name => hasExactPhrase(relevanceText, name));
         candidates.push({
             record,
@@ -161,7 +163,7 @@ export function buildSubjectCatalog({
     // candidates, then skip any token collision and continue filling the cap.
     const characterNames = new Set(filtered
         .filter(item => item.kind === 'character')
-        .flatMap(item => [item.record.name, ...cleanAliases(item.record)])
+        .flatMap(item => [resolveEntityKeyword(item.record), ...cleanAliases(item.record)])
         .map(normalizeSubjectName));
     const usedTokens = new Set();
     const usedTokenKeys = new Set();
@@ -170,7 +172,8 @@ export function buildSubjectCatalog({
         if (catalog.length >= cap) break;
         const name = String(item.record.name ?? '').trim();
         const collides = item.kind === 'persona' && characterNames.has(normalizeSubjectName(name));
-        const token = createSubjectToken({ name, kind: item.kind, isDefault: item.isDefault }, { simpleUnavailable: collides });
+        const keyword = resolveEntityKeyword(item.record);
+        const token = createSubjectToken({ keyword, kind: item.kind, isDefault: item.isDefault }, { simpleUnavailable: collides });
         const tokenKey = normalizeSubjectName(token);
         if (!token || usedTokens.has(token) || usedTokenKeys.has(tokenKey)) continue;
         usedTokens.add(token);
@@ -179,6 +182,7 @@ export function buildSubjectCatalog({
             id: String(item.record.id ?? `${item.kind}:${normalizeSubjectName(name)}`),
             kind: item.kind,
             name,
+            keyword,
             aliases: cleanAliases(item.record),
             token,
             // Kept in the public shape for compatibility. LLMs receive and
@@ -198,7 +202,7 @@ export function renderSubjectCatalog(catalog = []) {
         const aliases = entry.aliases?.length ? ` | Aliases: ${entry.aliases.join(', ')}` : '';
         const role = entry.kind === 'persona' ? 'user persona' : 'character';
         lines.push(`- Exact token: ${entry.token} | Canonical name: ${entry.name} | Role: ${role}${aliases}`);
-        lines.push(`  Use ${entry.token} whenever ${entry.name} is visibly present. Never replace it with a generic description, pronoun-only reference, or appearance tags.`);
+        lines.push(`  Use ${entry.token} whenever ${entry.name} is visibly present. Never replace it with a generic wording, pronoun-only reference, or appearance tags.`);
     }
     return lines.join('\n');
 }
@@ -220,7 +224,7 @@ function nameOwners(catalog, { charactersOnly = false, simpleOnly = false } = {}
     const map = new Map();
     for (const entry of Array.isArray(catalog) ? catalog : []) {
         if (charactersOnly && entry.kind !== 'character') continue;
-        for (const surface of [entry.name, ...(entry.aliases ?? [])]) {
+        for (const surface of [entry.name, entry.keyword, ...(entry.aliases ?? [])]) {
             if (simpleOnly && !isSimpleName(surface)) continue;
             addOwner(map, surface, entry);
         }
@@ -392,7 +396,7 @@ export function repairBareSubjectNames(prompt, catalog = [], { requiredTokens = 
 
     (Array.isArray(catalog) ? catalog : []).forEach((entry, entryOrder) => {
         if (!wanted.has(entry.token) || present.has(entry.token)) return;
-        for (const surface of [entry.name, ...(entry.aliases ?? [])]) {
+        for (const surface of [entry.name, entry.keyword, ...(entry.aliases ?? [])]) {
             const key = normalizeSubjectName(surface);
             if (!key || owners.get(key)?.size !== 1) continue;
             const re = new RegExp(`(^|[^\\p{L}\\p{N}_])(${escapeRegExp(surface)})(?=$|[^\\p{L}\\p{N}_])`, 'giu');

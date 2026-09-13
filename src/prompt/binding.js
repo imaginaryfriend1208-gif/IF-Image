@@ -1,61 +1,93 @@
-// IF Image - Character binding resolution (Phase C4).
-// A character can be bound to a specific character card (binding.cardId) or
-// to one or more chat ids (binding.chatIds). resolveActiveCharacters() picks
-// the "active" roster subset for the current card/chat context,
-// deterministically — never a random selection.
+// IF Image - entity binding + the single entry point for trigger context.
+//
+// Binding rule (V2): an entity is ACTIVE only when it is explicitly bound to
+// the current character card, bound to the current chat, or marked global.
+// "Not bound = not active = never triggers." There is no fallback tier.
+//
+// buildTriggerContext() below is the ONLY place that rule is applied. The
+// trigger parser is deliberately unaware of cardId/chatId so the rule cannot
+// be bypassed (or duplicated, and thus drift) by a caller.
 
-function hasBinding(char) {
-    return Boolean(char?.binding?.cardId) || Boolean(char?.binding?.chatIds?.length);
+function cleanIds(value) {
+    return [...new Set((Array.isArray(value) ? value : []).filter(id => typeof id === 'string' && id))];
+}
+
+function bindingOf(record) {
+    const binding = record?.binding && typeof record.binding === 'object' ? record.binding : {};
+    return {
+        cardIds: cleanIds(binding.cardIds),
+        chatIds: cleanIds(binding.chatIds),
+        global: binding.global === true,
+    };
 }
 
 /**
- * Resolve the active character subset for a given card/chat context.
- * Active = the UNION of characters bound to the current card, characters
- * bound to the current chat id, and characters with no binding at all
- * (available anywhere). Binding is a scoping tool, not an exclusivity
- * switch: an unbound character stays usable in every chat even when other
- * characters are bound to this card/chat — otherwise every $UnboundName
- * trigger would fall through to a fallback tier and raise a spurious
- * warning. Only characters bound to a DIFFERENT card/chat are excluded
- * from the active subset; they remain resolvable via the trigger fallback
- * tiers in resolveCharacterTrigger.
- * @param {Array<object>} roster - full character roster
+ * Filter a record list down to the entities active for this card/chat.
+ * Only explicitly bound or global entities are active.
+ * @param {Array<object>} list
  * @param {string|null} cardId - current character card avatar/id
  * @param {string|null} chatId - current chat id
- * @returns {Array<object>}
+ * @returns {Array<object>} a new array; input order is preserved
  */
-export function resolveActiveCharacters(roster = [], cardId = null, chatId = null) {
-    const list = Array.isArray(roster) ? roster : [];
-    return list.filter(c =>
-        !hasBinding(c)
-        || (c.binding?.cardId && c.binding.cardId === cardId)
-        || (Array.isArray(c.binding?.chatIds) && c.binding.chatIds.includes(chatId)),
-    );
+export function resolveActiveEntities(list = [], cardId = null, chatId = null) {
+    return (Array.isArray(list) ? list : []).filter(record => {
+        const binding = bindingOf(record);
+        return binding.global
+            || (typeof cardId === 'string' && cardId && binding.cardIds.includes(cardId))
+            || (typeof chatId === 'string' && chatId && binding.chatIds.includes(chatId));
+    });
 }
 
+/** Compatibility alias; carries the same strict semantics. */
+export const resolveActiveCharacters = resolveActiveEntities;
+
 /**
- * Resolve a $Name trigger token against the active roster subset, falling
- * back through wider tiers when no match is found there. Never random —
- * every tier is a plain filter + the existing fuzzy matchCharacter scoring.
- * @param {(token: string, roster: Array<object>) => object|null} matchFn - matchCharacter
- * @param {string} token
- * @param {Array<object>} activeRoster - resolveActiveCharacters() output
- * @param {Array<object>} fullRoster - the entire roster
- * @returns {{ char: object|null, usedFallback: boolean, tier: 'active'|'bound'|'all'|'none' }}
+ * Build the context object for parseTriggers().
+ *
+ * This is the single entry point that applies the binding rule. Everything it
+ * returns is already filtered, so parseTriggers() can treat `roster` and
+ * `personas` as authoritative and never needs to know the card/chat.
+ *
+ * `defaultPersona` is resolved from the ACTIVE persona subset only: when the
+ * default persona is not bound here it comes back null, and `$me` therefore
+ * does not resolve. There is intentionally no `personas[0]` fallback — that
+ * would resurrect an unbound persona through the back door.
+ *
+ * @param {{characters?: Array<object>, personas?: Array<object>,
+ *          styles?: Array<object>, outfits?: Array<object>,
+ *          cardId?: string|null, chatId?: string|null}} input
+ * @returns {{roster: Array<object>, personas: Array<object>,
+ *            defaultPersona: object|null, styles: Array<object>,
+ *            outfits: Array<object>}}
  */
-export function resolveCharacterTrigger(matchFn, token, activeRoster, fullRoster) {
-    const active = matchFn(token, activeRoster || []);
-    if (active) return { char: active, usedFallback: false, tier: 'active' };
+export function buildTriggerContext({
+    characters = [], personas = [], styles = [], outfits = [], cardId = null, chatId = null,
+} = {}) {
+    const activePersonas = resolveActiveEntities(personas, cardId, chatId);
+    return {
+        roster: resolveActiveEntities(characters, cardId, chatId),
+        personas: activePersonas,
+        defaultPersona: activePersonas.find(persona => persona?.isDefault) ?? null,
+        styles: Array.isArray(styles) ? styles : [],
+        outfits: Array.isArray(outfits) ? outfits : [],
+    };
+}
 
-    // Tier 2: any character with a deliberate binding, even to a different
-    // card/chat — still an intentional assignment, just not for this one.
-    const bound = (fullRoster || []).filter(hasBinding);
-    const boundMatch = matchFn(token, bound);
-    if (boundMatch) return { char: boundMatch, usedFallback: true, tier: 'bound' };
+export function bindEntity(record, scope, id) {
+    if (!record || typeof record !== 'object') throw new TypeError('bindEntity requires a record.');
+    if (!['card', 'chat'].includes(scope)) throw new TypeError('Binding scope must be "card" or "chat".');
+    if (typeof id !== 'string' || !id) throw new TypeError('Binding id must be a non-empty string.');
+    const binding = bindingOf(record);
+    const key = scope === 'card' ? 'cardIds' : 'chatIds';
+    if (!binding[key].includes(id)) binding[key].push(id);
+    return { ...record, binding };
+}
 
-    // Tier 3: the entire roster.
-    const allMatch = matchFn(token, fullRoster || []);
-    if (allMatch) return { char: allMatch, usedFallback: true, tier: 'all' };
-
-    return { char: null, usedFallback: false, tier: 'none' };
+export function unbindEntity(record, scope, id) {
+    if (!record || typeof record !== 'object') throw new TypeError('unbindEntity requires a record.');
+    if (!['card', 'chat'].includes(scope)) throw new TypeError('Binding scope must be "card" or "chat".');
+    const binding = bindingOf(record);
+    const key = scope === 'card' ? 'cardIds' : 'chatIds';
+    binding[key] = binding[key].filter(value => value !== id);
+    return { ...record, binding };
 }

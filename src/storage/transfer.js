@@ -4,11 +4,101 @@
 // auth, keys) and discovery caches are structurally excluded, and a deep
 // sanitizer strips any forbidden key defensively before serialization.
 
+import { normalizeAliases as normalizeEntityAliases, normalizeKeyword as normalizeEntityKeyword } from './entity-shape.js';
+
 export const PRESET_FORMAT = 'ifimage-preset';
 export const PRESET_VERSION = 1;
 
 // Keys that must NEVER appear anywhere in an export, at any depth.
-const FORBIDDEN_KEYS = new Set(['auth', 'apiKey', 'password', 'baseUrl', 'discovery']);
+const FORBIDDEN_KEYS = new Set([
+    'auth', 'authorization', 'apiKey', 'api_key', 'password', 'token', 'secret',
+    'baseUrl', 'discovery',
+]);
+
+
+
+// Portable single-entity document. Kept separate from the bulk preset format
+// so one Character/Persona can be shared without connection or chat state.
+export const ENTITY_FORMAT = 'ifimage-entity';
+export const ENTITY_VERSION = 1;
+const ENTITY_KINDS = new Set(['character', 'persona']);
+
+function newEntityId(kind, usedIds) {
+    const prefix = kind === 'persona' ? 'persona' : 'char';
+    let id;
+    do {
+        id = globalThis.crypto?.randomUUID?.()
+            ?? `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    } while (usedIds.has(id));
+    return id;
+}
+
+/** Build a credential-free, portable document for one Character or Persona. */
+export function buildEntityExport(kind, record) {
+    if (!ENTITY_KINDS.has(kind)) throw new TypeError('Entity kind must be character or persona.');
+    if (!record || typeof record !== 'object' || Array.isArray(record)) {
+        throw new TypeError('Entity record must be an object.');
+    }
+    return sanitize({ format: ENTITY_FORMAT, version: ENTITY_VERSION, kind, entity: record });
+}
+
+/** Validate a parsed single-entity document without mutating it. */
+export function validateEntityImport(document) {
+    const errors = [];
+    if (!document || typeof document !== 'object' || Array.isArray(document)) {
+        return { ok: false, errors: ['Import must be a JSON object.'] };
+    }
+    if (document.format !== ENTITY_FORMAT) errors.push(`format must be "${ENTITY_FORMAT}".`);
+    if (document.version !== ENTITY_VERSION) errors.push(`version must be ${ENTITY_VERSION}.`);
+    if (!ENTITY_KINDS.has(document.kind)) errors.push('kind must be character or persona.');
+    if (!document.entity || typeof document.entity !== 'object' || Array.isArray(document.entity)) {
+        errors.push('entity must be an object.');
+    } else if (typeof document.entity.name !== 'string' || !document.entity.name.trim()) {
+        errors.push('entity.name must be a non-empty string.');
+    }
+    return { ok: errors.length === 0, errors };
+}
+
+/**
+ * Prepare one imported entity for persistence.
+ * - keeps portable cardIds (avatar filenames);
+ * - clears machine-local chatIds/global;
+ * - normalizes keyword/aliases;
+ * - assigns a new id only when the incoming id collides.
+ */
+export function prepareEntityImport(document, { existing = [], idFactory } = {}) {
+    const validation = validateEntityImport(document);
+    if (!validation.ok) throw new TypeError(validation.errors.join(' '));
+
+    const record = sanitize(document.entity);
+    const ids = new Set((Array.isArray(existing) ? existing : [])
+        .map(item => item?.id).filter(id => typeof id === 'string' && id));
+    if (typeof record.id !== 'string' || !record.id || ids.has(record.id)) {
+        record.id = typeof idFactory === 'function' ? idFactory() : newEntityId(document.kind, ids);
+        if (typeof record.id !== 'string' || !record.id || ids.has(record.id)) {
+            throw new TypeError('Imported entity id factory must return a unique non-empty string.');
+        }
+    }
+
+    const binding = record.binding && typeof record.binding === 'object' ? record.binding : {};
+    const legacyCardIds = typeof binding.cardId === 'string' && binding.cardId ? [binding.cardId] : [];
+    const sourceCardIds = Array.isArray(binding.cardIds) ? binding.cardIds : legacyCardIds;
+    record.binding = {
+        cardIds: [...new Set(sourceCardIds.filter(id => typeof id === 'string' && id))],
+        chatIds: [],
+        global: false,
+    };
+    record.aliases = normalizeEntityAliases(record.aliases);
+    const usedKeywords = new Set((Array.isArray(existing) ? existing : [])
+        .map(item => normalizeEntityKeyword(item?.keyword, item?.name, ''))
+        .filter(Boolean));
+    const baseKeyword = normalizeEntityKeyword(record.keyword, record.name, document.kind);
+    let keyword = baseKeyword;
+    let suffix = 2;
+    while (usedKeywords.has(keyword)) keyword = `${baseKeyword}${suffix++}`;
+    record.keyword = keyword;
+    return record;
+}
 
 /** Collection names carried by the format, in a stable order. */
 export const PRESET_COLLECTIONS = ['characters', 'outfits', 'styles', 'personas', 'replaceRules', 'checkpointProfiles'];

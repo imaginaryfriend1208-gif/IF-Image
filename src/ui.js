@@ -8,13 +8,13 @@ import { resolveCheckpoint } from './backends/a1111.js';
 import { getActiveProfile, mergeParams, suggestCheckpointProfile, normalizeCheckpointProfile, SIZE_PRESETS, matchSizePreset } from './backends/checkpoint-profiles.js';
 import { PROFILES, PROFILE_KEYS } from './profiles.js';
 import { getAllCharacters, saveCharacter, removeCharacter, createDefaultCharacter, emptyBooruDetail, applyCharMigrations } from './storage/chars.js';
-import { getAllPersonas, savePersona, removePersona, getAllStyles, saveStyle, removeStyle, createDefaultPersona, createDefaultStyle, applyPersonaSync, getReplaceRules, saveReplaceRules } from './storage/presets.js';
+import { getAllPersonas, savePersona, removePersona, getAllStyles, saveStyle, removeStyle, createDefaultPersona, createDefaultStyle, applyPersonaNameImport, getReplaceRules, saveReplaceRules } from './storage/presets.js';
 import { getOutfitsForCharacter, getAllOutfits, saveOutfit, removeOutfit, createDefaultOutfit } from './storage/outfits.js';
 import { buildExport, validateImport, planMerge } from './storage/transfer.js';
 import { listImages, countImages, deleteImageRecord, getStorageStats, pruneImages } from './storage/images.js';
 import { parseTriggers } from './prompt/triggers.js';
 import { resolveActiveStyle, readChatStyleId, writeChatStyleId } from './prompt/active-style.js';
-import { resolveActiveCharacters } from './prompt/binding.js';
+import { buildTriggerContext } from './prompt/binding.js';
 import { undoPlacements } from './llm/inject.js';
 import { buildApiProfileExport, importApiProfiles } from './llm/profiles.js';
 import { formatLlmError } from './llm/client.js';
@@ -45,14 +45,11 @@ export const EXTENSION_VERSION = '0.3.0';
  * @param {() => string} [args.getCurrentChatId] - C10: current chat id, for
  *   the Gallery tab's "current chat" filter.
  * @param {(opts?: { signal?: AbortSignal }) => Promise<{ persona: object }>}
- *   [args.syncPersonaFromSt] - ask the LLM engine to build a persona payload
- *   from the active SillyTavern Persona (name + description).
+ *   [args.importPersonaNameFromSt] - read only the active host persona name.
  * @param {() => (void|Promise<void>)} [args.refreshRoster] - refresh the
  *   runtime roster after the UI has persisted an imported/synced record.
- * @param {Promise<boolean>} [args.initialPersonaSync] - resolves true when
- *   the silent first-load sync created a Persona and the selector must reload.
  */
-export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQueue, regenerateImage, getCurrentChatId, planChatImages, applyPlacements, getChatContext, eventSource, event_types, syncPersonaFromSt, refreshRoster, initialPersonaSync }) {
+export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQueue, regenerateImage, getCurrentChatId, planChatImages, applyPlacements, getChatContext, eventSource, event_types, importPersonaNameFromSt, refreshRoster }) {
     const html = `
     <div class="if-image-settings">
         <div class="if-image-title">
@@ -608,7 +605,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 </div>
             </div>
             <div class="if-image-row">
-                <label for="if_char_name">Name (Trigger: $Name)</label>
+                <label for="if_char_name">Name (display only — not a trigger)</label>
                 <input id="if_char_name" type="text" class="text_pole" placeholder="e.g. Lyna">
             </div>
             <div class="if-image-row">
@@ -710,7 +707,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
                 </div>
             </div>
             <div class="if-image-row">
-                <label for="if_per_name">Persona Name</label>
+                <label for="if_per_name">Name (display only — not a trigger)</label>
                 <input id="if_per_name" type="text" class="text_pole" value="Default User">
             </div>
             <div class="if-image-row">
@@ -2113,11 +2110,16 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         const text = testPrompt.value.trim();
         if (!text) { testTriggers.style.display = 'none'; return; }
         try {
-            const roster = await getAllCharacters();
-            const styles = await getAllStyles();
-            const personas = await getAllPersonas();
-            const defaultPersona = personas.find(p => p.isDefault) || personas[0] || null;
-            const parsed = parseTriggers(text, { roster, styles, defaultPersona, personas });
+            const [characters, styles, personas, outfits] = await Promise.all([
+                getAllCharacters(), getAllStyles(), getAllPersonas(), getAllOutfits(),
+            ]);
+            const ctx = freshChatCtx();
+            const triggerContext = buildTriggerContext({
+                characters, personas, styles, outfits,
+                cardId: ctx?.characters?.[ctx?.characterId]?.avatar ?? null,
+                chatId: ctx?.getCurrentChatId?.() ?? getCurrentChatId?.() ?? null,
+            });
+            const parsed = parseTriggers(text, triggerContext);
             const parts = [];
             for (const item of parsed.characters) {
                 if (item.isPersona) {
@@ -2699,45 +2701,38 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             console.warn('[IF Image] Presets load error:', e);
         }
     }
-    const initialPresetLoad = loadPresets();
-    if (initialPersonaSync && typeof initialPersonaSync.then === 'function') {
-        void initialPersonaSync.then(async created => {
-            await initialPresetLoad;
-            if (created) await loadPresets();
-        }).catch(() => { /* startup sync is intentionally silent */ });
-    }
+    loadPresets();
 
-    // Explicit sync is forced: the click is the user's instruction to replace
-    // stale generated fields even when the record was manually edited.
+    // Import only the host persona display name.
     if (perSyncBtn) perSyncBtn.addEventListener('click', async () => {
-        if (typeof syncPersonaFromSt !== 'function') {
-            showResult(presetsStatus, 'Persona sync is not available.', true);
+        if (typeof importPersonaNameFromSt !== 'function') {
+            showResult(presetsStatus, 'Persona name import is not available.', true);
             return;
         }
         const originalText = perSyncBtn.textContent;
         perSyncBtn.disabled = true;
-        perSyncBtn.textContent = 'Syncing...';
+        perSyncBtn.textContent = 'Importing...';
         const controller = new AbortController();
         try {
-            const result = await syncPersonaFromSt({ signal: controller.signal });
-            if (!result?.persona || typeof result.persona !== 'object') {
-                throw new Error('SillyTavern persona sync returned no persona data.');
+            const result = await importPersonaNameFromSt();
+            if (typeof result?.name !== 'string' || !result.name.trim()) {
+                throw new Error('SillyTavern returned no persona name.');
             }
             const target = currentPersonas.find(persona => persona.id === activePersonaId)
                 ?? currentPersonas.find(persona => persona.isDefault)
                 ?? currentPersonas[0]
-                ?? createDefaultPersona(result.persona.name || 'Default User');
-            applyPersonaSync(target, result.persona, true);
+                ?? createDefaultPersona(result.name);
+            applyPersonaNameImport(target, result);
             await savePersona(target);
             activePersonaId = target.id;
             await loadPresets();
             await refreshRoster?.();
             perSelect.value = target.id;
-            const message = `Synced persona: ${target.name}`;
+            const message = `Imported persona name: ${target.name}`;
             showResult(presetsStatus, message, false);
             if (typeof toastr !== 'undefined') toastr.success(message, 'IF Image');
         } catch (err) {
-            const message = formatLlmError(err, 'Persona sync');
+            const message = formatLlmError(err, 'Persona name import');
             showResult(presetsStatus, message, true);
             if (typeof toastr !== 'undefined') toastr.error(message, 'IF Image');
         } finally {
@@ -2947,6 +2942,7 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             // Same prompt style the Test Generate section would use.
             const profileKey = effectiveTestSetup().profileKey;
             const profile = PROFILES[profileKey] ?? PROFILES.anima;
+            // Parameter-only parsing: no entity roster is intentionally needed here.
             const parsed = parseTriggers(text, {});
             const assembled = assemblePrompt(parsed, profile.dialect, profile);
             const ctx = { dialect: profile.dialect, nsfw: false, back: false, full: false };
@@ -3328,15 +3324,16 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
         const text = renderInput.value.trim();
         if (!text) return;
         try {
-            const roster = await getAllCharacters();
-            const styles = await getAllStyles();
-            const personas = await getAllPersonas();
-            const parsed = parseTriggers(text, {
-                roster,
-                styles,
-                defaultPersona: personas.find(p => p.isDefault) || personas[0] || createDefaultPersona(),
-                personas,
+            const [characters, styles, personas, outfits] = await Promise.all([
+                getAllCharacters(), getAllStyles(), getAllPersonas(), getAllOutfits(),
+            ]);
+            const ctx = freshChatCtx();
+            const triggerContext = buildTriggerContext({
+                characters, personas, styles, outfits,
+                cardId: ctx?.characters?.[ctx?.characterId]?.avatar ?? null,
+                chatId: ctx?.getCurrentChatId?.() ?? getCurrentChatId?.() ?? null,
             });
+            const parsed = parseTriggers(text, triggerContext);
 
             const dialects = [
                 { key: 'krea', profileKey: 'krea2' },
@@ -3499,11 +3496,10 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             const ctx = freshChatCtx();
             const cardId = ctx?.characters?.[ctx?.characterId]?.avatar ?? null;
             const chatId = ctx?.getCurrentChatId?.() ?? getCurrentChatId?.() ?? null;
-            const activeChars = resolveActiveCharacters(characters, cardId, chatId);
-            const bound = characters.length - activeChars.length;
-            lines.push(`Characters available here: ${activeChars.length}${bound > 0 ? ` (${bound} bound elsewhere)` : ''}`);
-            const persona = personas.find(p => p.isDefault) ?? personas[0] ?? null;
-            if (persona) lines.push(`Persona: ${persona.name}`);
+            const active = buildTriggerContext({ characters, personas, outfits, cardId, chatId });
+            const bound = characters.length - active.roster.length;
+            lines.push(`Characters available here: ${active.roster.length}${bound > 0 ? ` (${bound} bound elsewhere)` : ''}`);
+            if (active.defaultPersona) lines.push(`Persona: ${active.defaultPersona.name}`);
             if (outfits.length) lines.push(`Outfits: ${outfits.length}`);
         } catch (err) {
             lines.push('Roster unavailable — open the Characters tab to reload it.');

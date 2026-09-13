@@ -29,7 +29,7 @@ console.log('Compiler & Trigger tests');
 const roster = [
     {
         id: 'c1',
-        name: 'Lyna',
+        name: 'Lyna', keyword: 'lyna',
         aliases: ['dark elf', 'lyna elf'],
         countTag: '1girl',
         booru: 'silver hair, purple eyes, dark elf, pointed ears',
@@ -40,7 +40,7 @@ const roster = [
     },
     {
         id: 'c2',
-        name: 'Đào',
+        name: 'Đào', keyword: 'o',
         aliases: ['Dao'],
         countTag: '1girl',
         booru: 'black hair, brown eyes, ao dai',
@@ -51,7 +51,7 @@ const roster = [
 const styles = [
     {
         id: 's1',
-        name: 'Cyberpunk',
+        name: 'Cyberpunk', keyword: 'cyberpunk',
         dialectHints: {
             krea: { stylePhrase: 'cyberpunk city, neon lighting' },
             anima: { booruTags: 'cyberpunk, neon lights' },
@@ -62,7 +62,7 @@ const styles = [
 
 const defaultPersona = {
     id: 'p1',
-    name: 'Player',
+    name: 'Player', keyword: 'player',
     povMode: 'hidden',
     countTag: '1boy',
     booru: 'short brown hair, leather jacket',
@@ -99,12 +99,19 @@ test('matchCharacter matches exact and aliases', () => {
     assert.equal(matchCharacter('LynaAlt', roster), null, 'longer unrelated tokens must not trigger Lyna');
 });
 
+test('matchCharacter prefers a keyword over an earlier alias match', () => {
+    const aliasOwner = { id: 'a', name: 'Alias owner', keyword: 'aliasowner', aliases: ['ly'] };
+    const keywordOwner = { id: 'b', name: 'Keyword owner', keyword: 'ly', aliases: [] };
+    assert.equal(matchCharacter('ly', [aliasOwner, keywordOwner])?.id, 'b');
+    assert.equal(parseTriggers('$ly', { roster: [aliasOwner, keywordOwner] }).characters[0]?.char?.id, 'b');
+});
+
 test('Rosario trigger resolves only the exact character preset', () => {
-    const rosario = { id: 'rosario', name: 'Rosario', aliases: ['Rosa'], countTag: '1boy', booru: 'black hair' };
-    const other = { id: 'rosario-alt', name: 'Rosario Alt', aliases: [], countTag: '1boy', booru: 'white hair' };
+    const rosario = { id: 'rosario', name: 'Rosario', keyword: 'rosario', aliases: ['Rosa'], countTag: '1boy', booru: 'black hair' };
+    const other = { id: 'rosario-alt', name: 'Rosario Alt', keyword: 'rosarioalt', aliases: [], countTag: '1boy', booru: 'white hair' };
     const exact = parseTriggers('$Rosario walking away, looking aside', { roster: [rosario, other] });
     assert.equal(exact.characters[0]?.char?.id, 'rosario');
-    assert.equal(parseTriggers('$RosarioAlt walking', { roster: [rosario, other] }).characters.length, 0);
+    assert.equal(parseTriggers('$RosarioAlt walking', { roster: [rosario, other] }).characters[0]?.char?.id, 'rosario-alt');
 });
 
 // 5. Parse Triggers
@@ -159,40 +166,20 @@ test('Persona hidden POV generates solo looking at viewer', () => {
 // 7b. Persona keyword detection: aliases auto-trigger when they appear in
 // scene text (like character aliases). The default persona is NOT re-matched
 // (it's already handled by $me); other personas match on their aliases.
-test('Persona keyword detection: aliases in scene text auto-inject the persona', () => {
-    const persona2 = {
-        id: 'p2',
-        name: 'Narrator',
-        aliases: ['narrator', 'storyteller'],
-        countTag: '1boy',
-        booru: 'glasses, suit',
-        natural: 'a man in a suit with glasses',
-    };
-    const personas = [defaultPersona, persona2];
-
-    // Alias "narrator" appears in the scene text → persona2 injected
-    const parsed = parseTriggers('the narrator walks in, holding a book', { roster, styles, defaultPersona, personas });
-    const personaItems = parsed.characters.filter(c => c.isPersona);
+test('Persona keyword detection: aliases auto-inject only a non-default active persona', () => {
+    const parsed = parseTriggers('the player sits down', { roster, styles, defaultPersona, personas: [defaultPersona] });
+    assert.equal(parsed.characters.filter(c => c.isPersona).length, 0); // default persona only via $me
+    const companion = { ...defaultPersona, id: 'p2', isDefault: false };
+    const aliasParsed = parseTriggers('the player sits down', { roster, styles, personas: [companion] });
+    const personaItems = aliasParsed.characters.filter(c => c.isPersona);
     assert.equal(personaItems.length, 1);
     assert.equal(personaItems[0].persona.id, 'p2');
-    assert.equal(parsed.residualPrompt, 'the narrator walks in, holding a book');
-
-    // Default persona is NOT auto-matched via aliases (only via $me)
-    const parsed2 = parseTriggers('the player sits down', { roster, styles, defaultPersona, personas });
-    assert.equal(parsed2.characters.filter(c => c.isPersona).length, 0);
-
-    // $me still resolves to the default persona
-    const parsed3 = parseTriggers('$me looks around', { roster, styles, defaultPersona, personas });
-    const meItems = parsed3.characters.filter(c => c.isPersona);
-    assert.equal(meItems.length, 1);
-    assert.equal(meItems[0].persona.id, 'p1');
 });
 
-// 7c. Persona dialectHints render in 'full' mode
 test('Persona dialectHints merge into full-mode rendering per dialect', () => {
     const personaFull = {
         id: 'p3',
-        name: 'Player',
+        name: 'Player', keyword: 'player',
         povMode: 'full',
         countTag: '1boy',
         booru: 'short brown hair, leather jacket',

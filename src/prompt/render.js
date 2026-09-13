@@ -317,7 +317,7 @@ export function renderPersonaForDialect(persona, dialect, modifiers = [], item =
     // only one where clothing is meaningful. hidden/hands returned above.
     const outfitText = resolveOutfitText(item, dialect);
     if (dialect === 'krea') {
-        // Krea: natural description + persona's own krea style hints
+        // Krea: natural prose + persona's own krea style hints
         let text = persona.natural || persona.facts || 'a companion';
         if (outfitText) text += `, ${outfitText}`;
         const h = persona.dialectHints?.krea;

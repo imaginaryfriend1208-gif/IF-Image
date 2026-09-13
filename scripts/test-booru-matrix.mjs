@@ -106,9 +106,11 @@ test('applyCharMigrations fills an empty matrix on an absent-field record', () =
     const char = { id: 'x', name: 'X' };
     applyCharMigrations(char);
     assert.equal(char.presetVersion, CHAR_CURRENT_VERSION);
+    assert.ok(char.keyword);
+    assert.deepEqual(char.binding, { cardIds: [], chatIds: [], global: false });
     assert.deepEqual(char.booruDetail, emptyBooruDetail());
     assert.deepEqual(char.outfits, []);
-    assert.deepEqual(char.binding, { cardId: null, chatIds: [] });
+    assert.deepEqual(char.binding, { cardIds: [], chatIds: [], global: false });
 });
 
 test('applyCharMigrations preserves existing matrix cell values', () => {
@@ -128,6 +130,27 @@ test('applyCharMigrations is idempotent', () => {
 test('createDefaultCharacter stamps the current presetVersion', () => {
     const char = createDefaultCharacter();
     assert.equal(char.presetVersion, CHAR_CURRENT_VERSION);
+    assert.ok(char.keyword);
+    assert.deepEqual(char.binding, { cardIds: [], chatIds: [], global: false });
+});
+
+test('character migrator derives unique keywords deterministically', () => {
+    const used = new Set();
+    const first = { id: 'a', name: 'Lyna Rose' };
+    const second = { id: 'b', name: 'Lyna Rose' };
+    applyCharMigrations(first, used);
+    applyCharMigrations(first, used);
+    applyCharMigrations(second, used);
+    assert.equal(first.keyword, 'lynarose', 'same record remains stable with the same used set');
+    assert.equal(second.keyword, 'lynarose2');
+});
+
+test('character migrator preserves an existing normalized keyword', () => {
+    const used = new Set();
+    const character = { id: 'a', name: 'Display Name', keyword: 'lyna' };
+    applyCharMigrations(character, used);
+    assert.equal(character.keyword, 'lyna');
+    assert.equal(used.has('lyna'), true);
 });
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`);

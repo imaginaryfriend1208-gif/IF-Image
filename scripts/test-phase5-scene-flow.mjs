@@ -25,15 +25,16 @@ async function waitFor(predicate, timeoutMs = 1000) {
 }
 
 const rosario = {
-    id: 'c1', name: 'Rosario', aliases: [], countTag: '1boy',
-    booru: 'black hair, blue eyes', binding: { cardId: 'rosario.png', chatIds: ['chat-a'] },
+    id: 'c1', name: 'Rosario', keyword: 'rosario', aliases: [], countTag: '1boy',
+    booru: 'black hair, blue eyes', binding: { cardIds: ['rosario.png'], chatIds: ['chat-a'], global: true },
 };
 const yenka = {
-    id: 'p1', name: 'Yenka', aliases: [], isDefault: true, povMode: 'full',
+    id: 'p1', name: 'Yenka', keyword: 'yenka', aliases: [], isDefault: true, povMode: 'full',
     countTag: '1girl', booru: 'brown hair, green eyes', dialectHints: {},
+    binding: { cardIds: [], chatIds: ['chat-a'], global: true },
 };
 const style = {
-    id: 's1', name: 'Ink Wash', lora: '',
+    id: 's1', name: 'Ink Wash', keyword: 'inkwash', lora: '',
     dialectHints: { anima: { booruTags: 'deterministic ink wash', artists: '' } },
 };
 
@@ -50,13 +51,13 @@ function compileScene(content) {
 test('Phase 5 offline flow preserves context tokens through marker pickup and queue execution', async () => {
     const chat = [
         { role: 'user', is_user: true, mes: 'Stay with me.' },
-        { role: 'char', name: 'Rosario', mes: 'Rosario lies down while Yenka, wearing a silk nightgown, curls against his side.' },
+        { role: 'char', name: 'Rosario', keyword: 'rosario', mes: 'Rosario lies down while Yenka, wearing a silk nightgown, curls against his side.' },
     ];
     const llmCalls = [];
     const reply = JSON.stringify({ images: [{
         anchor: 'curls against his side',
-        subjects: ['$Rosario', '$me'],
-        prompt: '$Rosario lies down while $me, wearing a silk nightgown, curls against his side, dim window light',
+        subjects: ['$rosario', '$me'],
+        prompt: '$rosario lies down while $me, wearing a silk nightgown, curls against his side, dim window light',
         negative: 'must be ignored', size: '1216x832',
     }] });
     const engine = createEngine({
@@ -70,11 +71,11 @@ test('Phase 5 offline flow preserves context tokens through marker pickup and qu
     });
     const plan = await engine.planChatImages(1);
     assert.equal(plan.placements.length, 1);
-    assert.deepEqual(plan.placements[0].subjects, ['$Rosario', '$me']);
+    assert.deepEqual(plan.placements[0].subjects, ['$rosario', '$me']);
     assert.equal(plan.placements[0].negative, '');
-    assert.match(llmCalls[0].systemPrompt, /Exact token: \$Rosario/);
+    assert.match(llmCalls[0].systemPrompt, /Exact token: \$rosario/);
     assert.match(llmCalls[0].systemPrompt, /Exact token: \$me/);
-    assert.match(llmCalls[0].userPrompt, /\[\$Rosario .*character\]/);
+    assert.match(llmCalls[0].userPrompt, /\[\$rosario .*character\]/);
     assert.match(llmCalls[0].userPrompt, /\[\$me .*user persona\]/);
 
     const listeners = new Map();
@@ -110,7 +111,7 @@ test('Phase 5 offline flow preserves context tokens through marker pickup and qu
     });
     assert.deepEqual(injection.touched, [1]);
     assert.equal(finalMetadata.length, 1);
-    assert.match(finalMetadata[0].content, /\$Rosario/);
+    assert.match(finalMetadata[0].content, /\$rosario/);
     assert.match(finalMetadata[0].content, /\$me/);
     await waitFor(() => queue.listTasks().some(task => task.status === 'succeeded'));
     assert.equal(executed.length, 1);
@@ -119,7 +120,7 @@ test('Phase 5 offline flow preserves context tokens through marker pickup and qu
     assert.match(finalPrompt, /brown hair/);
     assert.match(finalPrompt, /silk nightgown/);
     assert.equal((finalPrompt.match(/deterministic ink wash/g) ?? []).length, 1);
-    assert.ok(!finalPrompt.includes('$Rosario'));
+    assert.ok(!finalPrompt.includes('$rosario'));
     assert.ok(!finalPrompt.includes('$me'));
     runtime.unregister();
     queue.dispose();

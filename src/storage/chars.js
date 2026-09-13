@@ -1,27 +1,16 @@
-// IF Image - Character store management.
-// Schema conforms to PROMPT-SPEC §4:
-// - facts: dialect-free text
-// - booru: tag string / booruDetail: matrix { face, hair, body, outfit, ... }
-// - natural: prose description for Krea
-// - id: stable UUID, name, aliases: string[]
-// - bindings: { cards: string[], chats: string[] }
-//
-// Record migration (Phase C): records carry their own `presetVersion`,
-// independent of extension_settings.settingsVersion. Migrators run
-// sequentially on read via applyCharMigrations(); nothing is persisted until
-// the caller explicitly saveCharacter()s again.
+// IF Image - Character records stored in extension settings.
 
 import { STORES } from './idb.js';
+import { claimUniqueKeyword, normalizeAliases, normalizeBinding, normalizeKeyword } from './entity-shape.js';
 
-// Loaded only when persistence is used, keeping the pure schema/normalization
-// helpers usable in non-SillyTavern tooling and tests.
 const configStore = () => import('./config-store.js');
 const getAllItems = async store => (await configStore()).getAllConfigItems(store);
 const getItem = async (store, id) => (await configStore()).getConfigItem(store, id);
 const putItem = async (store, item) => (await configStore()).putConfigItem(store, item);
 const deleteItem = async (store, id) => (await configStore()).deleteConfigItem(store, id);
 
-/** Regions x ratings x views matrix cell keys, all starting empty. */
+export { normalizeAliases, normalizeKeyword };
+
 export function emptyBooruDetail() {
     return {
         face: { sfw: { front: '', back: '' }, nsfw: { front: '', back: '' } },
@@ -32,169 +21,106 @@ export function emptyBooruDetail() {
 
 export function createDefaultCharacter(name = 'New Character') {
     return {
-        id: crypto.randomUUID ? crypto.randomUUID() : 'char_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
+        id: globalThis.crypto?.randomUUID?.() ?? `char_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
         name,
+        keyword: normalizeKeyword('', name, 'character'),
         aliases: [],
-        countTag: '1girl',
-        facts: '',
-        booru: '',
-        natural: '',
-        views: {
-            front: '',
-            back: '',
-            side: '',
-        },
-        booruDetail: emptyBooruDetail(),
-        nsfwExtra: '',
-        negative: '',
-        // A1111 LoRA token, e.g. "<lora:WinxclubKrea2pack:1>". Hoisted to the
-        // front of the final prompt by src/prompt/ordering.js.
-        lora: '',
-        outfits: [], // outfit record ids (src/storage/outfits.js)
-        binding: {
-            cardId: null,
-            chatIds: [],
-        },
-        // Legacy field kept for backward compatibility with pre-C4 records;
-        // binding (singular) above is the C4 shape actually read/written.
-        bindings: {
-            cards: [], // avatar filenames
-            chats: [],
-        },
-        lock: {
-            seed: -1,
-            params: null,
-        },
-        meta: {
-            version: 1,
-            createdAt: Date.now(),
-            updatedAt: Date.now(),
-            createdBy: 'user',
-        },
+        countTag: '1girl', facts: '', booru: '', natural: '',
+        views: { front: '', back: '', side: '' },
+        booruDetail: emptyBooruDetail(), nsfwExtra: '', negative: '', lora: '', outfits: [],
+        binding: { cardIds: [], chatIds: [], global: false },
+        lock: { seed: -1, params: null },
+        meta: { version: 1, createdAt: Date.now(), updatedAt: Date.now(), createdBy: 'user' },
         presetVersion: CHAR_CURRENT_VERSION,
     };
 }
 
-/**
- * Convert one SillyTavern character-card entry into a complete IF-Image
- * character record. Unknown optional card fields are ignored and every
- * non-card field comes from createDefaultCharacter().
- * @param {object} stChar
- * @returns {object}
- */
+/** Import only the host display name and stable avatar filename. */
 export function createCharacterFromStCard(stChar) {
-    if (!stChar || typeof stChar !== 'object') {
-        throw new TypeError('A SillyTavern character card is required.');
-    }
-    const cardName = typeof stChar.name === 'string' && stChar.name.trim()
-        ? stChar.name.trim()
-        : 'New Character';
-    const character = createDefaultCharacter(cardName);
-    const nickname = typeof stChar.nickname === 'string' ? stChar.nickname.trim() : '';
-    character.aliases = nickname ? [nickname] : [];
-    character.countTag = '1girl';
-    character.booru = Array.isArray(stChar.tags)
-        ? stChar.tags.filter(tag => typeof tag === 'string').map(tag => tag.trim()).filter(Boolean).join(', ')
-        : '';
-    character.natural = '';
-    character.facts = typeof stChar.description === 'string' ? stChar.description : '';
-    character.binding = {
-        cardId: typeof stChar.avatar === 'string' && stChar.avatar ? stChar.avatar : null,
-        chatIds: [],
-    };
+    if (!stChar || typeof stChar !== 'object') throw new TypeError('A SillyTavern character card is required.');
+    const name = typeof stChar.name === 'string' && stChar.name.trim() ? stChar.name.trim() : 'New Character';
+    const character = createDefaultCharacter(name);
+    const avatar = typeof stChar.avatar === 'string' && stChar.avatar ? stChar.avatar : '';
+    character.binding = { cardIds: avatar ? [avatar] : [], chatIds: [], global: false };
     return character;
 }
 
-/** Find an imported record by a stable, non-empty ST avatar/card id. */
 export function findCharacterByCardId(characters, cardId) {
-    if (!Array.isArray(characters) || cardId === null || cardId === undefined || cardId === '') return null;
-    return characters.find(character => character?.binding?.cardId === cardId) ?? null;
+    if (!Array.isArray(characters) || typeof cardId !== 'string' || !cardId) return null;
+    return characters.find(character => Array.isArray(character?.binding?.cardIds)
+        && character.binding.cardIds.includes(cardId)) ?? null;
 }
 
-/** Return valid character objects from either ST's array or object-shaped roster. */
 export function getStCharacters(ctx) {
     const characters = ctx?.characters;
-    if (Array.isArray(characters)) return characters.filter(character => character && typeof character === 'object');
-    if (characters && typeof characters === 'object') {
-        return Object.values(characters).filter(character => character && typeof character === 'object');
-    }
+    if (Array.isArray(characters)) return characters.filter(value => value && typeof value === 'object');
+    if (characters && typeof characters === 'object') return Object.values(characters).filter(value => value && typeof value === 'object');
     return [];
 }
 
-/**
- * Sequential in-place record migrators, index 0 = version 0 -> 1, etc.
- * Absent/undefined presetVersion is treated as 0. Non-destructive: existing
- * values are never overwritten, only missing fields are filled.
- * @type {Array<(char: object) => void>}
- */
-const CHAR_MIGRATORS = [
-    // 0 -> 1: add the booruDetail region x rating x view matrix. Cells stay
-    // empty rather than being guessed from `booru`/`nsfwExtra` — render.js
-    // falls back to the flat strings when a cell is empty, so existing
-    // characters render byte-identical prompts until the user fills cells.
-    (c) => {
-        if (!c.booruDetail || typeof c.booruDetail !== 'object') {
-            c.booruDetail = emptyBooruDetail();
-        } else {
-            const empty = emptyBooruDetail();
-            for (const region of Object.keys(empty)) {
-                if (!c.booruDetail[region]) c.booruDetail[region] = empty[region];
-                for (const rating of Object.keys(empty[region])) {
-                    if (!c.booruDetail[region][rating]) c.booruDetail[region][rating] = empty[region][rating];
-                    for (const view of Object.keys(empty[region][rating])) {
-                        if (typeof c.booruDetail[region][rating][view] !== 'string') {
-                            c.booruDetail[region][rating][view] = '';
-                        }
-                    }
+export const CHAR_MIGRATORS = [
+    (record) => {
+        if (!record.booruDetail || typeof record.booruDetail !== 'object') record.booruDetail = emptyBooruDetail();
+        const empty = emptyBooruDetail();
+        for (const region of Object.keys(empty)) {
+            if (!record.booruDetail[region] || typeof record.booruDetail[region] !== 'object') record.booruDetail[region] = {};
+            for (const rating of Object.keys(empty[region])) {
+                if (!record.booruDetail[region][rating] || typeof record.booruDetail[region][rating] !== 'object') record.booruDetail[region][rating] = {};
+                for (const view of Object.keys(empty[region][rating])) {
+                    if (typeof record.booruDetail[region][rating][view] !== 'string') record.booruDetail[region][rating][view] = '';
                 }
             }
         }
-        if (!Array.isArray(c.outfits)) c.outfits = [];
-        if (!c.binding || typeof c.binding !== 'object') {
-            c.binding = { cardId: null, chatIds: [] };
-        } else {
-            if (c.binding.cardId === undefined) c.binding.cardId = null;
-            if (!Array.isArray(c.binding.chatIds)) c.binding.chatIds = [];
-        }
-        if (!c.lock || typeof c.lock !== 'object') c.lock = { seed: -1, params: null };
-        if (typeof c.negative !== 'string') c.negative = '';
+        if (!Array.isArray(record.outfits)) record.outfits = [];
+        if (!record.lock || typeof record.lock !== 'object') record.lock = { seed: -1, params: null };
+        if (typeof record.negative !== 'string') record.negative = '';
+    },
+    (record, usedKeywords) => {
+        record.aliases = normalizeAliases(record.aliases);
+        record.binding = normalizeBinding(record.binding);
+        delete record.binding.cardId;
+        delete record.bindings;
+        claimUniqueKeyword(record, usedKeywords, 'character');
     },
 ];
 
 export const CHAR_CURRENT_VERSION = CHAR_MIGRATORS.length;
 
-/**
- * Apply pending record migrations to a character in place.
- * @param {object} char
- * @returns {object} the same object, mutated
- */
-export function applyCharMigrations(char) {
-    if (!char || typeof char !== 'object') return char;
-    const from = Number.isInteger(char.presetVersion) ? char.presetVersion : 0;
-    for (let v = from; v < CHAR_CURRENT_VERSION; v++) {
-        CHAR_MIGRATORS[v](char);
-    }
-    char.presetVersion = CHAR_CURRENT_VERSION;
-    return char;
+export function applyCharMigrations(record, usedKeywords) {
+    if (!record || typeof record !== 'object') return record;
+    const from = Number.isInteger(record.presetVersion) && record.presetVersion >= 0 ? record.presetVersion : 0;
+    for (let version = from; version < CHAR_CURRENT_VERSION; version++) CHAR_MIGRATORS[version](record, usedKeywords);
+    // Normalize current-version records too; malformed imported data must not bypass invariants.
+    record.aliases = normalizeAliases(record.aliases);
+    record.binding = normalizeBinding(record.binding);
+    delete record.bindings;
+    record.presetVersion = CHAR_CURRENT_VERSION;
+    return record;
 }
 
 export async function getAllCharacters() {
-    const all = await getAllItems(STORES.CHARS);
-    return all.map(applyCharMigrations);
+    const used = new Set();
+    return (await getAllItems(STORES.CHARS)).map(record => applyCharMigrations(record, used));
 }
 
 export async function getCharacter(id) {
-    const char = await getItem(STORES.CHARS, id);
-    return char ? applyCharMigrations(char) : char;
+    const record = await getItem(STORES.CHARS, id);
+    if (!record) return record;
+    const raw = await getAllItems(STORES.CHARS);
+    const used = new Set(raw
+        .filter(item => item?.id !== id)
+        .map(item => normalizeKeyword(item?.keyword, item?.name, 'character')));
+    return applyCharMigrations(record, used);
 }
 
-export async function saveCharacter(char) {
-    char.meta = char.meta || {};
-    char.meta.updatedAt = Date.now();
-    applyCharMigrations(char);
-    return putItem(STORES.CHARS, char);
+export async function saveCharacter(record) {
+    if (!record || typeof record !== 'object') throw new TypeError('Character record is required.');
+    const all = await getAllItems(STORES.CHARS);
+    const used = new Set(all.filter(item => item?.id !== record.id).map(item => normalizeKeyword(item?.keyword, item?.name, 'character')));
+    applyCharMigrations(record, used);
+    record.meta = record.meta || {};
+    record.meta.updatedAt = Date.now();
+    return putItem(STORES.CHARS, record);
 }
 
-export async function removeCharacter(id) {
-    return deleteItem(STORES.CHARS, id);
-}
+export async function removeCharacter(id) { return deleteItem(STORES.CHARS, id); }

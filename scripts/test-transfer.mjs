@@ -3,7 +3,10 @@
 // Run: node scripts/test-transfer.mjs
 
 import assert from 'node:assert/strict';
-import { buildExport, validateImport, planMerge, PRESET_FORMAT, PRESET_VERSION } from '../src/storage/transfer.js';
+import {
+    buildExport, validateImport, planMerge, PRESET_FORMAT, PRESET_VERSION,
+    buildEntityExport, validateEntityImport, prepareEntityImport, ENTITY_FORMAT,
+} from '../src/storage/transfer.js';
 
 let passed = 0;
 let failed = 0;
@@ -128,6 +131,39 @@ test('planMerge handles empty/absent collections on both sides', () => {
     for (const name of ['characters', 'outfits', 'styles', 'personas', 'replaceRules', 'checkpointProfiles']) {
         assert.deepEqual(plan[name], { add: [], overwrite: [], skip: [] }, name);
     }
+});
+
+test('single-entity export is portable and strips credentials recursively', () => {
+    const doc = buildEntityExport('character', {
+        id: 'c1', name: 'Lyna', keyword: 'lyna', apiKey: 'configured-credential',
+        binding: { cardIds: ['lyna.png'], chatIds: ['chat-old'], global: true },
+        nested: { authorization: 'configured-credential', safe: 'kept' },
+    });
+    assert.equal(doc.format, ENTITY_FORMAT);
+    assert.equal(doc.entity.apiKey, undefined);
+    assert.equal(doc.entity.nested.authorization, undefined);
+    assert.equal(doc.entity.nested.safe, 'kept');
+});
+
+test('single-entity import validates shape, changes colliding id, and resets non-portable binding', () => {
+    const doc = buildEntityExport('persona', {
+        id: 'p1', name: 'Hero', keyword: 'hero', aliases: [' Hero '],
+        binding: { cardIds: ['hero.png'], chatIds: ['chat-old'], global: true },
+    });
+    assert.equal(validateEntityImport(doc).ok, true);
+    const imported = prepareEntityImport(doc, {
+        existing: [{ id: 'p1', keyword: 'hero' }],
+        idFactory: () => 'p2',
+    });
+    assert.equal(imported.id, 'p2');
+    assert.equal(imported.keyword, 'hero2');
+    assert.deepEqual(imported.aliases, ['hero']);
+    assert.deepEqual(imported.binding, { cardIds: ['hero.png'], chatIds: [], global: false });
+});
+
+test('single-entity import rejects malformed documents', () => {
+    assert.equal(validateEntityImport({}).ok, false);
+    assert.throws(() => prepareEntityImport({ format: ENTITY_FORMAT, version: 1, kind: 'character', entity: {} }), /entity\.name/i);
 });
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`);

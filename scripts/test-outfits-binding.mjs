@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { parseTriggers, matchOutfit, charSlotToken } from '../src/prompt/triggers.js';
 import { renderCharacterForDialect, assemblePrompt } from '../src/prompt/render.js';
 import { PROFILES } from '../src/profiles.js';
-import { resolveActiveCharacters } from '../src/prompt/binding.js';
+import { buildTriggerContext, resolveActiveEntities as resolveActiveCharacters } from '../src/prompt/binding.js';
 
 let passed = 0;
 let failed = 0;
@@ -23,15 +23,15 @@ function test(name, fn) {
 
 console.log('Outfits & binding tests');
 
-const lyna = { id: 'c1', name: 'Lyna', aliases: [], countTag: '1girl', booru: 'silver hair' };
-const mira = { id: 'c2', name: 'Mira', aliases: [], countTag: '1girl', booru: 'red hair' };
+const lyna = { id: 'c1', name: 'Lyna', keyword: 'lyna', aliases: [], countTag: '1girl', booru: 'silver hair' };
+const mira = { id: 'c2', name: 'Mira', keyword: 'mira', aliases: [], countTag: '1girl', booru: 'red hair' };
 const roster = [lyna, mira];
 
 const outfits = [
-    { id: 'o1', name: 'Casual', charId: 'c1', tags: 't-shirt, jeans' },
-    { id: 'o2', name: 'Armor', charId: 'c1', tags: 'plate armor, sword' },
-    { id: 'o3', name: 'Swimsuit', charId: null, tags: 'bikini' }, // common
-    { id: 'o4', name: 'Uniform', charId: 'c2', tags: 'school uniform' },
+    { id: 'o1', name: 'Casual', keyword: 'casual', charId: 'c1', tags: 't-shirt, jeans' },
+    { id: 'o2', name: 'Armor', keyword: 'armor', charId: 'c1', tags: 'plate armor, sword' },
+    { id: 'o3', name: 'Swimsuit', keyword: 'swimsuit', charId: null, tags: 'bikini' }, // common
+    { id: 'o4', name: 'Uniform', keyword: 'uniform', charId: 'c2', tags: 'school uniform' },
 ];
 
 test('matchOutfit fuzzy-matches by name', () => {
@@ -76,14 +76,14 @@ test('JSON trigger outfit field still resolves tags when outfits are supplied', 
 });
 
 test('outfit token with Vietnamese diacritics matches ($Lyna:đồngủ)', () => {
-    const vnOutfits = [...outfits, { id: 'o5', name: 'đồngủ', charId: 'c1', tags: 'pajamas' }];
+    const vnOutfits = [...outfits, { id: 'o5', name: 'đồngủ', keyword: 'ng', charId: 'c1', tags: 'pajamas' }];
     const parsed = parseTriggers('$Lyna:đồngủ sleeping', { roster, outfits: vnOutfits });
     assert.equal(parsed.characters[0].outfitTags, 'pajamas');
     assert.equal(parsed.residualPrompt, `${charSlotToken(0)} sleeping`);
 });
 
 test('common outfit with charId undefined (legacy record) still resolves via store filter parity', () => {
-    const legacyOutfits = [{ id: 'o9', name: 'Cloak', tags: 'hooded cloak' }]; // no charId field at all
+    const legacyOutfits = [{ id: 'o9', name: 'Cloak', keyword: 'cloak', tags: 'hooded cloak' }]; // no charId field at all
     const parsed = parseTriggers('$Mira:cloak in the rain', { roster, outfits: legacyOutfits });
     assert.equal(parsed.characters[0].outfitTags, 'hooded cloak');
 });
@@ -95,21 +95,21 @@ test('JSON trigger outfit field stays a raw string when no outfits are supplied 
 });
 
 // --- binding resolution (C4) ---
-const bound = { ...lyna, binding: { cardId: 'card-a', chatIds: [] } };
-const boundChat = { ...mira, binding: { cardId: null, chatIds: ['chat-1'] } };
-const unbound = { id: 'c3', name: 'Free', binding: { cardId: null, chatIds: [] } };
+const bound = { ...lyna, binding: { cardIds: ['card-a'], chatIds: [], global: false } };
+const boundChat = { ...mira, binding: { cardIds: [], chatIds: ['chat-1'], global: false } };
+const unbound = { id: 'c3', name: 'Free', keyword: 'free', binding: { cardIds: [], chatIds: [], global: true } };
 
-test('resolveActiveCharacters: active = card-bound + chat-bound + unbound union', () => {
+test('resolveActiveEntities: active = card-bound + chat-bound + global union', () => {
     const active = resolveActiveCharacters([bound, boundChat, unbound], 'card-a', 'chat-1');
     assert.deepEqual(active.map(c => c.id).sort(), ['c1', 'c2', 'c3']);
 });
 
-test('resolveActiveCharacters: unbound characters stay active even when others are bound here', () => {
+test('resolveActiveEntities: global entities stay active when others are bound here', () => {
     const active = resolveActiveCharacters([bound, unbound], 'card-a', 'chat-x');
     assert.deepEqual(active.map(c => c.id).sort(), ['c1', 'c3']);
 });
 
-test('resolveActiveCharacters: a character bound to a DIFFERENT card/chat is excluded', () => {
+test('resolveActiveEntities: an entity bound to a DIFFERENT card/chat is excluded', () => {
     const active = resolveActiveCharacters([bound, boundChat, unbound], 'card-x', 'chat-x');
     assert.deepEqual(active.map(c => c.id), ['c3']);
 });
@@ -122,6 +122,33 @@ test('resolveActiveCharacters: deterministic given identical inputs', () => {
     const a = resolveActiveCharacters([bound, boundChat, unbound], 'card-a', 'chat-1');
     const b = resolveActiveCharacters([bound, boundChat, unbound], 'card-a', 'chat-1');
     assert.deepEqual(a.map(c => c.id), b.map(c => c.id));
+});
+
+test('buildTriggerContext excludes unbound keyword and alias triggers', () => {
+    const character = { ...lyna, aliases: ['silver'], binding: { cardIds: [], chatIds: [], global: false } };
+    const context = buildTriggerContext({ characters: [character], cardId: 'card-a', chatId: 'chat-1' });
+    assert.deepEqual(context.roster, []);
+    assert.equal(parseTriggers('$lyna $silver', context).characters.length, 0);
+});
+
+test('buildTriggerContext includes a global entity', () => {
+    const character = { ...lyna, binding: { cardIds: [], chatIds: [], global: true } };
+    const context = buildTriggerContext({ characters: [character], cardId: 'card-x', chatId: 'chat-x' });
+    assert.equal(parseTriggers('$lyna', context).characters[0].char.id, 'c1');
+});
+
+test('buildTriggerContext includes an entity bound to the current chat', () => {
+    const character = { ...mira, binding: { cardIds: [], chatIds: ['chat-1'], global: false } };
+    const context = buildTriggerContext({ characters: [character], cardId: 'card-x', chatId: 'chat-1' });
+    assert.equal(parseTriggers('$mira', context).characters[0].char.id, 'c2');
+});
+
+test('inactive default persona yields null and $me does not resolve', () => {
+    const persona = { id: 'p1', name: 'Player', keyword: 'player', isDefault: true,
+        binding: { cardIds: ['other'], chatIds: [], global: false } };
+    const context = buildTriggerContext({ personas: [persona], cardId: 'card-a', chatId: 'chat-1' });
+    assert.equal(context.defaultPersona, null);
+    assert.equal(parseTriggers('$me', context).characters.length, 0);
 });
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`);

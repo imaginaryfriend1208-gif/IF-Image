@@ -294,27 +294,10 @@ export function createEngine({
         return { tags, elapsedMs: result.elapsedMs };
     }
 
-    /**
-     * persona_gen: read the current ST persona (name + description) and
-     * convert it into an IF-Image persona record via the LLM. Manual edits
-     * win: the caller should skip applying this when persona.meta.updatedAt
-     * is newer than persona.syncedAt (i.e. the user edited it since the
-     * last sync) unless the sync is explicitly forced.
-     * @param {{ signal?: AbortSignal }} [opts]
-     * @returns {Promise<{ persona: object, raw: string, elapsedMs: number }>}
-     */
-    async function syncPersonaFromSt({ signal } = {}) {
-        const ctx = getContext();
-        const name = ctx?.name1 ?? 'User';
-        const description = ctx?.powerUserSettings?.persona_description ?? '';
-        const systemPrompt = REQUEST_PROMPT_RENDERERS.persona_gen();
-        const userPrompt = `Persona name: ${name}\nPersona description: ${description || '(none set)'}`;
-        const result = await client.request({ type: 'persona_gen', systemPrompt, userPrompt, signal });
-        const parsed = parseJsonLoose(result.text);
-        if (!parsed || typeof parsed !== 'object' || typeof parsed.name !== 'string' || !parsed.name.trim()) {
-            throw new LlmError('MALFORMED', 'persona_gen reply was not a valid persona JSON object.');
-        }
-        return { persona: parsed, raw: result.text, elapsedMs: result.elapsedMs };
+    /** Import only the active host persona display name. */
+    async function importPersonaNameFromSt() {
+        const name = getContext()?.name1;
+        return { name: typeof name === 'string' && name.trim() ? name.trim() : 'User' };
     }
 
     // ------------------------------------------------------------------
@@ -489,7 +472,7 @@ export function createEngine({
 
     return {
         rewrite, regenerate,
-        generateCharacterDesign, modifyCharacter, modifyTags, translateFacts, syncPersonaFromSt,
+        generateCharacterDesign, modifyCharacter, modifyTags, translateFacts, importPersonaNameFromSt,
         planChatImages,
     };
 }

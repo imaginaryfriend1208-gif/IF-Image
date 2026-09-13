@@ -195,8 +195,8 @@ test('collectLoras: empty/absent slots and junk values are ignored', () => {
 // Inline character substitution (the ice-cream regression)
 // ------------------------------------------------------------------
 const roster = [
-    { id: 'c1', name: 'Carter', countTag: '1boy', booru: 'brown hair, blue eyes' },
-    { id: 'c2', name: 'Ann', countTag: '1girl', booru: 'blonde hair' },
+    { id: 'c1', name: 'Carter', keyword: 'carter', countTag: '1boy', booru: 'brown hair, blue eyes' },
+    { id: 'c2', name: 'Ann', keyword: 'ann', countTag: '1girl', booru: 'blonde hair' },
 ];
 
 test('a character trigger renders where it stands, sentence intact', () => {
@@ -228,7 +228,7 @@ test('two characters each render at their own position', () => {
 });
 
 test('a persona is addressable by name, exactly like a character', () => {
-    const personas = [{ id: 'p1', name: 'Nova', countTag: '1girl', booru: 'silver hair', povMode: 'full' }];
+    const personas = [{ id: 'p1', name: 'Nova', keyword: 'nova', countTag: '1girl', booru: 'silver hair', povMode: 'full' }];
     const parsed = parseTriggers('$Nova sitting by the window', { roster, styles: [], personas });
     assert.equal(parsed.characters.length, 1);
     assert.equal(parsed.characters[0].isPersona, true);
@@ -240,7 +240,7 @@ test('a persona is addressable by name, exactly like a character', () => {
 });
 
 test('a character name wins over a persona of the same name', () => {
-    const personas = [{ id: 'p1', name: 'Carter', countTag: '1girl', booru: 'silver hair' }];
+    const personas = [{ id: 'p1', name: 'Carter', keyword: 'carter', countTag: '1girl', booru: 'silver hair' }];
     const parsed = parseTriggers('$Carter waves', { roster, styles: [], personas });
     assert.equal(parsed.characters[0].isPersona, undefined);
     assert.equal(parsed.characters[0].char.id, 'c1');

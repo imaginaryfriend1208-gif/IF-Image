@@ -216,22 +216,15 @@ test('translation: backfills booru tags from facts', async () => {
     assert.equal(result.tags, 'elf, silver hair, purple eyes, archer');
 });
 
-test('persona_gen: reads name1/persona_description from context and returns a persona payload', async () => {
-    const reply = '{"name":"Alex","countTag":"1boy","booru":"black hair, casual clothes","natural":"a young man in casual attire"}';
-    const calls = [];
-    const { engine } = makeEngine({
-        llm: makeMockLlm({ reply, calls }),
-        contextExtra: { name1: 'Alex', powerUserSettings: { persona_description: 'a young man in casual attire' } },
-    });
-    const result = await engine.syncPersonaFromSt();
-    assert.equal(result.persona.name, 'Alex');
-    assert.ok(calls[0].userPrompt.includes('Alex'));
-    assert.ok(calls[0].userPrompt.includes('casual attire'));
+test('persona import reads only the host display name', async () => {
+    const { engine } = makeEngine({ llm: makeMockLlm({ reply: '{}' }), contextExtra: { name1: 'Alex' } });
+    const result = await engine.importPersonaNameFromSt();
+    assert.deepEqual(result, { name: 'Alex' });
 });
 
-test('persona_gen: malformed reply throws MALFORMED, never throws to the caller as a crash', async () => {
-    const { engine } = makeEngine({ llm: makeMockLlm({ reply: 'sorry, I cannot help with that' }) });
-    await assert.rejects(() => engine.syncPersonaFromSt(), (err) => err.code === 'MALFORMED');
+test('persona import falls back to User when the host has no name', async () => {
+    const { engine } = makeEngine({ llm: makeMockLlm({ reply: '{}' }) });
+    assert.deepEqual(await engine.importPersonaNameFromSt(), { name: 'User' });
 });
 
 test('defensive JSON repair: trailing commas and surrounding prose are tolerated', async () => {

@@ -37,7 +37,7 @@ console.log('Outfit lorebook tests');
 // ---------------------------------------------------------------- storage --
 
 test('legacy outfit without lorebook fields normalizes to explicit', () => {
-    const out = normalizeOutfit({ id: 'o1', name: 'Casual', tags: 't-shirt', charId: 'c1' });
+    const out = normalizeOutfit({ id: 'o1', name: 'Casual', keyword: 'casual', tags: 't-shirt', charId: 'c1' });
     assert.equal(out.triggerMode, OUTFIT_TRIGGER_MODES.EXPLICIT);
     assert.deepEqual(out.triggers, []);
     assert.deepEqual(out.excludeKeys, []);
@@ -45,7 +45,7 @@ test('legacy outfit without lorebook fields normalizes to explicit', () => {
 });
 
 test('normalizeOutfit preserves the legacy { id, name, tags, charId } shape', () => {
-    const out = normalizeOutfit({ id: 'o1', name: '  Casual  ', tags: ' t-shirt ', charId: 'c1' });
+    const out = normalizeOutfit({ id: 'o1', name: '  Casual  ', keyword: 'casual', tags: ' t-shirt ', charId: 'c1' });
     assert.equal(out.id, 'o1');
     assert.equal(out.name, 'Casual');
     assert.equal(out.tags, 't-shirt');
@@ -70,7 +70,7 @@ test('normalizeOutfitKeys splits strings, trims, and de-duplicates case-insensit
 });
 
 test('normalizeOutfit keeps unknown fields for forward compatibility', () => {
-    const out = normalizeOutfit({ name: 'X', futureField: 42 });
+    const out = normalizeOutfit({ name: 'X', keyword: 'x', futureField: 42 });
     assert.equal(out.futureField, 42);
 });
 
@@ -105,9 +105,9 @@ test('regex metacharacters in a key are treated literally', () => {
     assert.ok(!containsOutfitKeyword('wearing a cxx hoodie', 'c++'));
 });
 
-const autoSleep = { id: 'a1', name: 'Sleepwear', charId: 'c1', tags: 'pajamas', triggerMode: 'auto_keyword', triggers: ['pajamas', 'bed'], excludeKeys: ['armor'] };
-const autoArmor = { id: 'a2', name: 'Armor', charId: 'c1', tags: 'plate armor', triggerMode: 'auto_keyword', triggers: ['battle'] };
-const explicitOnly = { id: 'e1', name: 'Gala', charId: 'c1', tags: 'ball gown', triggerMode: 'explicit', triggers: ['bed'] };
+const autoSleep = { id: 'a1', name: 'Sleepwear', keyword: 'sleepwear', charId: 'c1', tags: 'pajamas', triggerMode: 'auto_keyword', triggers: ['pajamas', 'bed'], excludeKeys: ['armor'] };
+const autoArmor = { id: 'a2', name: 'Armor', keyword: 'armor', charId: 'c1', tags: 'plate armor', triggerMode: 'auto_keyword', triggers: ['battle'] };
+const explicitOnly = { id: 'e1', name: 'Gala', keyword: 'gala', charId: 'c1', tags: 'ball gown', triggerMode: 'explicit', triggers: ['bed'] };
 
 test('matchAutomaticOutfit ignores explicit-mode outfits even when keys match', () => {
     assert.equal(matchAutomaticOutfit('sitting on the bed', [explicitOnly]), null);
@@ -128,20 +128,20 @@ test('no keyword evidence yields no outfit', () => {
 });
 
 test('the longer matched phrase wins over a shorter one', () => {
-    const short = { id: 's', name: 'Short', triggerMode: 'auto_keyword', triggers: ['dress'] };
-    const long = { id: 'l', name: 'Long', triggerMode: 'auto_keyword', triggers: ['red evening dress'] };
+    const short = { id: 's', name: 'Short', keyword: 'short', triggerMode: 'auto_keyword', triggers: ['dress'] };
+    const long = { id: 'l', name: 'Long', keyword: 'long', triggerMode: 'auto_keyword', triggers: ['red evening dress'] };
     assert.equal(matchAutomaticOutfit('in a red evening dress', [short, long])?.id, 'l');
 });
 
 test('more matched keys break a tie at equal phrase length', () => {
-    const one = { id: 'one', name: 'One', triggerMode: 'auto_keyword', triggers: ['rain'] };
-    const two = { id: 'two', name: 'Two', triggerMode: 'auto_keyword', triggers: ['rain', 'cold'] };
+    const one = { id: 'one', name: 'One', keyword: 'one', triggerMode: 'auto_keyword', triggers: ['rain'] };
+    const two = { id: 'two', name: 'Two', keyword: 'two', triggerMode: 'auto_keyword', triggers: ['rain', 'cold'] };
     assert.equal(matchAutomaticOutfit('cold rain outside', [one, two])?.id, 'two');
 });
 
 test('selection is deterministic and stable for identical candidates', () => {
-    const a = { id: 'z', name: 'Zephyr', triggerMode: 'auto_keyword', triggers: ['bed'] };
-    const b = { id: 'y', name: 'Alpha', triggerMode: 'auto_keyword', triggers: ['bed'] };
+    const a = { id: 'z', name: 'Zephyr', keyword: 'zephyr', triggerMode: 'auto_keyword', triggers: ['bed'] };
+    const b = { id: 'y', name: 'Alpha', keyword: 'alpha', triggerMode: 'auto_keyword', triggers: ['bed'] };
     const first = matchAutomaticOutfit('on the bed', [a, b])?.id;
     assert.equal(first, matchAutomaticOutfit('on the bed', [b, a])?.id);
     assert.equal(first, 'y'); // normalized name "alpha" sorts first
@@ -155,11 +155,11 @@ test('matchAutomaticOutfit tolerates malformed input', () => {
 
 // ------------------------------------------------------- parseTriggers ----
 
-const lyna = { id: 'c1', name: 'Lyna', aliases: [], countTag: '1girl', booru: 'silver hair' };
-const mira = { id: 'c2', name: 'Mira', aliases: [], countTag: '1girl', booru: 'red hair' };
+const lyna = { id: 'c1', name: 'Lyna', keyword: 'lyna', aliases: [], countTag: '1girl', booru: 'silver hair' };
+const mira = { id: 'c2', name: 'Mira', keyword: 'mira', aliases: [], countTag: '1girl', booru: 'red hair' };
 const roster = [lyna, mira];
-const sharedAuto = { id: 'sh1', name: 'Swimsuit', charId: null, tags: 'bikini', triggerMode: 'auto_keyword', triggers: ['beach'] };
-const ownedExplicit = { id: 'o1', name: 'Casual', charId: 'c1', tags: 't-shirt, jeans' };
+const sharedAuto = { id: 'sh1', name: 'Swimsuit', keyword: 'swimsuit', charId: null, tags: 'bikini', triggerMode: 'auto_keyword', triggers: ['beach'] };
+const ownedExplicit = { id: 'o1', name: 'Casual', keyword: 'casual', charId: 'c1', tags: 't-shirt, jeans' };
 const outfits = [autoSleep, autoArmor, explicitOnly, sharedAuto, ownedExplicit];
 
 test('an owned auto outfit applies to its own character on a keyword hit', () => {
@@ -219,7 +219,7 @@ test('generic prose alone never introduces a character or an outfit', () => {
 test('keyword matching reads scene prose only, not consumed trigger tokens', () => {
     // "$Lyna" becomes an opaque slot placeholder before matching, so a key
     // spelled like the character name must NOT self-trigger.
-    const nameKeyed = [{ id: 'n1', name: 'Named', charId: 'c1', tags: 'x', triggerMode: 'auto_keyword', triggers: ['lyna'] }];
+    const nameKeyed = [{ id: 'n1', name: 'Named', keyword: 'named', charId: 'c1', tags: 'x', triggerMode: 'auto_keyword', triggers: ['lyna'] }];
     const parsed = parseTriggers('$Lyna', { roster, outfits: nameKeyed });
     assert.equal(parsed.characters[0].outfitTags, undefined);
 });
@@ -281,20 +281,20 @@ test('a character with no outfit renders unchanged', () => {
 });
 
 test('a persona in full POV wears its outfit', () => {
-    const persona = { id: 'p1', name: 'Ann', povMode: 'full', countTag: '1boy', booru: 'black hair', natural: 'a tall man' };
+    const persona = { id: 'p1', name: 'Ann', keyword: 'ann', povMode: 'full', countTag: '1boy', booru: 'black hair', natural: 'a tall man' };
     const item = { isPersona: true, persona, modifiers: [], outfitTags: 'bikini' };
     assert.ok(renderPersonaForDialect(persona, 'krea', [], item).includes('bikini'));
     assert.ok(renderPersonaForDialect(persona, 'illus', [], item).includes('bikini'));
 });
 
 test('a hidden/POV-hands persona is not in frame, so no clothing is emitted', () => {
-    const persona = { id: 'p1', name: 'Ann', povMode: 'hidden', countTag: '1boy' };
+    const persona = { id: 'p1', name: 'Ann', keyword: 'ann', povMode: 'hidden', countTag: '1boy' };
     const item = { isPersona: true, persona, modifiers: [], outfitTags: 'bikini' };
     assert.ok(!renderPersonaForDialect(persona, 'illus', [], item).includes('bikini'));
 });
 
 test('renderPersonaForDialect stays callable without the outfit argument', () => {
-    const persona = { id: 'p1', name: 'Ann', povMode: 'full', countTag: '1boy', booru: 'black hair' };
+    const persona = { id: 'p1', name: 'Ann', keyword: 'ann', povMode: 'full', countTag: '1boy', booru: 'black hair' };
     assert.ok(renderPersonaForDialect(persona, 'illus', []).includes('1boy'));
 });
 

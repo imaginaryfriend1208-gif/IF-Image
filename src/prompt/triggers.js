@@ -8,7 +8,7 @@
 // - {{style: StyleName}}
 // - {{dialect: krea|anima|illus}}
 
-import { resolveCharacterTrigger } from './binding.js';
+import { resolveEntityKeyword } from '../storage/entity-shape.js';
 import { matchAutomaticOutfit } from './outfit-keywords.js';
 
 /**
@@ -33,29 +33,19 @@ export function normalizeName(str) {
  * @returns {object|null}
  */
 export function matchCharacter(token, roster = []) {
-    if (!token || !roster.length) return null;
+    if (!token || !Array.isArray(roster) || !roster.length) return null;
     const target = normalizeName(token);
-    let bestMatch = null;
-    let highestScore = -1;
-
-    for (const char of roster) {
-        const names = [char.name, ...(char.aliases || [])];
-        for (const candidate of names) {
-            const norm = normalizeName(candidate);
-            if (!norm) continue;
-
-            // Explicit $Name tokens must match a full preset name or alias.
-            // Substring matching made tokens such as $RosarioAlt silently
-            // resolve to Rosario and generated the wrong character.
-            if (norm !== target) continue;
-            const score = 1000 + norm.length;
-            if (score > highestScore) {
-                highestScore = score;
-                bestMatch = char;
-            }
-        }
+    if (!target) return null;
+    // Canonical keyword matches outrank aliases from any record. Ties within
+    // either tier retain stable roster order.
+    for (const record of roster) {
+        if (normalizeName(resolveEntityKeyword(record)) === target) return record;
     }
-    return highestScore > 0 ? bestMatch : null;
+    for (const record of roster) {
+        if ((Array.isArray(record?.aliases) ? record.aliases : [])
+            .some(value => normalizeName(value) === target)) return record;
+    }
+    return null;
 }
 
 /**
@@ -182,7 +172,9 @@ export const CHAR_SLOT_PATTERN = new RegExp(`${CHAR_SLOT_PREFIX}(\\d+)`, 'gi');
 /**
  * Extracts and resolves triggers from a raw prompt string.
  * @param {string} input
- * @param {object} context - { roster: [], styles: [], defaultPersona: null, outfits: [] }
+ * @param {object} context - `roster` and `personas` MUST already be the active
+ *   subsets produced by buildTriggerContext(). This parser intentionally does
+ *   not know cardId/chatId and never applies binding rules itself.
  * @returns {object} { characters: [], styles: [], dialectOverride: null, residualPrompt: string }
  */
 export function parseTriggers(input, context = {}) {
@@ -191,22 +183,14 @@ export function parseTriggers(input, context = {}) {
     }
 
     let text = input;
-    const roster = context.roster || [];
-    const styles = context.styles || [];
-    const outfits = context.outfits || [];
-    // Personas are addressable by name too ($Ann, not just $me).
+    const roster = Array.isArray(context.roster) ? context.roster : [];
     const personaRoster = Array.isArray(context.personas) ? context.personas : [];
+    const styles = Array.isArray(context.styles) ? context.styles : [];
+    const outfits = Array.isArray(context.outfits) ? context.outfits : [];
     const foundChars = [];
     const foundStyles = [];
     let dialectOverride = null;
-
-    // Outfits usable by a given character: its own (by charId) plus every
-    // common outfit (charId=null/undefined).
-    const outfitsForChar = (char) => outfits.filter(o => o.charId === char.id || !o.charId);
-
-    // Tracks the last explicit camera/view modifiers used per character id
-    // within THIS marker, so a later outfit-only trigger for the same
-    // character inherits them (e.g. "$Lyna:back ... $Lyna:casual ...").
+    const outfitsForChar = subject => outfits.filter(outfit => outfit.charId === subject?.id || !outfit.charId);
     const lastViewModsByChar = new Map();
 
     function attachOutfit(item, outfit, source, displayName = '') {
@@ -217,84 +201,48 @@ export function parseTriggers(input, context = {}) {
         item.outfitRecord = outfit;
         item.outfitSource = source;
     }
-
-    function subjectOf(item) {
-        return item?.char ?? item?.persona ?? null;
-    }
-
-    function subjectKey(item) {
+    const subjectOf = item => item?.char ?? item?.persona ?? null;
+    const subjectKey = item => {
         const subject = subjectOf(item);
-        if (!subject) return '';
-        return `${item.isPersona ? 'persona' : 'character'}:${subject.id ?? normalizeName(subject.name)}`;
-    }
+        return subject ? `${item.isPersona ? 'persona' : 'character'}:${subject.id ?? normalizeName(resolveEntityKeyword(subject))}` : '';
+    };
+    const resolveSubject = token => {
+        const char = matchCharacter(token, roster);
+        return char ? { char, persona: null } : { char: null, persona: matchCharacter(token, personaRoster) };
+    };
+    const activeDefaultPersona = context.defaultPersona ?? null;
 
-    // Character resolution with the C4 fallback tiers (active -> bound ->
-    // all). `roster` here is meant to be the ALREADY-ACTIVE subset (see
-    // resolveActiveCharacters in binding.js); passing context.fullRoster
-    // enables the wider tiers with a toastr-style warning via
-    // context.onFallback(tier, token). Without fullRoster, behavior is
-    // unchanged from pre-C4: a plain matchCharacter against context.roster.
-    function resolveChar(token) {
-        if (!context.fullRoster) return matchCharacter(token, roster);
-        const result = resolveCharacterTrigger(matchCharacter, token, roster, context.fullRoster);
-        if (result.usedFallback && typeof context.onFallback === 'function') {
-            context.onFallback(result.tier, token);
-        }
-        return result.char;
-    }
-
-    // 1. Dialect directive: {{dialect: id}}
-    text = text.replace(/\{\{\s*dialect\s*:\s*([a-zA-Z0-9_-]+)\s*\}\}/gi, (match, d) => {
-        dialectOverride = d.toLowerCase();
+    text = text.replace(/\{\{\s*dialect\s*:\s*([a-zA-Z0-9_-]+)\s*\}\}/gi, (_match, value) => {
+        dialectOverride = value.toLowerCase();
+        return '';
+    });
+    text = text.replace(/\{\{\s*style\s*:\s*([^}]+)\s*\}\}/gi, (_match, value) => {
+        const style = styles.find(item => normalizeName(item?.name) === normalizeName(value));
+        if (style) foundStyles.push(style);
         return '';
     });
 
-    // 2. Style directive: {{style: StyleName}}
-    text = text.replace(/\{\{\s*style\s*:\s*([^}]+)\s*\}\}/gi, (match, sName) => {
-        const targetStyle = styles.find(s => normalizeName(s.name) === normalizeName(sName));
-        if (targetStyle) foundStyles.push(targetStyle);
-        return '';
-    });
-
-    // 3. JSON trigger: ${...}. Beside character triggers, the same object
-    // form may carry marker-level generation param overrides: "size":
-    // "WxH", "steps": n, "cfg": n. These are collected into paramOverrides
-    // (last one wins if repeated) and consumed by index.js's compile(),
-    // which merges them on top of profile + settings.generation.params —
-    // see CLAUDE.md precedence note: profile < settings < marker JSON < LLM.
-    // Invalid values are ignored with a console warning, never thrown.
     const paramOverrides = {};
     text = text.replace(/\$\{([^}]+)\}/g, (match, jsonLike) => {
         try {
-            // relaxed json parse
             const normalized = jsonLike.replace(/(['"])?([a-zA-Z0-9_]+)(['"])?:/g, '"$2": ');
             const parsed = JSON.parse(`{${normalized}}`);
             let consumed = false;
-            // Set when this trigger resolved a character: the JSON form also
-            // carries param overrides, so the token may be consumed without
-            // one. An empty slot token keeps the old delete-the-token result.
             let slotToken = '';
-            if (parsed.char) {
-                const char = resolveChar(parsed.char);
-                if (char) {
-                    // Normalize JSON keys to the same string[] modifier shape
-                    // produced by the $Name:mod1|mod2 syntax. render.js checks
-                    // .includes('back') / .includes('nsfw'), so modifiers must
-                    // always be an array of strings. `outfit` is kept as a
-                    // separate field (consumed by Phase C outfit triggers).
+            if (typeof parsed.char === 'string' && parsed.char) {
+                const { char, persona } = resolveSubject(parsed.char);
+                const subject = char ?? persona;
+                if (subject) {
                     const modifiers = [];
-                    if (parsed.view === 'back') modifiers.push('back');
-                    if (parsed.view === 'full') modifiers.push('full');
+                    if (['back', 'front', 'side', 'full'].includes(parsed.view)) modifiers.push(parsed.view);
                     if (parsed.nsfw === true) modifiers.push('nsfw');
-                    const item = { char, modifiers };
+                    const item = char ? { char, modifiers } : { isPersona: true, persona, modifiers };
                     if (typeof parsed.outfit === 'string' && parsed.outfit) {
                         item.outfitRequested = true;
-                        const matched = matchOutfit(parsed.outfit, outfitsForChar(char));
-                        attachOutfit(item, matched, 'explicit', parsed.outfit);
+                        attachOutfit(item, matchOutfit(parsed.outfit, outfitsForChar(subject)), 'explicit', parsed.outfit);
                     }
-                    if (modifiers.some(m => VIEW_MODIFIERS.has(m))) {
-                        lastViewModsByChar.set(char.id, modifiers.filter(m => VIEW_MODIFIERS.has(m)));
-                    }
+                    const views = modifiers.filter(value => VIEW_MODIFIERS.has(value));
+                    if (views.length) lastViewModsByChar.set(subject.id, views);
                     slotToken = charSlotToken(foundChars.push(item) - 1);
                     consumed = true;
                 }
@@ -306,150 +254,92 @@ export function parseTriggers(input, context = {}) {
                     paramOverrides.width = Number(sizeMatch[1]);
                     paramOverrides.height = Number(sizeMatch[2]);
                     consumed = true;
-                } else if (keyword === 'portrait' || keyword === 'landscape' || keyword === 'square') {
-                    // D3: orientation keyword. The numeric pair depends on
-                    // the profile, which is not known here — compile()
-                    // (index.js) resolves it AFTER the profile is picked.
-                    // A numeric "WxH" from another trigger beats the keyword.
+                } else if (['portrait', 'landscape', 'square'].includes(keyword)) {
                     paramOverrides.sizeKeyword = keyword;
                     consumed = true;
-                } else {
-                    console.warn(`[IF Image] Ignoring invalid "size" trigger value "${parsed.size}" (expected "WxH" or portrait/landscape/square).`);
-                }
+                } else console.warn('[IF Image] Ignoring invalid "size" trigger value.');
             }
             if (parsed.steps !== undefined) {
-                const n = Number(parsed.steps);
-                if (Number.isFinite(n)) { paramOverrides.steps = n; consumed = true; }
+                const value = Number(parsed.steps);
+                if (Number.isFinite(value)) { paramOverrides.steps = value; consumed = true; }
                 else console.warn('[IF Image] Ignoring invalid "steps" trigger value (not a number).');
             }
             if (parsed.cfg !== undefined) {
-                const n = Number(parsed.cfg);
-                if (Number.isFinite(n)) { paramOverrides.cfg = n; consumed = true; }
+                const value = Number(parsed.cfg);
+                if (Number.isFinite(value)) { paramOverrides.cfg = value; consumed = true; }
                 else console.warn('[IF Image] Ignoring invalid "cfg" trigger value (not a number).');
             }
-            // D2: marker-level seed override — integer >= -1 (-1 = random).
             if (parsed.seed !== undefined) {
-                const n = Number(parsed.seed);
-                if (Number.isInteger(n) && n >= -1) { paramOverrides.seed = n; consumed = true; }
+                const value = Number(parsed.seed);
+                if (Number.isInteger(value) && value >= -1) { paramOverrides.seed = value; consumed = true; }
                 else console.warn('[IF Image] Ignoring invalid "seed" trigger value (expected an integer >= -1).');
             }
             if (consumed) return slotToken;
-        } catch {
-            // Ignore parse errors, keep literal
-        }
+        } catch { /* keep malformed token literal */ }
         return match;
     });
 
-    // 4. $me directive
-    text = text.replace(/\$me(?::([a-zA-Z0-9_|]+))?\b/gi, (match, mods) => {
-        if (context.defaultPersona) {
-            const index = foundChars.push({
-                isPersona: true,
-                persona: context.defaultPersona,
-                modifiers: mods ? mods.split('|') : [],
-            }) - 1;
-            return charSlotToken(index);
-        }
-        return match;
+    text = text.replace(/\$me(?::([a-zA-Z0-9_|]+))?\b/gi, (match, raw) => {
+        if (!activeDefaultPersona) return match;
+        return charSlotToken(foundChars.push({ isPersona: true, persona: activeDefaultPersona, modifiers: raw ? raw.split('|') : [] }) - 1);
     });
 
-    // 5. $Name:mods directive — mods tokens are either recognized view
-    // modifiers (back/front/full/side), 'nsfw', or an outfit name to
-    // fuzzy-match against the character's outfits (own + common). An
-    // outfit-only trigger (no view tokens) inherits the last view modifiers
-    // seen for that same character earlier in this marker.
-    // The mods group shares the name group's accented ranges (À-ɏ, Ḁ-ỿ):
-    // outfit names are user-authored and may carry Vietnamese diacritics
-    // (e.g. `$Lyna:đồ ngủ` typed as `$Lyna:đồngủ`).
-    text = text.replace(/\$([a-zA-Z0-9_À-ɏḀ-ỿ]+)(?::([a-zA-Z0-9_À-ɏḀ-ỿ|]+))?/g, (match, name, modsRaw) => {
-        const char = resolveChar(name);
-        // A persona is a character that happens to be the protagonist, so
-        // $PersonaName resolves exactly like $CharacterName. Characters win
-        // a name collision because they are the larger, chat-scoped set.
-        const persona = char ? null : matchCharacter(name, personaRoster);
+    text = text.replace(/\$([a-zA-Z0-9_À-ɏḀ-ỿ]+)(?::([a-zA-Z0-9_À-ɏḀ-ỿ|]+))?/g, (match, token, modsRaw) => {
+        if (normalizeName(token) === 'me') return match;
+        const { char, persona } = resolveSubject(token);
         if (!char && !persona) return match;
-
-        const tokens = modsRaw ? modsRaw.split('|') : [];
-        const viewMods = tokens.filter(t => VIEW_MODIFIERS.has(t));
-        const otherMods = tokens.filter(t => t === 'nsfw');
-        const outfitTokens = tokens.filter(t => !VIEW_MODIFIERS.has(t) && t !== 'nsfw');
-
         const subject = char ?? persona;
+        const tokens = modsRaw ? modsRaw.split('|') : [];
+        const viewMods = tokens.filter(value => VIEW_MODIFIERS.has(value));
+        const otherMods = tokens.filter(value => value === 'nsfw');
+        const outfitTokens = tokens.filter(value => !VIEW_MODIFIERS.has(value) && value !== 'nsfw');
         let matchedOutfit = null;
-        for (const token of outfitTokens) {
-            const found = matchOutfit(token, outfitsForChar(subject));
-            if (found) { matchedOutfit = found; break; }
+        for (const outfitToken of outfitTokens) {
+            matchedOutfit = matchOutfit(outfitToken, outfitsForChar(subject));
+            if (matchedOutfit) break;
         }
-
-        let effectiveViewMods = viewMods;
-        if (viewMods.length) {
-            lastViewModsByChar.set(subject.id, viewMods);
-        } else if (lastViewModsByChar.has(subject.id)) {
-            effectiveViewMods = lastViewModsByChar.get(subject.id);
-        }
-
-        const modifiers = [...effectiveViewMods, ...otherMods];
+        let effectiveViews = viewMods;
+        if (viewMods.length) lastViewModsByChar.set(subject.id, viewMods);
+        else if (lastViewModsByChar.has(subject.id)) effectiveViews = lastViewModsByChar.get(subject.id);
         const item = char
-            ? { char, modifiers }
-            : { isPersona: true, persona, modifiers };
+            ? { char, modifiers: [...effectiveViews, ...otherMods] }
+            : { isPersona: true, persona, modifiers: [...effectiveViews, ...otherMods] };
         if (outfitTokens.length) item.outfitRequested = true;
         if (matchedOutfit) attachOutfit(item, matchedOutfit, 'explicit');
         return charSlotToken(foundChars.push(item) - 1);
     });
 
-    // 6. Persona keyword detection — a persona whose alias appears in the
-    // scene text is pulled in even without an explicit trigger. Runs AFTER
-    // the $Name pass so a persona already named there is not added twice.
-    // These have no position in the text, so they carry no slot token and
-    // render.js appends them; an explicit trigger is what pins a position.
-    if (personaRoster.length) {
-        const defaultId = context.defaultPersona?.id;
-        const alreadyMatchedIds = new Set(foundChars.filter(c => c.isPersona).map(c => c.persona?.id));
-        for (const p of personaRoster) {
-            if (p.id === defaultId) continue; // $me handles default
-            if (alreadyMatchedIds.has(p.id)) continue;
-            const aliases = Array.isArray(p.aliases) ? p.aliases : [];
-            if (!aliases.length) continue;
-            // Build a temporary roster shape for matchCharacter
-            const matched = aliases.some(alias => {
-                const haystack = normalizeName(text);
-                const needle = normalizeName(alias);
-                let at = haystack.indexOf(needle);
-                while (needle && at >= 0) {
-                    const before = haystack[at - 1] ?? '';
-                    const after = haystack[at + needle.length] ?? '';
-                    if (!/[\p{L}\p{N}_]/u.test(before) && !/[\p{L}\p{N}_]/u.test(after)) return true;
-                    at = haystack.indexOf(needle, at + 1);
-                }
-                return false;
-            });
-            if (matched) {
-                foundChars.push({ isPersona: true, persona: p, modifiers: [] });
-                alreadyMatchedIds.add(p.id);
-            }
+    const prose = sceneTextForKeywords(text);
+    const found = new Set(foundChars.map(subjectKey));
+    const hasSurface = value => {
+        const surface = typeof value === 'string' ? value.trim() : '';
+        if (!surface) return false;
+        const escaped = surface.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        return new RegExp(`(^|[^\\p{L}\\p{N}_])${escaped}(?=$|[^\\p{L}\\p{N}_])`, 'iu').test(prose);
+    };
+    const characterSurfaces = new Set();
+    for (const char of roster) {
+        const surfaces = [resolveEntityKeyword(char), ...(Array.isArray(char?.aliases) ? char.aliases : [])].filter(Boolean);
+        for (const surface of surfaces) characterSurfaces.add(normalizeName(surface));
+        const item = { char, modifiers: [] };
+        if (!found.has(subjectKey(item)) && surfaces.some(hasSurface)) {
+            foundChars.push(item);
+            found.add(subjectKey(item));
+        }
+    }
+    for (const persona of personaRoster) {
+        if (persona?.isDefault || persona === activeDefaultPersona
+            || (persona?.id && persona.id === activeDefaultPersona?.id)) continue;
+        const surfaces = [resolveEntityKeyword(persona), ...(Array.isArray(persona?.aliases) ? persona.aliases : [])]
+            .filter(surface => surface && !characterSurfaces.has(normalizeName(surface)));
+        const item = { isPersona: true, persona, modifiers: [] };
+        if (!found.has(subjectKey(item)) && surfaces.some(hasSurface)) {
+            foundChars.push(item);
+            found.add(subjectKey(item));
         }
     }
 
-    // 7. Lorebook-style automatic outfits. Runs LAST, on the scene prose only
-    // (trigger tokens are already slot placeholders), so keyword matching
-    // never sees compiler-expanded character tags. It only ASSIGNS clothing
-    // to subjects that were already resolved by an explicit trigger — it can
-    // never introduce a character from generic prose.
-    // Precedence: explicit `$Name:outfit` > owned auto outfit > shared auto
-    // outfit (only when exactly one subject is in frame, otherwise ambiguous).
     resolveAutomaticOutfits(text, foundChars, outfits, attachOutfit, subjectOf, subjectKey);
-
-    // Clean up excessive whitespace/commas
-    const residualPrompt = text
-        .replace(/,\s*,+/g, ',')
-        .replace(/^\s*,\s*|\s*,\s*$/g, '')
-        .trim();
-
-    return {
-        characters: foundChars,
-        styles: foundStyles,
-        dialectOverride,
-        residualPrompt,
-        paramOverrides,
-    };
+    const residualPrompt = text.replace(/,\s*,+/g, ',').replace(/^\s*,\s*|\s*,\s*$/g, '').trim();
+    return { characters: foundChars, styles: foundStyles, dialectOverride, residualPrompt, paramOverrides };
 }

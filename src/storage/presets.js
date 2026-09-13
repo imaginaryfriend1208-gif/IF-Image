@@ -2,6 +2,7 @@
 // Follows PROMPT-SPEC §6 (Persona & POV) and §9 (Style presets).
 
 import { STORES } from './idb.js';
+import { claimUniqueKeyword, normalizeAliases, normalizeBinding, normalizeKeyword } from './entity-shape.js';
 
 // Loaded only when persistence is used, keeping the pure schema/normalization
 // helpers usable in non-SillyTavern tooling and tests.
@@ -13,75 +14,59 @@ const deleteItem = async (store, id) => (await configStore()).deleteConfigItem(s
 
 export function createDefaultPersona(name = 'Default User') {
     return {
-        id: crypto.randomUUID ? crypto.randomUUID() : 'persona_' + Date.now(),
+        id: globalThis.crypto?.randomUUID?.() ?? `persona_${Date.now()}`,
         name,
-        isDefault: true,
-        gender: 'male',
-        countTag: '1boy',
-        povMode: 'auto', // auto | hidden | hands | full | third_person
-        facts: '',
-        booru: '',
-        natural: '',
-        avoidTags: [],
-        autoSync: false,
-        // Phase C5: last time syncPersonaFromSt() successfully applied. Manual
-        // edits (meta.updatedAt newer than syncedAt) block the next auto-sync
-        // from silently overwriting them — see applyPersonaSync() below.
-        syncedAt: null,
-        // Keyword triggers: when these appear in scene text, this persona is
-        // auto-injected (like character aliases). $me always resolves to the
-        // default persona regardless.
+        keyword: normalizeKeyword('', name, 'persona'),
         aliases: [],
-        // A1111 LoRA token, same role as a character's — a persona IS a
-        // character, just flagged as the protagonist.
-        lora: '',
-        // Per-dialect style hints (like Style presets). Used when persona is
-        // rendered in 'full' mode — e.g. persona's own krea/anima/illus
-        // dialect fragments get merged into the prompt.
+        binding: { cardIds: [], chatIds: [], global: false },
+        isDefault: true,
+        gender: 'male', countTag: '1boy',
+        povMode: 'auto',
+        facts: '', booru: '', natural: '', avoidTags: [], lora: '',
         dialectHints: {
             krea: { stylePhrase: '', lighting: '', camera: '' },
             anima: { booruTags: '', artists: '' },
             illus: { artists: '', qualityPrefix: '', negativeTags: '' },
         },
-        meta: {
-            version: 1,
-            updatedAt: Date.now(),
-        },
+        meta: { version: 1, updatedAt: Date.now() },
+        presetVersion: PERSONA_CURRENT_VERSION,
     };
 }
 
-/**
- * Merge an LLM-synced persona payload (from engine.syncPersonaFromSt) into
- * an existing persona record. Manual edits win: if the record was touched
- * (meta.updatedAt) more recently than the last sync (syncedAt), the merge
- * is skipped unless force=true.
- * @param {object} persona - existing (or newly created) persona record, mutated in place
- * @param {{ name?: string, countTag?: string, booru?: string, natural?: string }} synced
- * @param {boolean} [force]
- * @returns {{ applied: boolean, persona: object }}
- */
-export function applyPersonaSync(persona, synced, force = false) {
-    const manuallyEditedSinceSync = Boolean(persona.syncedAt) && (persona.meta?.updatedAt ?? 0) > persona.syncedAt;
-    if (manuallyEditedSinceSync && !force) {
-        return { applied: false, persona };
-    }
-    if (typeof synced?.name === 'string' && synced.name.trim()) persona.name = synced.name.trim();
-    if (typeof synced?.countTag === 'string' && synced.countTag.trim()) persona.countTag = synced.countTag.trim();
-    if (typeof synced?.booru === 'string') persona.booru = synced.booru;
-    if (typeof synced?.natural === 'string') persona.natural = synced.natural;
-    if (Array.isArray(synced?.aliases)) persona.aliases = synced.aliases.filter(a => typeof a === 'string' && a.trim());
-    if (synced?.dialectHints && typeof synced.dialectHints === 'object') {
-        persona.dialectHints = persona.dialectHints || {};
-        for (const dialect of ['krea', 'anima', 'illus']) {
-            const src = synced.dialectHints[dialect];
-            if (src && typeof src === 'object') {
-                persona.dialectHints[dialect] = { ...(persona.dialectHints[dialect] || {}), ...src };
-            }
-        }
-    }
-    persona.syncedAt = Date.now();
+export const PERSONA_MIGRATORS = [
+    (record, usedKeywords) => {
+        record.aliases = normalizeAliases(record.aliases);
+        record.binding = normalizeBinding(record.binding);
+        delete record.bindings;
+        delete record.autoSync;
+        delete record.syncedAt;
+        claimUniqueKeyword(record, usedKeywords, 'persona');
+    },
+];
+
+export const PERSONA_CURRENT_VERSION = PERSONA_MIGRATORS.length;
+
+export function applyPersonaMigrations(record, usedKeywords) {
+    if (!record || typeof record !== 'object') return record;
+    const from = Number.isInteger(record.presetVersion) && record.presetVersion >= 0 ? record.presetVersion : 0;
+    for (let version = from; version < PERSONA_CURRENT_VERSION; version++) PERSONA_MIGRATORS[version](record, usedKeywords);
+    record.aliases = normalizeAliases(record.aliases);
+    record.binding = normalizeBinding(record.binding);
+    delete record.bindings;
+    delete record.autoSync;
+    delete record.syncedAt;
+    record.presetVersion = PERSONA_CURRENT_VERSION;
+    return record;
+}
+
+/** Apply only a host-provided display name; visual fields stay user-authored. */
+export function applyPersonaNameImport(persona, imported) {
+    if (typeof imported?.name === 'string' && imported.name.trim()) persona.name = imported.name.trim();
     return { applied: true, persona };
 }
+
+// Compatibility export for older UI integrations; it now imports name only.
+export const applyPersonaSync = applyPersonaNameImport;
 
 export function createDefaultStyle(name = 'New Style') {
     return {
@@ -114,10 +99,15 @@ export function createDefaultStyle(name = 'New Style') {
 }
 
 export async function getAllPersonas() {
-    return getAllItems(STORES.PERSONAS);
+    const used = new Set();
+    return (await getAllItems(STORES.PERSONAS)).map(record => applyPersonaMigrations(record, used));
 }
 
 export async function savePersona(persona) {
+    if (!persona || typeof persona !== 'object') throw new TypeError('Persona record is required.');
+    const all = await getAllItems(STORES.PERSONAS);
+    const used = new Set(all.filter(item => item?.id !== persona.id).map(item => normalizeKeyword(item?.keyword, item?.name, 'persona')));
+    applyPersonaMigrations(persona, used);
     persona.meta = persona.meta || {};
     persona.meta.updatedAt = Date.now();
     return putItem(STORES.PERSONAS, persona);

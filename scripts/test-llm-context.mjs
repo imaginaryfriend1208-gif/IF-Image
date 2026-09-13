@@ -121,7 +121,7 @@ test('scope: raw returns empty sceneText', () => {
 
 test('character block from roster', () => {
     const roster = { characters: [
-        { name: 'Lyna', countTag: '1girl', booru: 'silver hair, purple eyes', facts: 'Age 24' },
+        { name: 'Lyna', keyword: 'lyna', countTag: '1girl', booru: 'silver hair, purple eyes', facts: 'Age 24' },
     ], persona: null };
     const result = buildContext({
         chat: [],
@@ -130,13 +130,13 @@ test('character block from roster', () => {
         roster,
     });
     assert.ok(result.subjectBlock.includes('Lyna'));
-    assert.match(result.subjectBlock, /Exact token: \$Lyna/);
+    assert.match(result.subjectBlock, /Exact token: \$lyna/);
     assert.ok(!result.subjectBlock.includes('silver hair'));
     assert.ok(!result.subjectBlock.includes('Age 24'));
 });
 
 test('persona block from roster', () => {
-    const roster = { characters: [], persona: { name: 'User', booru: '1boy, black hair', natural: 'a young man' } };
+    const roster = { characters: [], persona: { name: 'User', keyword: 'user', booru: '1boy, black hair', natural: 'a young man' } };
     const result = buildContext({
         chat: [],
         settings: { generation: { sceneWindow: 4 } },
@@ -153,7 +153,7 @@ test('persona block includes aliases and dialectHints', () => {
     const roster = {
         characters: [],
         persona: {
-            name: 'User',
+            name: 'User', keyword: 'user',
             booru: '1boy, black hair',
             natural: 'a young man',
             aliases: ['user', 'narrator'],
@@ -178,7 +178,7 @@ test('persona block includes aliases and dialectHints', () => {
 });
 
 test('includeCharCard=false suppresses character block', () => {
-    const roster = { characters: [{ name: 'A', countTag: '1girl' }], persona: null };
+    const roster = { characters: [{ name: 'A', keyword: 'a', countTag: '1girl' }], persona: null };
     const result = buildContext({
         chat: [],
         settings: { generation: { sceneWindow: 4 } },
