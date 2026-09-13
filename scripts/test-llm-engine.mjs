@@ -23,8 +23,8 @@ console.log('LLM engine tests');
 // --- Mock LLM client ---
 function makeMockLlm({ reply, error, calls = [] }) {
     return {
-        request: async ({ type, systemPrompt, userPrompt, profileId, signal }) => {
-            calls.push({ type, systemPrompt, userPrompt, profileId, signal });
+        request: async ({ type, systemPrompt, userPrompt, signal }) => {
+            calls.push({ type, systemPrompt, userPrompt, signal });
             if (error) throw error;
             return { text: reply, requestId: 'req-1', elapsedMs: 10, method: 'generateRaw' };
         },
@@ -35,8 +35,8 @@ function makeMockLlm({ reply, error, calls = [] }) {
 function makeMockLlmSeq(replies, calls = []) {
     let i = 0;
     return {
-        request: async ({ type, systemPrompt, userPrompt, profileId, signal }) => {
-            calls.push({ type, systemPrompt, userPrompt, profileId, signal });
+        request: async ({ type, systemPrompt, userPrompt, signal }) => {
+            calls.push({ type, systemPrompt, userPrompt, signal });
             const text = replies[Math.min(i, replies.length - 1)];
             i += 1;
             return { text, requestId: 'req-' + i, elapsedMs: 10, method: 'generateRaw' };

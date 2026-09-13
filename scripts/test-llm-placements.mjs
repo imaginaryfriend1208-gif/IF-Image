@@ -280,8 +280,8 @@ test('validateRewrites: does not mutate the input placements', () => {
 function makeEngine({ llmReply, rewriteReply, settings = {}, chat = [], roster = {}, rewrite = false } = {}) {
     const calls = [];
     const client = {
-        async request({ type, systemPrompt, userPrompt, profileId, signal }) {
-            calls.push({ type, systemPrompt, userPrompt, profileId, signal });
+        async request({ type, systemPrompt, userPrompt, signal }) {
+            calls.push({ type, systemPrompt, userPrompt, signal });
             if (type === 'chat_rewrite') {
                 const reply = typeof rewriteReply === 'function' ? rewriteReply() : rewriteReply;
                 return { text: reply ?? '', method: 'mock', elapsedMs: 17 };
@@ -329,7 +329,7 @@ test('planChatImages: calls client with type chat_place and returns placements',
     const result = await engine.planChatImages(1);
     assert.equal(calls.length, 1);
     assert.equal(calls[0].type, 'chat_place');
-    assert.equal(calls[0].profileId, 'prof_1');
+    assert.equal('profileId' in calls[0], false);
     assert.match(calls[0].systemPrompt, /image placement planner/);
     assert.match(calls[0].userPrompt, /Plan 1 image placements/);
     assert.equal(result.placements.length, 1);
@@ -463,7 +463,7 @@ test('planChatImages: no placements means no rewrite call', async () => {
     assert.equal(result.rewritten, false);
 });
 
-test('planChatImages: rewrite uses the chat_rewrite mapping when present', async () => {
+test('planChatImages: rewrite ignores the legacy chat_rewrite API mapping', async () => {
     const { engine, calls } = makeEngine({
         chat: rewriteChat,
         llmReply: planReply,
@@ -486,11 +486,11 @@ test('planChatImages: rewrite uses the chat_rewrite mapping when present', async
         },
     });
     await engine.planChatImages(1);
-    assert.equal(calls[0].profileId, 'prof_chatplace');
-    assert.equal(calls[1].profileId, 'prof_rewrite');
+    assert.equal(calls[0].profileId, undefined);
+    assert.equal(calls[1].profileId, undefined);
 });
 
-test('planChatImages: rewrite falls back to the chat_place profile', async () => {
+test('planChatImages: rewrite does not fall back to a legacy chat_place API mapping', async () => {
     const { engine, calls } = makeEngine({
         chat: rewriteChat,
         llmReply: planReply,
@@ -509,10 +509,10 @@ test('planChatImages: rewrite falls back to the chat_place profile', async () =>
         },
     });
     await engine.planChatImages(1);
-    assert.equal(calls[1].profileId, 'prof_chatplace');
+    assert.equal(calls[1].profileId, undefined);
 });
 
-test('planChatImages: chat_place mapping wins over image_gen fallback', async () => {
+test('planChatImages: legacy per-type API mappings are ignored', async () => {
     const chat = [{ role: 'char', mes: 'She smiled.' }];
     const { engine, calls } = makeEngine({
         chat,
@@ -534,6 +534,6 @@ test('planChatImages: chat_place mapping wins over image_gen fallback', async ()
         },
     });
     const result = await engine.planChatImages(1);
-    assert.equal(calls[0].profileId, 'prof_chatplace');
+    assert.equal(calls[0].profileId, undefined);
     assert.equal(result.placements.length, 1);
 });

@@ -203,9 +203,17 @@ export function deleteContextProfile(settings, id) {
 export function resolveRequestMapping(settings, requestType) {
     const mapping = getRequestMapping(settings)[requestType] ?? {};
     return {
+        // Legacy compatibility for the pre-V2 profile editor. Runtime
+        // connection selection no longer reads this value.
         apiProfile: mapping.apiProfileId ? getApiProfileById(settings, mapping.apiProfileId) : null,
         contextProfile: mapping.contextProfileId ? getContextProfileById(settings, mapping.contextProfileId) : null,
     };
+}
+
+/** Resolve prompt/context content only; never an LLM connection. */
+export function resolveContextProfile(settings, requestType) {
+    const mapping = getRequestMapping(settings)[requestType] ?? {};
+    return mapping.contextProfileId ? getContextProfileById(settings, mapping.contextProfileId) : null;
 }
 
 /**

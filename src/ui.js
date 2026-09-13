@@ -3877,9 +3877,10 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
 
     // Test the selected saved profile (or the default/current ST connection).
     if (llmTestBtn) llmTestBtn.addEventListener('click', async () => {
-        const profileId = activeLlmProfileId || llmProfSel?.value || settings.llm?.defaultApiProfileId || '';
-        const profile = settings.llm?.apiProfiles?.find(item => item.id === profileId) ?? null;
-        const target = profile ? `"${profile.name}" (${profile.method})` : 'SillyTavern current connection';
+        const llmTarget = settings.connection?.llm ?? {};
+        const target = llmTarget.mode === 'custom'
+            ? `custom model ${llmTarget.custom?.model || '(not selected)'}`
+            : `SillyTavern profile ${llmTarget.stProfileId || '(not selected)'}`;
         llmTestBtn.disabled = true;
         showResult(llmResult, `Testing ${target} with a fixed, credential-free prompt…`, false);
         try {
@@ -3890,7 +3891,6 @@ export function renderDrawer({ settings, save, nai, comfy, a1111, genLog, getQue
             });
             const result = await client.request({
                 type: 'image_gen',
-                profileId: profileId || undefined,
                 systemPrompt: 'Reply with exactly one line: OK.',
                 userPrompt: 'Reply with: OK',
                 signal: AbortSignal.timeout(30000),

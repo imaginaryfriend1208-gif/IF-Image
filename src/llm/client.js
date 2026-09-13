@@ -1,21 +1,8 @@
-// IF Image - LLM client for Assist/Full mode rewrite engine.
-// Dispatches to the user's SillyTavern LLM connection via one of:
-//   1. generateRaw (default — uses the user's active ST connection)
-//   2. ConnectionManagerRequestService (feature-detected from getContext())
-//   3. Direct fetch to an OpenAI-compatible endpoint (from an API profile)
-//   4. ST proxy (/api/backends/chat-completions/generate) — stub (METHOD_UNAVAILABLE)
-//
-// Never logs API keys or auth strings. Redaction follows the a1111 _safeDetail
-// pattern: cap detail length, strip credential substrings, replace with [redacted].
+// IF Image - one-target LLM client (V2 connection-first).
+// Every request type uses settings.connection.llm; credentials never enter
+// task snapshots, diagnostics, exports, or return values.
 
-/**
- * Typed LLM error.
- */
 export class LlmError extends Error {
-    /**
-     * @param {string} code - one of CONFIG, NETWORK, TIMEOUT, ABORTED, HTTP, MALFORMED, METHOD_UNAVAILABLE
-     * @param {string} message
-     */
     constructor(code, message) {
         super(message);
         this.name = 'LlmError';
@@ -23,261 +10,156 @@ export class LlmError extends Error {
     }
 }
 
-/**
- * Bounded, redacted detail string — ported from a1111._safeDetail.
- * @param {unknown} err
- * @param {number} maxLen
- */
-function safeDetail(err, maxLen = 200) {
-    let raw = '';
-    if (err instanceof Error) raw = String(err.message ?? err);
-    else if (typeof err === 'string') raw = err;
-    else if (err && typeof err === 'object') {
-        try { raw = JSON.stringify(err); } catch { raw = String(err); }
-    } else raw = String(err);
-    // Strip potential credential substrings
-    raw = raw.replace(/Bearer\s+\S+/gi, 'Bearer [redacted]')
+function safeDetail(error, maxLength = 200, secret = '') {
+    let detail = error instanceof Error ? error.message : String(error ?? '');
+    detail = detail
+        .replace(/Bearer\s+\S+/gi, 'Bearer [redacted]')
         .replace(/Basic\s+\S+/gi, 'Basic [redacted]')
         .replace(/"api[_-]?key"\s*:\s*"[^"]*"/gi, '"api_key": [redacted]')
         .replace(/pst-[A-Za-z0-9._-]+/g, 'pst-[redacted]');
-    if (raw.length > maxLen) raw = raw.slice(0, maxLen) + '…';
-    return raw;
+    if (secret) detail = detail.split(secret).join('[redacted]');
+    return detail.length > maxLength ? `${detail.slice(0, maxLength)}…` : detail;
 }
 
-/** Convert an LLM error into sanitized, actionable UI text. */
-export function formatLlmError(err, action = 'LLM request') {
-    const code = typeof err?.code === 'string' ? err.code : 'NETWORK';
-    if (code === 'ABORTED' || err?.name === 'AbortError') return `${action} was cancelled.`;
+export function formatLlmError(error, action = 'LLM request') {
+    const code = typeof error?.code === 'string' ? error.code : 'NETWORK';
+    if (code === 'ABORTED' || error?.name === 'AbortError') return `${action} was cancelled.`;
     const guidance = {
-        CONFIG: 'LLM is not configured correctly. Open the LLM tab and check the selected profile.',
-        NETWORK: "LLM connection failed. Check the selected API profile or SillyTavern's main API connection.",
+        CONFIG: 'LLM is not configured correctly. Open Connection and select one LLM target.',
+        NETWORK: 'LLM connection failed. Check the selected target and try again.',
         TIMEOUT: 'LLM request timed out. Check the endpoint and try again.',
-        HTTP: 'LLM endpoint rejected the request. Check the profile URL, model, and credentials.',
-        MALFORMED: 'LLM returned an unexpected response. Check the selected model and try again.',
-        METHOD_UNAVAILABLE: 'The selected LLM method is unavailable. Choose another method in the LLM tab.',
-    }[code] ?? 'LLM request failed. Check the selected profile and try again.';
-    const detail = safeDetail(err?.message ?? err);
+        HTTP: 'LLM provider rejected the request. Check the target configuration and provider status.',
+        MALFORMED: 'LLM returned an unreadable response. Try again or choose another model.',
+        METHOD_UNAVAILABLE: 'SillyTavern Connection Manager is unavailable. Enable it or choose a custom LLM target.',
+    }[code] ?? 'LLM request failed.';
+    const detail = safeDetail(error);
     return detail && !guidance.includes(detail) ? `${guidance} Details: ${detail}` : guidance;
 }
 
-/**
- * @param {{
- *   getSettings: () => object,
- *   getContext: () => object,
- *   [fetchImpl]: typeof fetch,
- * }} deps
- */
-export function createLlmClient({ getSettings, getContext, fetchImpl = fetch } = {}) {
-    /**
-     * Dispatch an LLM request.
-     * @param {{ type: string, systemPrompt: string, userPrompt: string,
-     *           profileId?: string, signal?: AbortSignal }} req
-     * @returns {Promise<{ text: string, requestId: string, elapsedMs: number, method: string }>}
-     */
-    async function request({ type, systemPrompt, userPrompt, profileId, signal } = {}) {
-        if (!type || !userPrompt) {
-            throw new LlmError('CONFIG', 'request() requires type and userPrompt.');
-        }
+/** Resolve the sole LLM target. No request type or legacy profile is read. */
+export function resolveLlmTarget(settings = {}) {
+    const llm = settings?.connection?.llm;
+    if (!llm || typeof llm !== 'object') {
+        throw new LlmError('CONFIG', 'No LLM target configured in Connection settings.');
+    }
+    if (llm.mode === 'st_profile') {
+        return { mode: 'st_profile', stProfileId: typeof llm.stProfileId === 'string' ? llm.stProfileId : '' };
+    }
+    if (llm.mode === 'custom') {
+        const custom = llm.custom && typeof llm.custom === 'object' ? llm.custom : {};
+        return {
+            mode: 'custom',
+            baseUrl: typeof custom.baseUrl === 'string' ? custom.baseUrl.trim() : '',
+            apiKey: typeof custom.apiKey === 'string' ? custom.apiKey : '',
+            model: typeof custom.model === 'string' ? custom.model.trim() : '',
+        };
+    }
+    throw new LlmError('CONFIG', 'Unknown LLM target mode. Choose an ST profile or custom target.');
+}
 
-        const requestId = crypto.randomUUID ? crypto.randomUUID() : 'llm_' + Date.now();
-        const settings = getSettings();
-        const ctx = getContext();
-        const profiles = settings.llm?.apiProfiles ?? [];
-        const activeProfileId = profileId ?? settings.llm?.defaultApiProfileId ?? '';
-        const activeProfile = profiles.find(p => p.id === activeProfileId) ?? null;
-        // Method is selected per API profile's `method` field; falls back to
-        // the legacy global defaultMethod when no profile is configured.
-        const method = activeProfile?.method
-            ?? settings.llm?.defaultMethod
-            ?? 'generateRaw';
+/** Return only safe dropdown metadata from ST Connection Manager. */
+export function listStProfiles(context = {}) {
+    const root = context?.extensionSettings ?? context?.extension_settings ?? context;
+    const profiles = root?.connectionManager?.profiles;
+    if (!Array.isArray(profiles)) return [];
+    return profiles
+        .filter(profile => profile && typeof profile.id === 'string' && profile.id)
+        .map(profile => ({ id: profile.id, name: typeof profile.name === 'string' && profile.name ? profile.name : profile.id }));
+}
 
-        // Build a combined user prompt. ST's generateRaw expects a single string
-        // prompt (not chat messages), with systemPrompt passed separately.
-        const fullUserPrompt = userPrompt;
+function extractText(result) {
+    if (typeof result === 'string') return result;
+    if (typeof result?.content === 'string') return result.content;
+    if (typeof result?.choices?.[0]?.message?.content === 'string') return result.choices[0].message.content;
+    return '';
+}
 
-        const startMs = performance.now();
-        let text = '';
+export function createLlmClient({ getSettings, getContext, fetchImpl = globalThis.fetch?.bind(globalThis) } = {}) {
+    if (typeof getSettings !== 'function' || typeof getContext !== 'function') {
+        throw new TypeError('createLlmClient: getSettings and getContext are required.');
+    }
 
-        // Method 1: ST generateRaw (default) — uses the user's current ST API connection.
-        if (method === 'direct' || method === 'st_generate_raw' || method === 'generateRaw') {
-            try {
-                text = await callGenerateRaw(ctx, {
-                    prompt: fullUserPrompt,
-                    systemPrompt,
-                    signal,
-                });
-                return { text, requestId, elapsedMs: performance.now() - startMs, method: 'generateRaw' };
-            } catch (err) {
-                if (err?.name === 'AbortError' || signal?.aborted) {
-                    throw new LlmError('ABORTED', 'LLM request was aborted.');
-                }
-                if (err instanceof LlmError) throw err;
-                throw new LlmError('NETWORK', `generateRaw failed: ${safeDetail(err)}`);
+    /** Dispatch through the one configured target. */
+    async function request({ type, systemPrompt = '', userPrompt, signal } = {}) {
+        if (!type || !userPrompt) throw new LlmError('CONFIG', 'request() requires type and userPrompt.');
+        const target = resolveLlmTarget(getSettings());
+        const context = getContext() ?? {};
+        const requestId = globalThis.crypto?.randomUUID?.() ?? `llm_${Date.now()}`;
+        const startedAt = performance.now();
+        const messages = [];
+        if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
+        messages.push({ role: 'user', content: userPrompt });
+
+        if (target.mode === 'st_profile') {
+            if (!target.stProfileId || !listStProfiles(context).some(profile => profile.id === target.stProfileId)) {
+                throw new LlmError('CONFIG', 'The selected SillyTavern connection profile no longer exists. Choose another profile in Connection.');
             }
-        }
-
-        // Method 2: ConnectionManagerRequestService — use the user's connection profile.
-        // The target is the SillyTavern connection profile id stored on the
-        // API profile as stProfileId, NOT this extension's own profile id:
-        // sendRequest resolves it against extension_settings.connectionManager.
-        if (method === 'st_connection_manager' || method === 'connection_manager') {
-            const stProfileId = activeProfile?.stProfileId ?? '';
-            if (!stProfileId) {
-                throw new LlmError('CONFIG', 'This API profile has no SillyTavern connection profile selected. Pick one in the LLM tab, or switch the method to ST generateRaw.');
+            const service = context.ConnectionManagerRequestService;
+            if (!service || typeof service.sendRequest !== 'function') {
+                throw new LlmError('METHOD_UNAVAILABLE', 'SillyTavern Connection Manager request service is unavailable.');
             }
             try {
-                const CMRS = ctx.ConnectionManagerRequestService;
-                if (!CMRS || typeof CMRS.sendRequest !== 'function') {
-                    console.warn('[IF Image] ConnectionManagerRequestService unavailable, falling back to generateRaw.');
-                    text = await callGenerateRaw(ctx, { prompt: fullUserPrompt, systemPrompt, signal });
-                    return { text, requestId, elapsedMs: performance.now() - startMs, method: 'generateRaw' };
-                }
-                const messages = [];
-                if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
-                messages.push({ role: 'user', content: fullUserPrompt });
-                const result = await CMRS.sendRequest(stProfileId, messages, 4096, {
+                const result = await service.sendRequest(target.stProfileId, messages, 4096, {
                     stream: false,
                     signal,
                     extractData: true,
                 });
-                // result may be ExtractedData with a .content property
-                text = typeof result === 'string' ? result
-                    : typeof result?.content === 'string' ? result.content
-                    : typeof result?.choices?.[0]?.message?.content === 'string' ? result.choices[0].message.content
-                    : JSON.stringify(result);
-                return { text, requestId, elapsedMs: performance.now() - startMs, method: 'connection_manager' };
-            } catch (err) {
-                if (err?.name === 'AbortError' || signal?.aborted) {
-                    throw new LlmError('ABORTED', 'LLM request was aborted.');
-                }
-                if (err instanceof LlmError) throw err;
-                throw new LlmError('NETWORK', `ConnectionManager request failed: ${safeDetail(err)}`);
+                const text = extractText(result);
+                if (!text) throw new LlmError('MALFORMED', 'LLM reply contained no content.');
+                return { text, requestId, elapsedMs: performance.now() - startedAt, method: 'st_profile' };
+            } catch (error) {
+                if (error instanceof LlmError) throw error;
+                if (error?.name === 'AbortError' || signal?.aborted) throw new LlmError('ABORTED', 'LLM request was aborted.');
+                throw new LlmError('NETWORK', `Connection Manager request failed: ${safeDetail(error)}`);
             }
         }
 
-        // Method 3: Direct fetch to an OpenAI-compatible endpoint.
-        if (method === 'direct_fetch') {
-            if (!activeProfile) {
-                throw new LlmError('CONFIG', 'No API profile selected for direct fetch. Configure one in the LLM tab.');
-            }
-            const { baseUrl, apiKey, model, temperature = 0.7, maxTokens = 4096 } = activeProfile;
-            if (!baseUrl || !model) {
-                throw new LlmError('CONFIG', 'API profile requires baseUrl and model.');
-            }
-            const messages = [];
-            if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
-            messages.push({ role: 'user', content: fullUserPrompt });
+        if (!target.baseUrl || !target.model) {
+            throw new LlmError('CONFIG', 'Custom LLM target requires base URL and model.');
+        }
+        if (typeof fetchImpl !== 'function') throw new LlmError('METHOD_UNAVAILABLE', 'Browser fetch is unavailable.');
+        let url;
+        try {
+            const base = new URL(target.baseUrl);
+            if (!['http:', 'https:'].includes(base.protocol) || base.username || base.password) throw new Error('invalid');
+            url = `${base.toString().replace(/\/+$/, '')}/v1/chat/completions`;
+        } catch {
+            throw new LlmError('CONFIG', 'Custom LLM base URL must be an HTTP(S) URL without embedded credentials.');
+        }
 
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 600000);
-            // Chain caller's signal
-            if (signal) signal.addEventListener('abort', () => controller.abort(), { once: true });
-
-            const url = baseUrl.replace(/\/+$/, '') + '/v1/chat/completions';
+        const controller = new AbortController();
+        let timedOut = false;
+        const timeoutId = setTimeout(() => { timedOut = true; controller.abort(); }, 600000);
+        const forwardAbort = () => controller.abort();
+        if (signal?.aborted) controller.abort();
+        else signal?.addEventListener('abort', forwardAbort, { once: true });
+        try {
             const headers = { 'Content-Type': 'application/json' };
-            if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
-
-            let lastError = null;
-            for (let attempt = 0; attempt < 2; attempt++) {
-                try {
-                    const resp = await fetchImpl(url, {
-                        method: 'POST',
-                        headers,
-                        body: JSON.stringify({
-                            model,
-                            messages,
-                            temperature,
-                            max_tokens: maxTokens,
-                        }),
-                        signal: controller.signal,
-                    });
-                    if (!resp.ok) {
-                        const bodyText = await resp.text().catch(() => '');
-                        const detail = safeDetail(bodyText);
-                        // Retry on 5xx
-                        if (resp.status >= 500 && attempt === 0) {
-                            lastError = new LlmError('HTTP', `HTTP ${resp.status}: ${detail}`);
-                            await new Promise(r => setTimeout(r, 2000));
-                            continue;
-                        }
-                        throw new LlmError('HTTP', `HTTP ${resp.status}: ${detail}`);
-                    }
-                    const data = await resp.json();
-                    text = data?.choices?.[0]?.message?.content ?? '';
-                    if (!text) throw new LlmError('MALFORMED', 'LLM reply contained no content.');
-                    clearTimeout(timeoutId);
-                    return { text, requestId, elapsedMs: performance.now() - startMs, method: 'direct_fetch' };
-                } catch (err) {
-                    if (err?.name === 'AbortError') {
-                        clearTimeout(timeoutId);
-                        throw new LlmError('ABORTED', 'LLM request was aborted.');
-                    }
-                    if (err instanceof LlmError) {
-                        // Not retryable here: 4xx/MALFORMED throw directly, and
-                        // the 5xx path already used `continue` for its one retry
-                        // before throwing on the second attempt.
-                        clearTimeout(timeoutId);
-                        throw err;
-                    }
-                    lastError = new LlmError('NETWORK', `Direct fetch failed: ${safeDetail(err)}`);
-                    if (attempt === 0) {
-                        await new Promise(r => setTimeout(r, 2000));
-                        continue;
-                    }
-                }
+            if (target.apiKey) headers.Authorization = `Bearer ${target.apiKey}`;
+            const response = await fetchImpl(url, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({ model: target.model, messages, temperature: 0.7, max_tokens: 4096 }),
+                signal: controller.signal,
+            });
+            if (!response.ok) {
+                const detail = safeDetail(await response.text().catch(() => ''), 200, target.apiKey);
+                throw new LlmError('HTTP', `HTTP ${response.status}${detail ? `: ${detail}` : ''}`);
             }
+            const text = extractText(await response.json());
+            if (!text) throw new LlmError('MALFORMED', 'LLM reply contained no content.');
+            return { text, requestId, elapsedMs: performance.now() - startedAt, method: 'custom' };
+        } catch (error) {
+            if (error instanceof LlmError) throw error;
+            if (error?.name === 'AbortError' || controller.signal.aborted) {
+                throw new LlmError(timedOut ? 'TIMEOUT' : 'ABORTED', timedOut ? 'LLM request timed out.' : 'LLM request was aborted.');
+            }
+            throw new LlmError('NETWORK', `Custom LLM request failed: ${safeDetail(error, 200, target.apiKey)}`);
+        } finally {
             clearTimeout(timeoutId);
-            throw lastError ?? new LlmError('NETWORK', 'Direct fetch failed after retries.');
+            signal?.removeEventListener('abort', forwardAbort);
         }
-
-        // Method 4: ST proxy — not yet implemented.
-        throw new LlmError('METHOD_UNAVAILABLE', 'ST proxy method is not yet implemented. Use direct, st_generate_raw, or direct_fetch.');
     }
 
     return { request };
-}
-
-/**
- * Call ST's generateRaw with abort chaining.
- */
-async function callGenerateRaw(ctx, { prompt, systemPrompt, signal }) {
-    console.log('[IF Image] callGenerateRaw:', {
-        hasGenerateRaw: typeof ctx?.generateRaw === 'function',
-        mainApi: ctx?.main_api,
-        promptLen: prompt?.length,
-        systemPromptLen: systemPrompt?.length,
-    });
-
-    const generateRaw = ctx?.generateRaw;
-    if (typeof generateRaw !== 'function') {
-        throw new LlmError('CONFIG', 'SillyTavern generateRaw is not available. Create an API profile in IF-Image LLM tab (method: direct_fetch or connection_manager), or check ST main API connection.');
-    }
-
-    let stopListener = null;
-    if (signal) {
-        if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
-        stopListener = () => {
-            try { ctx.stopGeneration?.(); } catch { /* best-effort */ }
-        };
-        signal.addEventListener('abort', stopListener, { once: true });
-    }
-
-    let result;
-    try {
-        result = await generateRaw({ prompt, systemPrompt, responseLength: 4096 });
-        console.log('[IF Image] generateRaw success, result type:', typeof result, 'len:', result?.length);
-    } catch (err) {
-        if (err?.name === 'AbortError' || signal?.aborted) throw err;
-        const detail = safeDetail(err);
-        // Never expose the raw error object: provider errors may embed headers.
-        console.error('[IF Image] generateRaw threw:', detail);
-        throw new LlmError('NETWORK', `generateRaw failed: ${detail}`);
-    } finally {
-        if (stopListener && signal) signal.removeEventListener('abort', stopListener);
-    }
-
-    if (typeof result !== 'string') {
-        throw new LlmError('MALFORMED', 'generateRaw returned non-string result.');
-    }
-    return result;
 }

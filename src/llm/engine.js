@@ -6,7 +6,7 @@ import { createLlmClient, LlmError } from './client.js';
 import { buildContext, stripRenderedArtifacts } from './context.js';
 import { renderSystemPrompt, renderUserPrompt, renderChatPlacePrompt, renderChatRewritePrompt, DIALECT_RULES, REWRITE_DIALECT_RULES, REQUEST_PROMPT_RENDERERS } from './prompts.js';
 import { parseLlmReply } from './parser.js';
-import { resolveRequestMapping } from './profiles.js';
+import { resolveContextProfile } from './profiles.js';
 import { validatePlacements, validateRewrites } from './placements.js';
 import { extractSubjectTokens, repairBareSubjectNames, resolveDeclaredSubjects, styleLeakFragments, validateScenePrompt } from './subjects.js';
 
@@ -102,9 +102,8 @@ export function createEngine({
     /** Rewrite marker text through the LLM, validate identity, then compile. */
     async function rewrite(markerText, { previousPrompt, variationHint, signal } = {}) {
         const settings = getSettings();
-        const mapping = resolveRequestMapping(settings, 'image_gen');
-        const profileId = mapping.apiProfile?.id ?? settings.llm?.defaultApiProfileId ?? '';
-        const contextResult = subjectContext({ contextProfile: mapping.contextProfile, additionalRelevanceText: markerText });
+        const contextProfile = resolveContextProfile(settings, 'image_gen');
+        const contextResult = subjectContext({ contextProfile, additionalRelevanceText: markerText });
         const gen = generationContext(markerText);
         const dialectRules = DIALECT_RULES[gen.dialectKey] ?? DIALECT_RULES.anima;
         const systemPrompt = renderSystemPrompt('image_gen', {
@@ -117,7 +116,7 @@ export function createEngine({
 
         let result;
         try {
-            result = await client.request({ type: 'image_gen', systemPrompt, userPrompt, profileId, signal });
+            result = await client.request({ type: 'image_gen', systemPrompt, userPrompt, signal });
         } catch (err) {
             if (err?.code === 'ABORTED' || err?.name === 'AbortError' || signal?.aborted) throw err;
             console.warn('[IF Image] LLM request failed; using direct marker compilation.');
@@ -212,11 +211,6 @@ export function createEngine({
         return errors;
     }
 
-    function resolveProfileIdFor(requestType, settings) {
-        const mapping = resolveRequestMapping(settings, requestType);
-        return mapping.apiProfile?.id ?? settings.llm?.defaultApiProfileId ?? '';
-    }
-
     /**
      * Shared JSON request/validate/retry-once flow for char_design and
      * char_modify (same schema, same validator).
@@ -226,13 +220,11 @@ export function createEngine({
      * @returns {Promise<{ char: object, raw: string, elapsedMs: number }>}
      */
     async function requestCharJson(type, userPrompt, signal) {
-        const settings = getSettings();
         const systemPrompt = REQUEST_PROMPT_RENDERERS[type]();
-        const profileId = resolveProfileIdFor(type, settings);
         let prompt = userPrompt;
         let lastErrors = [];
         for (let attempt = 0; attempt < 2; attempt++) {
-            const result = await client.request({ type, systemPrompt, userPrompt: prompt, profileId, signal });
+            const result = await client.request({ type, systemPrompt, userPrompt: prompt, signal });
             const parsed = parseJsonLoose(result.text);
             const errors = validateCharJson(parsed);
             if (!errors.length) {
@@ -280,11 +272,9 @@ export function createEngine({
      * @returns {Promise<{ tags: string, elapsedMs: number }>}
      */
     async function modifyTags(tagList, instruction, { signal } = {}) {
-        const settings = getSettings();
         const systemPrompt = REQUEST_PROMPT_RENDERERS.tag_modify();
-        const profileId = resolveProfileIdFor('tag_modify', settings);
         const userPrompt = `Current tags: ${tagList}\n\nInstruction: ${instruction}`;
-        const result = await client.request({ type: 'tag_modify', systemPrompt, userPrompt, profileId, signal });
+        const result = await client.request({ type: 'tag_modify', systemPrompt, userPrompt, signal });
         const tags = result.text.trim().split('\n')[0].trim();
         return { tags, elapsedMs: result.elapsedMs };
     }
@@ -297,11 +287,9 @@ export function createEngine({
      * @returns {Promise<{ tags: string, elapsedMs: number }>}
      */
     async function translateFacts(char, { signal } = {}) {
-        const settings = getSettings();
         const systemPrompt = REQUEST_PROMPT_RENDERERS.translation();
-        const profileId = resolveProfileIdFor('translation', settings);
         const userPrompt = `Character facts: ${char?.facts || char?.natural || char?.name || ''}`;
-        const result = await client.request({ type: 'translation', systemPrompt, userPrompt, profileId, signal });
+        const result = await client.request({ type: 'translation', systemPrompt, userPrompt, signal });
         const tags = result.text.trim().split('\n')[0].trim();
         return { tags, elapsedMs: result.elapsedMs };
     }
@@ -319,11 +307,9 @@ export function createEngine({
         const ctx = getContext();
         const name = ctx?.name1 ?? 'User';
         const description = ctx?.powerUserSettings?.persona_description ?? '';
-        const settings = getSettings();
         const systemPrompt = REQUEST_PROMPT_RENDERERS.persona_gen();
-        const profileId = resolveProfileIdFor('persona_gen', settings);
         const userPrompt = `Persona name: ${name}\nPersona description: ${description || '(none set)'}`;
-        const result = await client.request({ type: 'persona_gen', systemPrompt, userPrompt, profileId, signal });
+        const result = await client.request({ type: 'persona_gen', systemPrompt, userPrompt, signal });
         const parsed = parseJsonLoose(result.text);
         if (!parsed || typeof parsed !== 'object' || typeof parsed.name !== 'string' || !parsed.name.trim()) {
             throw new LlmError('MALFORMED', 'persona_gen reply was not a valid persona JSON object.');
@@ -371,13 +357,6 @@ export function createEngine({
             subject_catalog: contextResult.subjectBlock,
         });
         const baseUserPrompt = `Plan ${count} image placements for this conversation.\n\n${contextResult.sceneText}`;
-        const mapping = resolveRequestMapping(settings, 'chat_place');
-        const fallbackMapping = resolveRequestMapping(settings, 'image_gen');
-        const profileId = mapping.apiProfile?.id
-            ?? fallbackMapping.apiProfile?.id
-            ?? settings.llm?.defaultApiProfileId
-            ?? '';
-
         let result;
         let placements = [];
         let lastDiagnostics = [];
@@ -398,7 +377,6 @@ export function createEngine({
                 type: 'chat_place',
                 systemPrompt,
                 userPrompt: baseUserPrompt + correction,
-                profileId,
                 signal,
             });
             const parsed = parseJsonLoose(result.text);
@@ -482,14 +460,9 @@ export function createEngine({
             subject_catalog: contextResult.subjectBlock,
         });
         const userPrompt = `Rewrite these ${placements.length} prompts against their chat excerpts.\n\n${items.join('\n\n')}`;
-        const profileId = resolveRequestMapping(settings, 'chat_rewrite').apiProfile?.id
-            ?? resolveRequestMapping(settings, 'chat_place').apiProfile?.id
-            ?? resolveRequestMapping(settings, 'image_gen').apiProfile?.id
-            ?? settings.llm?.defaultApiProfileId
-            ?? '';
 
         try {
-            const result = await client.request({ type: 'chat_rewrite', systemPrompt, userPrompt, profileId, signal });
+            const result = await client.request({ type: 'chat_rewrite', systemPrompt, userPrompt, signal });
             const parsed = parseJsonLoose(result.text);
             if (!parsed) {
                 return { placements, rewritten: false, changed: 0, rejected: [], elapsedMs: result.elapsedMs, error: 'reply was not valid JSON' };

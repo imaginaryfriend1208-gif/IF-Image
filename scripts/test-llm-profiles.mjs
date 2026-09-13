@@ -65,7 +65,7 @@ test('import rejects bad format, duplicate ids, unsafe direct URLs, and methods'
 test('friendly LLM errors are actionable and sanitized', () => {
     const message = formatLlmError(new LlmError('NETWORK', 'generateRaw failed: Bearer hidden-token'), 'Plan & Place');
     assert.match(message, /LLM connection failed/);
-    assert.match(message, /check the selected API profile/i);
+    assert.match(message, /check the selected target/i);
     assert.doesNotMatch(message, /hidden-token/);
     assert.match(message, /\[redacted\]/);
     assert.equal(formatLlmError(new LlmError('ABORTED', 'x'), 'Profile test'), 'Profile test was cancelled.');

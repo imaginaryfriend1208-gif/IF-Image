@@ -372,20 +372,16 @@ jQuery(async () => {
 
         let ctx;
         try { ctx = getContext(); } catch { return false; }
-        const llm = settings.llm ?? {};
-        const profiles = Array.isArray(llm.apiProfiles) ? llm.apiProfiles : [];
-        const mappedId = llm.requestMapping?.persona_gen?.apiProfileId ?? '';
-        const profile = profiles.find(item => item.id === mappedId)
-            ?? profiles.find(item => item.id === llm.defaultApiProfileId)
-            ?? null;
-        const method = profile?.method ?? llm.defaultMethod ?? 'generateRaw';
-        const rawMethod = ['direct', 'st_generate_raw', 'generateRaw'].includes(method);
-        const cmMethod = ['st_connection_manager', 'connection_manager'].includes(method);
-        const canUseRaw = typeof ctx?.generateRaw === 'function';
-        const canUseCm = cmMethod && Boolean(profile?.stProfileId)
-            && (typeof ctx?.ConnectionManagerRequestService?.sendRequest === 'function' || canUseRaw);
-        const canUseDirectFetch = method === 'direct_fetch' && Boolean(profile?.baseUrl && profile?.model);
-        if (!(rawMethod && canUseRaw) && !canUseCm && !canUseDirectFetch) return false;
+        const llmTarget = settings.connection?.llm ?? {};
+        const stProfiles = ctx?.extensionSettings?.connectionManager?.profiles;
+        const canUseStProfile = llmTarget.mode === 'st_profile'
+            && Boolean(llmTarget.stProfileId)
+            && Array.isArray(stProfiles)
+            && stProfiles.some(profile => profile?.id === llmTarget.stProfileId)
+            && typeof ctx?.ConnectionManagerRequestService?.sendRequest === 'function';
+        const canUseCustom = llmTarget.mode === 'custom'
+            && Boolean(llmTarget.custom?.baseUrl && llmTarget.custom?.model);
+        if (!canUseStProfile && !canUseCustom) return false;
 
         try {
             const result = await syncPersonaRequest();
