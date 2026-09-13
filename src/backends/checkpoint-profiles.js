@@ -296,6 +296,7 @@ export function mergeParams({ profileKey, checkpointTitle, profileId, settings, 
         if (Number.isInteger(layer.seed) && layer.seed >= -1) params.seed = layer.seed;
     };
     applyLayer(settings?.generation?.params?.[profileKey], false);
+    applyLayer(settings?.generate?.overrides, false);
     if (profileId) {
         applyLayer(settings?.backends?.a1111?.checkpointProfiles?.[profileId], false);
     }

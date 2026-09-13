@@ -9,8 +9,7 @@ import { resolveProfileKey } from './render.js';
 
 /** Effective backend kind for chat generation. */
 export function resolveBackendKind(settings = {}) {
-    if (settings.generation?.backend === 'nai') return 'nai';
-    return settings.backends?.comfy?.connection === 'a1111' ? 'a1111' : 'comfy';
+    return settings.connection?.imageBackend === 'nai' ? 'nai' : 'comfy';
 }
 
 /**
@@ -21,7 +20,7 @@ export function resolveGenerationContext({
     settings = {}, roster = {}, chatStyleId = '', parsedTriggers = null,
 } = {}) {
     const backendKind = resolveBackendKind(settings);
-    const activeCheckpointProfile = backendKind === 'a1111' ? getActiveProfile(settings) : null;
+    const activeCheckpointProfile = backendKind === 'comfy' ? getActiveProfile(settings) : null;
     const configuredProfileKey = activeCheckpointProfile?.entry?.profile
         ?? settings.generation?.profile
         ?? settings.backends?.comfy?.profile
@@ -38,8 +37,9 @@ export function resolveGenerationContext({
         defaultStyleId: settings.generation?.defaultStyleId,
         styles,
     });
-    const checkpointTitle = backendKind === 'a1111'
-        ? (activeCheckpointProfile?.entry?.checkpoint
+    const checkpointTitle = backendKind === 'comfy'
+        ? (settings.connection?.comfy?.model
+            || activeCheckpointProfile?.entry?.checkpoint
             || settings.generation?.checkpoint
             || settings.backends?.a1111?.checkpoint
             || '')

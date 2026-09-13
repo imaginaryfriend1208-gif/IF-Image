@@ -3,9 +3,8 @@
 // never uses ST secrets or ST server APIs for generation.
 
 import { getSettings, saveSettings } from './src/settings.js';
-import { NaiClient } from './src/backends/nai.js';
+import { createImageBackend } from './src/backends/image-backend.js';
 import { ComfyProxyClient } from './src/backends/comfy.js';
-import { A1111Client } from './src/backends/a1111.js';
 import { renderDrawer, createEditDialog } from './src/ui.js';
 import { createMarkerRuntime } from './src/runtime/events.js';
 import { createTaskQueue } from './src/runtime/tasks.js';
@@ -19,7 +18,7 @@ import { getAllOutfits, saveOutfit } from './src/storage/outfits.js';
 import { writeMetadata, isPng } from './src/storage/png-metadata.js';
 import { resolveActiveCharacters } from './src/prompt/binding.js';
 import { parseTriggers } from './src/prompt/triggers.js';
-import { assemblePrompt, mergeProfileParams, applyMarkerParamOverrides, resolveLockedSeed, resolveSizeKeyword } from './src/prompt/render.js';
+import { assemblePrompt, mergeProfileParams, resolveLockedSeed, resolveSizeKeyword } from './src/prompt/render.js';
 import { mergeParams } from './src/backends/checkpoint-profiles.js';
 import { cleanupEnvelope } from './src/prompt/cleanup.js';
 import { applyReplaceRules } from './src/prompt/replace.js';
@@ -44,27 +43,18 @@ import { getContext } from '../../../st-context.js';
 
 const settings = getSettings();
 
-// D5: the second (optional) argument surfaces the Variety+ toggle live.
-const nai = new NaiClient(
-    () => settings.backends.nai.apiKey,
-    () => ({ variety: settings.backends.nai.variety === true }),
+const imageBackend = createImageBackend(
+    () => settings.connection,
+    { getRequestHeaders: () => getContext().getRequestHeaders() },
 );
+// Temporary UI adapters. Runtime generation uses imageBackend exclusively;
+// P5 replaces these legacy controls with the connection-first UI.
+const nai = imageBackend.getClient('nai');
+const a1111 = imageBackend.getClient('comfy');
 const comfy = new ComfyProxyClient({
     getBaseUrl: () => settings.backends.comfy.baseUrl,
     getUsername: () => settings.backends.comfy.username,
     getPassword: () => settings.backends.comfy.password,
-});
-// AUTOMATIC1111-compatible hosted API. The Authentication string is passed
-// through verbatim (ST getBasicAuthHeader semantics: UTF-8 base64 of the raw
-// string, no colon insertion, no Bearer fallback).
-const a1111 = new A1111Client({
-    getBaseUrl: () => settings.backends.a1111.baseUrl,
-    getAuth: () => settings.backends.a1111.auth,
-    // 'st-relay' routes through SillyTavern's /api/sd/* like the built-in
-    // Image Generation extension (no backend CORS needed); 'direct' keeps
-    // the browser-to-backend path. Read live so the UI toggle applies at once.
-    getTransport: () => settings.backends.a1111.transport,
-    getRequestHeaders: () => getContext().getRequestHeaders(),
 });
 
 function notify(kind, message) {
@@ -185,7 +175,7 @@ jQuery(async () => {
     // ------------------------------------------------------------------
     // Queue + pipeline
     // ------------------------------------------------------------------
-    const execute = createExecutor({ nai, comfy, a1111, getSettings: () => settings });
+    const execute = createExecutor({ imageBackend, getSettings: () => settings });
 
     function parseContent(content, { warnFallback = true } = {}) {
         const activeRoster = resolveActiveCharacters(roster.characters, currentCardId(), getContext().getCurrentChatId?.());
@@ -232,7 +222,8 @@ jQuery(async () => {
         const checkpointTitle = generation.checkpointTitle;
         const profileKey = generation.profileKey;
         const baseProfile = generation.profile;
-        const effectiveProfile = mergeProfileParams(baseProfile, settings.generation?.params?.[profileKey]);
+        const legacyProfile = mergeProfileParams(baseProfile, settings.generation?.params?.[profileKey]);
+        const effectiveProfile = mergeProfileParams(legacyProfile, settings.generate?.overrides);
         const assembled = assemblePrompt(parsed, baseProfile.dialect, effectiveProfile);
 
         // LoRA tokens must not reach the tag pipeline: normalizeBooruTags and
@@ -286,24 +277,18 @@ jQuery(async () => {
         // JSON seed beats the lock) — logic lives in render.js for testing.
         const lockedSeed = resolveLockedSeed(parsed.characters, markerOverrides);
         if (lockedSeed !== undefined) params.seed = lockedSeed;
-        if (backendKind === 'a1111' && checkpointTitle) {
-            // R2: five-layer numeric precedence (PROFILES < settings params
-            // < checkpoint profile < marker JSON; LLM <size> is applied
-            // later by the pipeline's applyOverrides). checkpoint/sampler/
-            // scheduler ride on params so they survive the queue's declared
-            // snapshot projection (prompt envelope is cloned whole).
-            const merged = mergeParams({
-                profileKey,
-                checkpointTitle,
-                profileId: activeProfile?.id,
-                settings,
-                markerOverrides,
-            });
-            Object.assign(params, merged);
-        } else {
-            // Legacy proxy and NAI paths: unchanged C0 behavior.
-            applyMarkerParamOverrides(params, markerOverrides);
-        }
+        // Five-layer precedence remains centralized in mergeParams. The
+        // connection model is carried separately as checkpoint/model and is
+        // overridden only by an explicit marker/LLM envelope value.
+        const merged = mergeParams({
+            profileKey,
+            checkpointTitle: backendKind === 'comfy' ? checkpointTitle : undefined,
+            profileId: backendKind === 'comfy' ? activeProfile?.id : undefined,
+            settings,
+            markerOverrides,
+        });
+        Object.assign(params, merged);
+        if (backendKind === 'nai') params.model = settings.connection?.nai?.model || '';
         return {
             profileKey,
             envelope: {
@@ -515,12 +500,13 @@ jQuery(async () => {
         // R2: a regenerated image must use the same model as the original.
         // Fall back to the current selection only when the record has none
         // (pre-R2 records).
-        if (backendKind === 'a1111') {
+        if (backendKind === 'comfy' || backendKind === 'a1111') {
             params.checkpoint = record.checkpoint
                 || params.checkpoint
-                || settings.generation?.checkpoint
-                || settings.backends.a1111.checkpoint
+                || settings.connection?.comfy?.model
                 || '';
+        } else if (backendKind === 'nai') {
+            params.model = params.model || settings.connection?.nai?.model || '';
         }
         const characters = Array.isArray(record.characters) ? record.characters : [];
         const taskId = queue.addTask({

@@ -14,6 +14,7 @@ export const NAI_MODELS = [
     { value: 'nai-diffusion-4-5-full', text: 'NAI Diffusion Anime V4.5 (Full)' },
     { value: 'nai-diffusion-4-5-curated', text: 'NAI Diffusion Anime V4.5 (Curated)' },
     { value: 'nai-diffusion-4-full', text: 'NAI Diffusion Anime V4 (Full)' },
+    { value: 'nai-diffusion-3', text: 'NAI Diffusion Anime V3' },
 ];
 
 // Tier mapping mirrors ST public/scripts/nai-settings.js
@@ -115,9 +116,13 @@ export class NaiClient {
      *   options getter (settings-backed). `variety: true` enables Variety+
      *   (skip_cfg_above_sigma). Single-argument construction keeps working.
      */
-    constructor(getApiKey, getOptions = () => ({})) {
+    constructor(getApiKey, getOptions = () => ({}), fetchImpl = globalThis.fetch?.bind(globalThis)) {
         this.getApiKey = getApiKey;
         this.getOptions = getOptions;
+        this.fetchImpl = fetchImpl;
+        if (typeof this.fetchImpl !== 'function') {
+            throw new TypeError('NaiClient: no fetch implementation available.');
+        }
     }
 
     authHeaders() {
@@ -130,8 +135,11 @@ export class NaiClient {
      * Verify the token and read the subscription state. Free, costs no Anlas.
      * @returns {Promise<{tier: string, active: boolean, anlas: number, unlimitedImageGeneration: boolean}>}
      */
-    async ping() {
-        const response = await fetch(`${API_NOVELAI}/user/subscription`, { headers: this.authHeaders() });
+    async ping({ signal } = {}) {
+        const response = await this.fetchImpl(`${API_NOVELAI}/user/subscription`, {
+            headers: this.authHeaders(),
+            ...(signal ? { signal } : {}),
+        });
         if (!response.ok) {
             throw new Error(describeNaiError(response.status, await response.text().catch(() => '')));
         }
@@ -145,6 +153,12 @@ export class NaiClient {
                 + (data.trainingStepsLeft?.purchasedTrainingStepsLeft ?? 0),
             unlimitedImageGeneration: Boolean(data.perks?.unlimitedImageGeneration),
         };
+    }
+
+    /** Verify a configured key without exposing subscription details. */
+    async verifyKey({ signal } = {}) {
+        await this.ping({ signal });
+        return { ok: true };
     }
 
     /**
@@ -233,7 +247,7 @@ export class NaiClient {
             },
         };
 
-        const response = await fetch(`${IMAGE_NOVELAI}/ai/generate-image`, {
+        const response = await this.fetchImpl(`${IMAGE_NOVELAI}/ai/generate-image`, {
             method: 'POST',
             headers: this.authHeaders(),
             body: JSON.stringify(body),

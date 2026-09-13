@@ -39,6 +39,8 @@ export const defaultSettings = {
         nai: {
             apiKey: '',
             model: 'nai-diffusion-4-5-full',
+            modelList: [],
+            lastFetchedAt: 0,
         },
         llm: {
             mode: 'st_profile',

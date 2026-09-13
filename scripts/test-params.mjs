@@ -284,6 +284,22 @@ test('mergeParams: five-layer precedence PROFILES < settings < saved profile < m
     assert.equal(p.steps, 12);
 });
 
+test('mergeParams: generate.overrides replaces the migrated settings layer and marker still wins', () => {
+    const settings = {
+        generation: { params: { anima: { steps: 20, cfg: 3 } } },
+        generate: { overrides: { steps: 30, cfg: 6, sampler: 'Euler', seed: 77 } },
+        backends: { a1111: { checkpointProfiles: {} } },
+    };
+    const base = mergeParams({ profileKey: 'anima', settings });
+    assert.equal(base.steps, 30);
+    assert.equal(base.cfg, 6);
+    assert.equal(base.sampler, 'Euler');
+    assert.equal(base.seed, 77);
+    const marked = mergeParams({ profileKey: 'anima', settings, markerOverrides: { steps: 12, seed: -1 } });
+    assert.equal(marked.steps, 12);
+    assert.equal(marked.seed, -1);
+});
+
 test('mergeParams: C0 clamps hold on every layer; lone marker width is ignored', () => {
     const settings = {
         generation: { params: { anima: { width: 4000, steps: 999 } } },
