@@ -60,7 +60,7 @@ function defaultBackendKind() {
 
 function defaultProfileKey() {
     // null-safe: undefined → fallback chain
-    return settings.generation.profile || settings.backends.comfy.profile || 'anima';
+    return settings.generation.profile || 'anima';
 }
 
 function messageElement(id) {
