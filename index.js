@@ -27,6 +27,7 @@ import { resolveBackendKind, resolveGenerationContext } from './src/prompt/gener
 import { buildSubjectCatalog, extractSubjectTokens, repairBareSubjectNames, resolveDeclaredSubjects, styleLeakFragments, validateScenePrompt } from './src/llm/subjects.js';
 import { PROFILES } from './src/profiles.js';
 import { createEngine } from './src/llm/engine.js';
+import { createLlmClient } from './src/llm/client.js';
 import { applyPlacements as injectPlacements } from './src/llm/inject.js';
 import { parseLlmReply } from './src/llm/parser.js';
 import { event_types, eventSource, extension_prompts } from '../../../../script.js';
